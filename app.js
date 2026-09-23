@@ -1,5 +1,5 @@
 /* =========================================================
-   MRP Planner v1.2
+   MRP Planner v1.3
    ========================================================= */
 const STATE = {
   config: null,
@@ -7,8 +7,12 @@ const STATE = {
   batches: [],
   inventory: {},
   partIndex: {},
-  scrap: [],        // [{id, partNo, qty, ubication, note, date}]
-  plan: []
+  scrap: [],
+  plan: [],
+  batchView: {           // column filter/sort state for batch table
+    sorts:   {},         // colId -> 'asc' | 'desc'
+    filters: {}          // colId -> Set of allowed keys
+  }
 };
 
 const $  = (s, r=document) => r.querySelector(s);
@@ -17,6 +21,22 @@ const fmt = n => (n==null||isNaN(n)) ? '' : Number(n).toLocaleString(undefined,{
 const today = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
 const LS_CONFIG = 'mrp.configOverrides.v1';
 const LS_SCRAP  = 'mrp.scrap.v2';
+
+/* Batch table column definitions */
+const BATCH_COLS = [
+  { id:'batch',      label:'Batch' },
+  { id:'model',      label:'Model' },
+  { id:'color',      label:'Color' },
+  { id:'qty',        label:'Qty', num:true, sortable:true },
+  { id:'ship',       label:'Ship' },
+  { id:'arrival',    label:'Arrival',   date:true },
+  { id:'decanting',  label:'Decanting', date:true },
+  { id:'trimIn',     label:'Trim-in',   date:true },
+  { id:'production', label:'Production' },
+  { id:'stage',      label:'Stage' },
+  { id:'warehouse',  label:'Warehouse' },
+  { id:'linkedBom',  label:'Linked BOM' }
+];
 
 /* =========================================================
    BOOT
@@ -28,6 +48,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindTabs();
   bindUploads();
   bindButtons();
+  bindFilterPopupGlobal();
   renderConversionTable();
   renderWarehouseEditor();
   renderWarehouseChecklist();
@@ -406,6 +427,7 @@ async function handleBatchFiles(files) {
   try {
     const rows = await fileToRows(f);
     STATE.batches = parseBatches(rows);
+    STATE.batchView = { sorts: {}, filters: {} };
     classifyBatches();
     renderBatchStats();
     renderBatchTable();
@@ -489,13 +511,6 @@ function parseDate(v) {
   return isNaN(d) ? null : d;
 }
 
-/* ---------- Classification priority (verified) ----------
-   1. trimIn < today AND Production == DONE       → consumed
-   2. arrival > today                             → inTransit
-   3. decanting <= today                          → factoryFloor
-   4. arrival <= today AND no/past-future decant  → warehouse
-   5. otherwise                                   → unassigned
---------------------------------------------------------- */
 function classifyBatches() {
   const t = today();
   for (const b of STATE.batches) {
@@ -538,22 +553,83 @@ function resolveModelForBatch(batch) {
 }
 
 /* =========================================================
-   BATCH RENDERING (with per-stage stats + filter)
+   BATCH CELL VALUE HELPERS (for filter/sort)
+   ========================================================= */
+function getBatchCellValue(b, colId) {
+  switch (colId) {
+    case 'batch':      return b.batch || '';
+    case 'model':      return b.model || '';
+    case 'color':      return b.color || '';
+    case 'qty':        return b.qty || 0;
+    case 'ship':       return b.ship || '';
+    case 'arrival':    return b.arrival   ? isoDate(b.arrival)   : '';
+    case 'decanting':  return b.decanting ? isoDate(b.decanting) : '';
+    case 'trimIn':     return b.trimIn    ? isoDate(b.trimIn)    : '';
+    case 'production': return b.production || '';
+    case 'stage':      return b._stage || '';
+    case 'warehouse':  return b._warehouse || '';
+    case 'linkedBom':  return resolveModelForBatch(b) || '';
+  }
+  return '';
+}
+function isoDate(d) {
+  if (!d) return '';
+  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+}
+
+/* Display label for a cell value (used in filter popup + rendering) */
+function getBatchCellLabel(b, colId) {
+  const v = getBatchCellValue(b, colId);
+  if (colId === 'stage') {
+    const s = STATE.config.stages[v];
+    return s ? s.label : v;
+  }
+  if (colId === 'warehouse') {
+    if (!v) return '—';
+    const w = STATE.config.warehouses.find(x => x.id === v);
+    return w ? w.name : v;
+  }
+  if (colId === 'arrival' || colId === 'decanting' || colId === 'trimIn') {
+    return v ? new Date(v + 'T00:00:00').toLocaleDateString() : '—';
+  }
+  if (colId === 'qty') return fmt(v);
+  return v === '' ? '—' : String(v);
+}
+
+/* Unique values for a column → [{ key, label }] */
+function getUniqueValues(colId) {
+  const seen = new Map();
+  for (const b of STATE.batches) {
+    const key   = getBatchCellValue(b, colId);
+    const label = getBatchCellLabel(b, colId);
+    if (!seen.has(key)) seen.set(key, label);
+  }
+  return Array.from(seen.entries())
+    .map(([key, label]) => ({ key: String(key), label }))
+    .sort((a, b) => String(a.label).localeCompare(String(b.label), undefined, { numeric: true }));
+}
+
+/* =========================================================
+   BATCH STATS (with per-model breakdown)
    ========================================================= */
 function renderBatchStats() {
   const stages = STATE.config.stages;
 
-  // aggregate count + qty per stage
+  // aggregate per stage
   const agg = {};
   for (const b of STATE.batches) {
-    if (!agg[b._stage]) agg[b._stage] = { count: 0, qty: 0 };
+    if (!agg[b._stage]) agg[b._stage] = { count: 0, qty: 0, byModel: {} };
     agg[b._stage].count += 1;
     agg[b._stage].qty   += (b.qty || 0);
+    const m = b.model || '—';
+    if (!agg[b._stage].byModel[m]) agg[b._stage].byModel[m] = { count: 0, qty: 0 };
+    agg[b._stage].byModel[m].count += 1;
+    agg[b._stage].byModel[m].qty   += (b.qty || 0);
   }
   const totalCount = STATE.batches.length;
   const totalQty   = STATE.batches.reduce((a,b) => a + (b.qty||0), 0);
 
-  // tooltips explaining each rule
   const rules = {
     inTransit:    'Arrival Date is in the future',
     warehouse:    'Arrived, not yet decanted',
@@ -562,98 +638,147 @@ function renderBatchStats() {
     consumed:     'TRIM IN DATE in the past and Production = DONE'
   };
 
+  function breakdownHtml(byModel) {
+    const entries = Object.entries(byModel || {})
+      .sort((a,b) => b[1].qty - a[1].qty);
+    if (!entries.length) return '';
+    return `<div class="byModel">
+      ${entries.map(([m, v]) => `
+        <div class="byModel-row">
+          <span class="m-name" title="${escapeHtml(m)}">${escapeHtml(shorten(m, 22))}</span>
+          <span class="m-val">${fmt(v.qty)} <small>v · ${v.count} b</small></span>
+        </div>
+      `).join('')}
+    </div>`;
+  }
+
   $('#batchStats').innerHTML = `
     <div class="stat">
-      <div class="label">Batches</div>
-      <div class="value">${fmt(totalCount)}</div>
-      <div class="sub">Total vehicles: <b>${fmt(totalQty)}</b></div>
+      <div class="label">All batches</div>
+      <div class="value">${fmt(totalQty)}<span class="unit">vehicles</span></div>
+      <div class="sub"><b>${fmt(totalCount)}</b> batches total</div>
     </div>
-    ${Object.entries(stages).map(([k,s]) => {
-      const a = agg[k] || { count:0, qty:0 };
+    ${Object.entries(stages).map(([k, s]) => {
+      const a = agg[k] || { count:0, qty:0, byModel:{} };
       return `
         <div class="stat" title="${escapeHtml(rules[k]||'')}">
           <div class="label">
             <span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span>
           </div>
           <div class="value">${fmt(a.qty)}<span class="unit">vehicles</span></div>
-          <div class="sub"><b>${fmt(a.count)}</b> batch${a.count===1?'':'es'}</div>
+          <div class="sub"><b>${fmt(a.count)}</b> batches</div>
+          ${breakdownHtml(a.byModel)}
         </div>`;
     }).join('')}
     <div class="stat" title="Could not be classified automatically">
       <div class="label">Unassigned</div>
       <div class="value">${fmt((agg.unassigned||{}).qty||0)}<span class="unit">vehicles</span></div>
       <div class="sub"><b>${fmt((agg.unassigned||{}).count||0)}</b> batches</div>
+      ${breakdownHtml((agg.unassigned||{}).byModel)}
     </div>
   `;
 }
 
+/* =========================================================
+   BATCH TABLE (with column filters + sorts)
+   ========================================================= */
 function renderBatchTable() {
   const tbl = $('#batchTable');
-  if (!STATE.batches.length) { tbl.innerHTML = `<thead><tr><th>No batch data</th></tr></thead>`; return; }
-
-  const stages = STATE.config.stages;
-  const whOpts = STATE.config.warehouses.filter(w => w.enabled);
-
-  const stageFilter = $('#batchStageFilter') ? $('#batchStageFilter').value : 'all';
-  const searchText  = ($('#batchSearch') ? $('#batchSearch').value : '').trim().toLowerCase();
-
-  // Preserve original index for correct mutation
-  const filtered = STATE.batches
-    .map((b, i) => ({ b, i }))
-    .filter(({ b }) => {
-      if (stageFilter !== 'all' && b._stage !== stageFilter) return false;
-      if (searchText) {
-        const hay = `${b.batch} ${b.model} ${b.color} ${b.ship} ${b.production}`.toLowerCase();
-        if (!hay.includes(searchText)) return false;
-      }
-      return true;
-    });
-
-  if (!filtered.length) {
-    tbl.innerHTML = `<thead><tr><th>No batches match the current filter</th></tr></thead>`;
+  if (!STATE.batches.length) {
+    tbl.innerHTML = `<thead><tr><th>No batch data</th></tr></thead>`;
     return;
   }
 
-  tbl.innerHTML = `
-    <thead><tr>
-      <th>Batch</th><th>Model</th><th>Color</th>
-      <th class="num">Qty</th>
-      <th>Ship</th><th>Arrival</th><th>Decanting</th><th>Trim-in</th>
-      <th>Production</th><th>Stage</th><th>Warehouse</th>
-      <th>Linked BOM</th>
-    </tr></thead>
-    <tbody>
-      ${filtered.map(({ b, i }) => {
-        const s = stages[b._stage] || { label: b._stage, color:'#9ca3af' };
-        const linkedModel = resolveModelForBatch(b);
-        const linkCell = linkedModel
-          ? `<span title="${escapeHtml(linkedModel)}">${escapeHtml(shorten(linkedModel,18))}</span>`
-          : (b.model
-              ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
-              : '—');
-        return `
-          <tr data-i="${i}">
-            <td>${escapeHtml(b.batch)}</td>
-            <td>${escapeHtml(b.model)}</td>
-            <td>${escapeHtml(b.color)}</td>
-            <td class="num">${fmt(b.qty)}</td>
-            <td>${escapeHtml(b.ship)}</td>
-            <td>${b.arrival   ? b.arrival.toLocaleDateString()   : '—'}</td>
-            <td>${b.decanting ? b.decanting.toLocaleDateString() : '—'}</td>
-            <td>${b.trimIn    ? b.trimIn.toLocaleDateString()    : '—'}</td>
-            <td>${escapeHtml(b.production)}</td>
-            <td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>
-            <td>${b._stage === 'warehouse' ? `
-              <select data-role="wh" data-i="${i}">
-                <option value="">—</option>
-                ${whOpts.map(w => `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}
-              </select>` : '—'}</td>
-            <td>${linkCell}</td>
-          </tr>`;
-      }).join('')}
-    </tbody>
-  `;
+  const searchText = ($('#batchSearch').value || '').trim().toLowerCase();
 
+  // 1) filter
+  let list = STATE.batches.map((b, i) => ({ b, i }));
+  for (const [colId, allowedSet] of Object.entries(STATE.batchView.filters)) {
+    if (!allowedSet) continue;
+    list = list.filter(({ b }) => allowedSet.has(String(getBatchCellValue(b, colId))));
+  }
+  if (searchText) {
+    list = list.filter(({ b }) => {
+      const hay = `${b.batch} ${b.model} ${b.color} ${b.ship} ${b.production}`.toLowerCase();
+      return hay.includes(searchText);
+    });
+  }
+
+  // 2) sort
+  const sortCol = Object.keys(STATE.batchView.sorts)[0]; // only one active sort at a time
+  if (sortCol) {
+    const dir = STATE.batchView.sorts[sortCol] === 'desc' ? -1 : 1;
+    list.sort((x, y) => {
+      const a = getBatchCellValue(x.b, sortCol);
+      const b = getBatchCellValue(y.b, sortCol);
+      if (sortCol === 'qty') return (Number(a)||0) - (Number(b)||0) < 0 ? -1 * dir : 1 * dir;
+      return String(a).localeCompare(String(b), undefined, { numeric: true }) * dir;
+    });
+  }
+
+  // 3) header
+  const header = BATCH_COLS.map(col => {
+    const cls = [
+      'col-head',
+      col.num ? 'num' : '',
+      STATE.batchView.filters[col.id] ? 'filtered' : '',
+      STATE.batchView.sorts[col.id]   ? 'sorted'   : ''
+    ].filter(Boolean).join(' ');
+    const mark = STATE.batchView.sorts[col.id] === 'asc' ? '▲'
+               : STATE.batchView.sorts[col.id] === 'desc' ? '▼' : '';
+    return `<th class="${cls}" data-col="${col.id}">
+      ${escapeHtml(col.label)}${mark ? `<span class="sort-mark">${mark}</span>` : ''}
+      <button class="filter-btn" data-col="${col.id}" title="Sort / filter">▾</button>
+    </th>`;
+  }).join('');
+
+  // 4) rows
+  const whOpts = STATE.config.warehouses.filter(w => w.enabled);
+  const stages = STATE.config.stages;
+
+  const body = list.map(({ b, i }) => {
+    const s = stages[b._stage] || { label: b._stage, color:'#9ca3af' };
+    const linkedModel = resolveModelForBatch(b);
+    const linkCell = linkedModel
+      ? `<span title="${escapeHtml(linkedModel)}">${escapeHtml(shorten(linkedModel,18))}</span>`
+      : (b.model
+          ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
+          : '—');
+    const whLabel = b._warehouse
+      ? (STATE.config.warehouses.find(w => w.id === b._warehouse)?.name || b._warehouse)
+      : '—';
+    return `
+      <tr data-i="${i}">
+        <td>${escapeHtml(b.batch)}</td>
+        <td>${escapeHtml(b.model)}</td>
+        <td>${escapeHtml(b.color)}</td>
+        <td class="num">${fmt(b.qty)}</td>
+        <td>${escapeHtml(b.ship)}</td>
+        <td>${b.arrival   ? b.arrival.toLocaleDateString()   : '—'}</td>
+        <td>${b.decanting ? b.decanting.toLocaleDateString() : '—'}</td>
+        <td>${b.trimIn    ? b.trimIn.toLocaleDateString()    : '—'}</td>
+        <td>${escapeHtml(b.production)}</td>
+        <td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>
+        <td>${b._stage === 'warehouse' ? `
+          <select data-role="wh" data-i="${i}">
+            <option value="">—</option>
+            ${whOpts.map(w => `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}
+          </select>` : escapeHtml(whLabel)}</td>
+        <td>${linkCell}</td>
+      </tr>`;
+  }).join('');
+
+  tbl.innerHTML = `<thead><tr>${header}</tr></thead><tbody>${body || `<tr><td colspan="12" style="text-align:center;color:#6b7280;padding:16px">No batches match the current filters</td></tr>`}</tbody>`;
+
+  // 5) wire filter buttons
+  tbl.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openFilterPopup(btn.dataset.col, btn);
+    });
+  });
+
+  // 6) wire warehouse selects
   tbl.querySelectorAll('select[data-role=wh]').forEach(sel => {
     sel.addEventListener('change', e => {
       const i = +e.target.dataset.i;
@@ -664,10 +789,175 @@ function renderBatchTable() {
 }
 
 /* =========================================================
+   FILTER POPUP
+   ========================================================= */
+function bindFilterPopupGlobal() {
+  // close on outside click
+  document.addEventListener('click', e => {
+    const popup = $('#filterPopup');
+    if (popup.classList.contains('hidden')) return;
+    if (popup.contains(e.target)) return;
+    if (e.target.closest('.filter-btn')) return;
+    closeFilterPopup();
+  });
+  // close on scroll of any ancestor (position is fixed)
+  window.addEventListener('scroll', closeFilterPopup, true);
+  window.addEventListener('resize', closeFilterPopup);
+}
+
+function closeFilterPopup() {
+  const popup = $('#filterPopup');
+  popup.classList.add('hidden');
+  popup.innerHTML = '';
+  popup._workingSet = null;
+  popup._search = '';
+}
+
+function openFilterPopup(colId, anchor) {
+  const popup = $('#filterPopup');
+  popup.dataset.col = colId;
+  const existingFilter = STATE.batchView.filters[colId];
+  popup._workingSet = existingFilter ? new Set(existingFilter) : null; // null = all
+  popup._search = '';
+  popup.classList.remove('hidden');
+  positionPopup(popup, anchor);
+  paintFilterPopup(colId);
+}
+
+function positionPopup(popup, anchor) {
+  const r = anchor.getBoundingClientRect();
+  const pw = 270, ph = 420;
+  let left = r.right - pw;                            // right-align to button
+  if (left < 8) left = 8;
+  if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+
+  let top = r.bottom + 6;
+  if (top + ph > window.innerHeight - 8) {
+    top = Math.max(8, r.top - ph - 6);                // open upward if no space below
+  }
+  popup.style.left = left + 'px';
+  popup.style.top  = top + 'px';
+}
+
+function paintFilterPopup(colId) {
+  const popup = $('#filterPopup');
+  const col = BATCH_COLS.find(c => c.id === colId);
+  const allValues = getUniqueValues(colId);
+
+  // sort labels
+  let ascLabel = '↑ Sort A → Z';
+  let descLabel = '↓ Sort Z → A';
+  if (col && col.date) { ascLabel = '↑ Sort oldest → newest'; descLabel = '↓ Sort newest → oldest'; }
+  else if (col && col.num) { ascLabel = '↑ Sort low → high'; descLabel = '↓ Sort high → low'; }
+
+  const currentSort = STATE.batchView.sorts[colId];
+  const search = (popup._search || '').toLowerCase();
+
+  const working = popup._workingSet; // null = all selected
+
+  const visible = allValues.filter(v => !search || v.label.toLowerCase().includes(search));
+
+  const valuesHtml = visible.length
+    ? visible.map(v => {
+        const checked = working === null ? true : working.has(v.key);
+        return `<label class="fp-value">
+          <input type="checkbox" data-key="${escapeHtml(v.key)}" ${checked ? 'checked' : ''}/>
+          <span title="${escapeHtml(v.label)}">${escapeHtml(v.label)}</span>
+        </label>`;
+      }).join('')
+    : `<div class="hint" style="margin:6px">No values</div>`;
+
+  popup.innerHTML = `
+    <div class="fp-sort">
+      <button data-sort="asc"  class="${currentSort==='asc'?'primary':''}">${ascLabel}</button>
+      <button data-sort="desc" class="${currentSort==='desc'?'primary':''}">${descLabel}</button>
+      ${currentSort ? `<button data-sort="none" class="ghost">✕ Clear sort on this column</button>` : ''}
+    </div>
+    <div class="fp-search">
+      <input type="text" id="fpSearchInput" placeholder="Search values…" value="${escapeHtml(popup._search||'')}"/>
+    </div>
+    <div class="fp-values" id="fpValues">${valuesHtml}</div>
+    <div class="fp-actions">
+      <button data-act="all">All</button>
+      <button data-act="none">None</button>
+      <button data-act="apply" class="primary">Apply</button>
+    </div>
+  `;
+
+  // sort buttons
+  popup.querySelectorAll('.fp-sort button').forEach(b => {
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      const s = b.dataset.sort;
+      if (s === 'none') delete STATE.batchView.sorts[colId];
+      else              STATE.batchView.sorts[colId] = s;
+      closeFilterPopup();
+      renderBatchTable();
+    });
+  });
+
+  // search box
+  const si = popup.querySelector('#fpSearchInput');
+  si.addEventListener('input', e => {
+    popup._search = e.target.value;
+    // preserve checkbox state before re-paint
+    const currentChecked = new Set();
+    popup.querySelectorAll('.fp-value input[type=checkbox]:checked').forEach(c => currentChecked.add(c.dataset.key));
+    const currentAll = popup.querySelectorAll('.fp-value input[type=checkbox]').length;
+    if (currentChecked.size === currentAll) popup._workingSet = null;
+    else popup._workingSet = currentChecked;
+
+    paintFilterPopup(colId);
+    // restore focus to search box
+    const newSi = $('#filterPopup #fpSearchInput');
+    if (newSi) { newSi.focus(); newSi.setSelectionRange(newSi.value.length, newSi.value.length); }
+  });
+  si.addEventListener('click', e => e.stopPropagation());
+
+  // checkboxes
+  popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', e => {
+      e.stopPropagation();
+      // materialise working set if currently "all"
+      if (popup._workingSet === null) {
+        popup._workingSet = new Set(allValues.map(v => v.key));
+      }
+      if (cb.checked) popup._workingSet.add(cb.dataset.key);
+      else            popup._workingSet.delete(cb.dataset.key);
+    });
+  });
+  // click on the row shouldn't close the popup
+  popup.querySelectorAll('.fp-value').forEach(lbl => {
+    lbl.addEventListener('click', e => e.stopPropagation());
+  });
+
+  // actions
+  popup.querySelectorAll('.fp-actions button').forEach(b => {
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      const act = b.dataset.act;
+      if (act === 'all') {
+        popup._workingSet = null;
+        popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(c => c.checked = true);
+      } else if (act === 'none') {
+        popup._workingSet = new Set();
+        popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(c => c.checked = false);
+      } else if (act === 'apply') {
+        // if working set is null → no filter
+        if (popup._workingSet === null) delete STATE.batchView.filters[colId];
+        else if (popup._workingSet.size === 0) STATE.batchView.filters[colId] = new Set(); // matches nothing
+        else STATE.batchView.filters[colId] = new Set(popup._workingSet);
+        closeFilterPopup();
+        renderBatchTable();
+      }
+    });
+  });
+}
+
+/* =========================================================
    SCRAP
    ========================================================= */
 function bindScrapForm() {
-  // manual add
   $('#scrapAdd').addEventListener('click', () => {
     const partNo    = ($('#scrapPart').value || '').trim();
     const qty       = Number($('#scrapQty').value);
@@ -693,7 +983,6 @@ function bindScrapForm() {
     renderPlanning();
   });
 
-  // bulk upload
   $('#scrapUploadBtn').addEventListener('click', () => $('#scrapFile').click());
   $('#scrapFile').addEventListener('change', async e => {
     const f = e.target.files[0];
@@ -881,9 +1170,14 @@ function bindButtons() {
   $('#planSearch').addEventListener('input', renderPlanning);
   $('#planOnlyShort').addEventListener('change', renderPlanning);
   $('#batchSearch').addEventListener('input', renderBatchTable);
-  $('#batchStageFilter').addEventListener('change', renderBatchTable);
   ['c_factoryFloor','c_edgeLine','c_inTransit','c_safety'].forEach(id =>
     $('#'+id).addEventListener('change', renderPlanning));
+
+  $('#batchClearFilters').addEventListener('click', () => {
+    STATE.batchView = { sorts: {}, filters: {} };
+    $('#batchSearch').value = '';
+    renderBatchTable();
+  });
 
   $('#autoClassify').addEventListener('click', () => {
     classifyBatches(); renderBatchStats(); renderBatchTable();
@@ -920,6 +1214,7 @@ function bindButtons() {
     if (!confirm('Erase all uploaded data and local overrides?')) return;
     STATE.boms = []; STATE.batches = []; STATE.plan = []; STATE.scrap = [];
     STATE.inventory = {}; STATE.partIndex = {};
+    STATE.batchView = { sorts: {}, filters: {} };
     savePersistedScrap();
     try { localStorage.removeItem(LS_CONFIG); } catch(e){}
     renderBomList(); renderBomTable(); renderBatchTable(); renderBatchStats();
