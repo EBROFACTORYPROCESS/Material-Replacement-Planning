@@ -1,13 +1,13 @@
 /* =========================================================
-   MRP Planner v1.1
+   MRP Planner v1.2
    ========================================================= */
 const STATE = {
   config: null,
-  boms: [],           // [{id, label, model, vehicleMatNo, batchCode, parts:[...]}]
+  boms: [],
   batches: [],
-  inventory: {},      // partNo -> {inTransit, warehouses:{}, factoryFloor, edgeLine, total}
-  partIndex: {},      // partNo -> {name, uom, supplier, models:Set, vehicleMatNos:Set, perModelQty:{}, isCommon}
-  scrap: [],          // [{id, partNo, qty, note, date}]
+  inventory: {},
+  partIndex: {},
+  scrap: [],        // [{id, partNo, qty, ubication, note, date}]
   plan: []
 };
 
@@ -16,7 +16,7 @@ const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
 const fmt = n => (n==null||isNaN(n)) ? '' : Number(n).toLocaleString(undefined,{maximumFractionDigits:3});
 const today = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
 const LS_CONFIG = 'mrp.configOverrides.v1';
-const LS_SCRAP  = 'mrp.scrap.v1';
+const LS_SCRAP  = 'mrp.scrap.v2';
 
 /* =========================================================
    BOOT
@@ -33,10 +33,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   renderWarehouseChecklist();
   renderScrapList();
   $('#todayBadge').textContent = new Date().toLocaleDateString();
-  $('#c_safety').value       = STATE.config.shortageDefaults.safetyFactor;
-  $('#c_factoryFloor').checked = STATE.config.shortageDefaults.includeFactoryFloor;
-  $('#c_edgeLine').checked     = STATE.config.shortageDefaults.includeEdgeLine;
-  $('#c_inTransit').checked    = STATE.config.shortageDefaults.includeInTransit;
+  $('#c_safety').value          = STATE.config.shortageDefaults.safetyFactor;
+  $('#c_factoryFloor').checked  = STATE.config.shortageDefaults.includeFactoryFloor;
+  $('#c_edgeLine').checked      = STATE.config.shortageDefaults.includeEdgeLine;
+  $('#c_inTransit').checked     = STATE.config.shortageDefaults.includeInTransit;
 });
 
 async function loadConfig() {
@@ -74,7 +74,7 @@ function loadPersistedOverrides() {
     const o = JSON.parse(raw);
     if (o.warehouses) STATE.config.warehouses = o.warehouses;
     if (o.conversionTable) STATE.config.conversionTable = o.conversionTable;
-  } catch(e){ /* ignore */ }
+  } catch(e){}
 }
 function savePersistedOverrides() {
   try {
@@ -82,7 +82,7 @@ function savePersistedOverrides() {
       warehouses: STATE.config.warehouses,
       conversionTable: STATE.config.conversionTable
     }));
-  } catch(e){ /* ignore */ }
+  } catch(e){}
 }
 function loadPersistedScrap() {
   try {
@@ -161,7 +161,7 @@ function parseCSV(text) {
       if (c === '"') inQ = true;
       else if (c === ',') { row.push(field); field = ''; }
       else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
-      else if (c === '\r') { /* skip */ }
+      else if (c === '\r') {}
       else field += c;
     }
   }
@@ -187,15 +187,9 @@ async function handleBomFiles(files) {
     }
   }
   rebuildPartIndex();
-  renderBomList();
-  renderBomTable();
-  populatePlanModels();
-  populatePartDatalist();
-  renderBatchTable();
-  renderBatchStats();
-  computeInventory();
-  renderInventoryTable();
-  renderPlanning();
+  renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
+  renderBatchTable(); renderBatchStats();
+  computeInventory(); renderInventoryTable(); renderPlanning();
 }
 
 function parseBOM(rows, filename) {
@@ -223,12 +217,10 @@ function parseBOM(rows, filename) {
   const colCPAC     = findCol(['CPAC编码','CPAC']);
   if (colPartNo < 0 || colQty < 0) throw new Error('Required columns missing');
 
-  // Extract Vehicle Material No. from header cell ("...=LE60U5BWL01")
   let vehicleMatNo = '';
   const lastHeader = String(headers[headers.length - 1] || '');
   const eqMatch = lastHeader.match(/=\s*([A-Z0-9\-]+)\s*$/i);
   if (eqMatch) vehicleMatNo = eqMatch[1];
-  // Fallback: read "Batch：XXXX" from row 0
   if (!vehicleMatNo && rows[0]) {
     const firstCell = String(rows[0][0] || '');
     const batchMatch = firstCell.match(/Batch\s*[：:]\s*([A-Z0-9\-]+)/i);
@@ -497,23 +489,24 @@ function parseDate(v) {
   return isNaN(d) ? null : d;
 }
 
+/* ---------- Classification priority (verified) ----------
+   1. trimIn < today AND Production == DONE       → consumed
+   2. arrival > today                             → inTransit
+   3. decanting <= today                          → factoryFloor
+   4. arrival <= today AND no/past-future decant  → warehouse
+   5. otherwise                                   → unassigned
+--------------------------------------------------------- */
 function classifyBatches() {
   const t = today();
   for (const b of STATE.batches) {
-
-    // 1. CONSUMED — production finished and start date already in the past
     if (b.trimIn && b.trimIn < t && /^DONE$/i.test(b.production || '')) {
       b._stage = 'consumed'; continue;
     }
-    // 2. IN TRANSIT — estimated arrival still in the future
     if (b.arrival && b.arrival > t) { b._stage = 'inTransit'; continue; }
-    // 3. FACTORY FLOOR — decanting date already passed
     if (b.decanting && b.decanting <= t) { b._stage = 'factoryFloor'; continue; }
-    // 4. WAREHOUSE — arrived but decanting not yet occurred
     if (b.arrival && b.arrival <= t && (!b.decanting || b.decanting > t)) {
       b._stage = 'warehouse'; continue;
     }
-    // 5. Fallback
     b._stage = 'unassigned';
   }
 }
@@ -526,12 +519,10 @@ function resolveModelForBatch(batch) {
   const modelo = (batch.model || '').toLowerCase();
   const color  = (batch.color || '').toLowerCase();
 
-  // 1) exact Modelo + Color
   let row = ct.find(r =>
     (r.modelo || '').toLowerCase() === modelo &&
     (r.color  || '').toLowerCase() === color
   );
-  // 2) Modelo with blank Color = wildcard
   if (!row) {
     row = ct.find(r =>
       (r.modelo || '').toLowerCase() === modelo &&
@@ -542,39 +533,86 @@ function resolveModelForBatch(batch) {
     const bom = STATE.boms.find(b => (b.vehicleMatNo || '') === row.vehicleMatNo);
     if (bom) return bom.model;
   }
-  // 3) Fallback: direct match on Model name
   const bom2 = STATE.boms.find(b => b.model === batch.model);
   return bom2 ? bom2.model : null;
 }
 
 /* =========================================================
-   BATCH RENDERING
+   BATCH RENDERING (with per-stage stats + filter)
    ========================================================= */
 function renderBatchStats() {
   const stages = STATE.config.stages;
-  const counts = {};
+
+  // aggregate count + qty per stage
+  const agg = {};
   for (const b of STATE.batches) {
-    counts[b._stage] = (counts[b._stage] || 0) + (b.qty || 0);
+    if (!agg[b._stage]) agg[b._stage] = { count: 0, qty: 0 };
+    agg[b._stage].count += 1;
+    agg[b._stage].qty   += (b.qty || 0);
   }
-  const total = Object.values(counts).reduce((a,c) => a+c, 0);
+  const totalCount = STATE.batches.length;
+  const totalQty   = STATE.batches.reduce((a,b) => a + (b.qty||0), 0);
+
+  // tooltips explaining each rule
+  const rules = {
+    inTransit:    'Arrival Date is in the future',
+    warehouse:    'Arrived, not yet decanted',
+    factoryFloor: 'Decanting Date already passed',
+    edgeLine:     'Manual stage',
+    consumed:     'TRIM IN DATE in the past and Production = DONE'
+  };
+
   $('#batchStats').innerHTML = `
-    <div class="stat"><div class="label">Batches</div><div class="value">${STATE.batches.length}</div></div>
-    <div class="stat"><div class="label">Total vehicles</div><div class="value">${fmt(total)}</div></div>
-    ${Object.entries(stages).map(([k,s]) => `
-      <div class="stat">
-        <div class="label"><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></div>
-        <div class="value">${fmt(counts[k]||0)}</div>
-      </div>
-    `).join('')}
-    <div class="stat"><div class="label">Unassigned</div><div class="value">${fmt(counts.unassigned||0)}</div></div>
+    <div class="stat">
+      <div class="label">Batches</div>
+      <div class="value">${fmt(totalCount)}</div>
+      <div class="sub">Total vehicles: <b>${fmt(totalQty)}</b></div>
+    </div>
+    ${Object.entries(stages).map(([k,s]) => {
+      const a = agg[k] || { count:0, qty:0 };
+      return `
+        <div class="stat" title="${escapeHtml(rules[k]||'')}">
+          <div class="label">
+            <span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span>
+          </div>
+          <div class="value">${fmt(a.qty)}<span class="unit">vehicles</span></div>
+          <div class="sub"><b>${fmt(a.count)}</b> batch${a.count===1?'':'es'}</div>
+        </div>`;
+    }).join('')}
+    <div class="stat" title="Could not be classified automatically">
+      <div class="label">Unassigned</div>
+      <div class="value">${fmt((agg.unassigned||{}).qty||0)}<span class="unit">vehicles</span></div>
+      <div class="sub"><b>${fmt((agg.unassigned||{}).count||0)}</b> batches</div>
+    </div>
   `;
 }
 
 function renderBatchTable() {
   const tbl = $('#batchTable');
   if (!STATE.batches.length) { tbl.innerHTML = `<thead><tr><th>No batch data</th></tr></thead>`; return; }
+
   const stages = STATE.config.stages;
   const whOpts = STATE.config.warehouses.filter(w => w.enabled);
+
+  const stageFilter = $('#batchStageFilter') ? $('#batchStageFilter').value : 'all';
+  const searchText  = ($('#batchSearch') ? $('#batchSearch').value : '').trim().toLowerCase();
+
+  // Preserve original index for correct mutation
+  const filtered = STATE.batches
+    .map((b, i) => ({ b, i }))
+    .filter(({ b }) => {
+      if (stageFilter !== 'all' && b._stage !== stageFilter) return false;
+      if (searchText) {
+        const hay = `${b.batch} ${b.model} ${b.color} ${b.ship} ${b.production}`.toLowerCase();
+        if (!hay.includes(searchText)) return false;
+      }
+      return true;
+    });
+
+  if (!filtered.length) {
+    tbl.innerHTML = `<thead><tr><th>No batches match the current filter</th></tr></thead>`;
+    return;
+  }
 
   tbl.innerHTML = `
     <thead><tr>
@@ -585,7 +623,7 @@ function renderBatchTable() {
       <th>Linked BOM</th>
     </tr></thead>
     <tbody>
-      ${STATE.batches.map((b,i) => {
+      ${filtered.map(({ b, i }) => {
         const s = stages[b._stage] || { label: b._stage, color:'#9ca3af' };
         const linkedModel = resolveModelForBatch(b);
         const linkCell = linkedModel
@@ -629,10 +667,12 @@ function renderBatchTable() {
    SCRAP
    ========================================================= */
 function bindScrapForm() {
+  // manual add
   $('#scrapAdd').addEventListener('click', () => {
-    const partNo = ($('#scrapPart').value || '').trim();
-    const qty = Number($('#scrapQty').value);
-    const note = ($('#scrapNote').value || '').trim();
+    const partNo    = ($('#scrapPart').value || '').trim();
+    const qty       = Number($('#scrapQty').value);
+    const ubication = ($('#scrapUbi').value || '').trim();
+    const note      = ($('#scrapNote').value || '').trim();
     if (!partNo) { alert('Enter a Part No.'); return; }
     if (!qty || qty <= 0) { alert('Enter a positive quantity.'); return; }
     if (!STATE.partIndex[partNo]) {
@@ -640,17 +680,78 @@ function bindScrapForm() {
     }
     STATE.scrap.push({
       id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random()),
-      partNo, qty, note,
+      partNo, qty, ubication, note,
       date: new Date().toISOString()
     });
     savePersistedScrap();
     $('#scrapPart').value = '';
     $('#scrapQty').value  = '';
+    $('#scrapUbi').value  = '';
     $('#scrapNote').value = '';
     renderScrapList();
     renderInventoryTable();
     renderPlanning();
   });
+
+  // bulk upload
+  $('#scrapUploadBtn').addEventListener('click', () => $('#scrapFile').click());
+  $('#scrapFile').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const rows = await fileToRows(f);
+      const added = parseScrapFile(rows);
+      if (!added) { alert('No valid scrap rows found.'); return; }
+      savePersistedScrap();
+      renderScrapList();
+      renderInventoryTable();
+      renderPlanning();
+      alert(`Imported ${added} scrap row${added===1?'':'s'}.`);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to parse scrap file: ${err.message}`);
+    }
+    e.target.value = '';
+  });
+}
+
+function parseScrapFile(rows) {
+  if (!rows.length) return 0;
+  const header = rows[0].map(h => String(h||'').trim().toLowerCase());
+  const idx = names => {
+    for (const n of names) {
+      const i = header.findIndex(h => h === n.toLowerCase());
+      if (i >= 0) return i;
+    }
+    for (const n of names) {
+      const i = header.findIndex(h => h.includes(n.toLowerCase()));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+  const cPart = idx(['material number','material no','part number','part no','partno','matnr','material','零件号']);
+  const cQty  = idx(['quantity','qty','cantidad','用量','数量']);
+  const cUbi  = idx(['ubication','ubicación','ubicacion','location','warehouse','库位','库房']);
+
+  if (cPart < 0 || cQty < 0) throw new Error('Columns "Material Number" and "Quantity" are required');
+
+  let added = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+    const partNo = String(r[cPart] || '').trim();
+    if (!partNo) continue;
+    const qty = Number(String(r[cQty]).replace(/[^0-9.\-]/g,''));
+    if (!qty || qty <= 0) continue;
+    const ubication = cUbi >= 0 ? String(r[cUbi] || '').trim() : '';
+    STATE.scrap.push({
+      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random()+Math.random()),
+      partNo, qty, ubication, note: 'bulk upload',
+      date: new Date().toISOString()
+    });
+    added++;
+  }
+  return added;
 }
 
 function renderScrapList() {
@@ -664,9 +765,10 @@ function renderScrapList() {
   wrap.innerHTML = sorted.map(s => `
     <div class="scrap-item" data-id="${s.id}">
       <span class="mono">${escapeHtml(s.partNo)}</span>
-      <span class="ts">${new Date(s.date).toLocaleString()}</span>
+      <span>${escapeHtml(s.ubication || '—')}</span>
       <span class="num">−${fmt(s.qty)}</span>
       <span class="ts">${escapeHtml(s.note || '')}</span>
+      <span class="ts">${new Date(s.date).toLocaleString()}</span>
       <button data-role="del" title="Delete">✕</button>
     </div>
   `).join('');
@@ -778,6 +880,8 @@ function bindButtons() {
   $('#invSearch').addEventListener('input', renderInventoryTable);
   $('#planSearch').addEventListener('input', renderPlanning);
   $('#planOnlyShort').addEventListener('change', renderPlanning);
+  $('#batchSearch').addEventListener('input', renderBatchTable);
+  $('#batchStageFilter').addEventListener('change', renderBatchTable);
   ['c_factoryFloor','c_edgeLine','c_inTransit','c_safety'].forEach(id =>
     $('#'+id).addEventListener('change', renderPlanning));
 
