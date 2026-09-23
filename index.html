@@ -19,9 +19,7 @@
     <button class="tab" data-tab="planning">Production Planning</button>
     <button class="tab" data-tab="settings">Settings</button>
   </nav>
-  <div class="meta">
-    <span id="todayBadge"></span>
-  </div>
+  <div class="meta"><span id="todayBadge"></span></div>
 </header>
 
 <main>
@@ -29,7 +27,7 @@
   <section class="tab-panel active" id="panel-bom">
     <div class="card">
       <h2>1. Upload BOM files</h2>
-      <p class="hint">Upload one or more BOM files (xlsx / xls / csv). Each BOM represents the parts required to build <b>1 vehicle</b> of a given model.</p>
+      <p class="hint">Upload one BOM file per vehicle configuration. Each BOM = parts required to build <b>1 vehicle</b>. The Vehicle Material No. is auto-detected from the file header and can be edited below.</p>
       <div class="dropzone" id="bomDrop">
         <input type="file" id="bomInput" multiple accept=".xlsx,.xls,.csv" />
         <div class="dz-inner">
@@ -43,7 +41,7 @@
     <div class="card">
       <h2>2. BOM analysis</h2>
       <div class="toolbar">
-        <input id="bomSearch" type="search" placeholder="Search part no / name / supplier…" />
+        <input id="bomSearch" type="search" placeholder="Search part no / name…" />
         <select id="bomFilter">
           <option value="all">All parts</option>
           <option value="common">Common parts only</option>
@@ -51,7 +49,7 @@
         </select>
         <button class="btn" id="exportBom">⤓ Export Excel</button>
       </div>
-      <div class="table-wrap"><table id="bomTable"></table></div>
+      <div class="table-wrap"><table id="bomTable" class="compact"></table></div>
     </div>
   </section>
 
@@ -68,7 +66,6 @@
         </div>
       </div>
       <div class="row-2">
-        <label class="toggle"><input type="checkbox" id="reassignMode" /> Manual status override</label>
         <button class="btn ghost" id="autoClassify">↻ Re-classify batches</button>
       </div>
     </div>
@@ -80,10 +77,22 @@
     </div>
 
     <div class="card">
-      <h2>3. Material inventory</h2>
+      <h2>3. Scrap submissions</h2>
+      <p class="hint">Record scrapped material. Scrap is subtracted from available inventory across all stages.</p>
+      <div class="scrap-form">
+        <input list="partList" id="scrapPart" placeholder="Part No." />
+        <datalist id="partList"></datalist>
+        <input id="scrapQty" type="number" min="0" step="0.001" placeholder="Qty" />
+        <input id="scrapNote" type="text" placeholder="Note (optional)" />
+        <button class="btn primary" id="scrapAdd">+ Submit scrap</button>
+      </div>
+      <div id="scrapList" class="scrap-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>4. Material inventory</h2>
       <div class="toolbar">
         <input id="invSearch" type="search" placeholder="Search part…" />
-        <label class="toggle"><input type="checkbox" id="invShowAll" checked /> Show all stages</label>
         <button class="btn" id="exportInv">⤓ Export Excel</button>
       </div>
       <div class="table-wrap"><table id="invTable"></table></div>
@@ -105,7 +114,7 @@
 
     <div class="card">
       <h2>Shortage criteria</h2>
-      <p class="hint">Choose which stock to count as “available” when checking for shortages.</p>
+      <p class="hint">Choose which stock to count as “available” when checking for shortages. Scrap is always subtracted.</p>
       <div class="criteria">
         <label class="toggle"><input type="checkbox" id="c_factoryFloor" /> Factory Floor</label>
         <label class="toggle"><input type="checkbox" id="c_edgeLine" /> Edge Line</label>
@@ -136,11 +145,23 @@
   <!-- ============ TAB: SETTINGS ============ -->
   <section class="tab-panel" id="panel-settings">
     <div class="card">
+      <h2>Conversion table — Batch → BOM</h2>
+      <p class="hint">Maps <code>Modelo</code> (and optionally <code>Color</code>) from the batch file to a BOM’s <b>Vehicle Material No.</b> Leave Color blank to match any colour for that Modelo.</p>
+      <div id="convTable" class="conv-editor"></div>
+      <div class="row-2">
+        <button class="btn" id="convAdd">+ Add row</button>
+        <button class="btn primary" id="convSave">Save conversion table</button>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Warehouses</h2>
-      <p class="hint">Edit names or disable warehouses you don't use. Changes apply instantly to filters and inventory.</p>
+      <p class="hint">Edit names or disable warehouses you don’t use.</p>
       <div id="whEditor" class="wh-editor"></div>
-      <button class="btn" id="whAdd">+ Add warehouse</button>
-      <button class="btn primary" id="whSave">Save</button>
+      <div class="row-2">
+        <button class="btn" id="whAdd">+ Add warehouse</button>
+        <button class="btn primary" id="whSave">Save</button>
+      </div>
     </div>
 
     <div class="card">
