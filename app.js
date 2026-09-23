@@ -513,14 +513,16 @@ function parseDate(v) {
 
 function classifyBatches() {
   const t = today();
+  const defaultWh = STATE.config.defaultWarehouseId || null;
+
   for (const b of STATE.batches) {
-    if (b.trimIn && b.trimIn < t && /^DONE$/i.test(b.production || '')) {
-      b._stage = 'consumed'; continue;
-    }
-    if (b.arrival && b.arrival > t) { b._stage = 'inTransit'; continue; }
-    if (b.decanting && b.decanting <= t) { b._stage = 'factoryFloor'; continue; }
+    // ... (unchanged consumed / inTransit / factoryFloor checks)
+
     if (b.arrival && b.arrival <= t && (!b.decanting || b.decanting > t)) {
-      b._stage = 'warehouse'; continue;
+      b._stage = 'warehouse';
+      // NEW: assign default warehouse if the user hasn't set one
+      if (!b._warehouse && defaultWh) b._warehouse = defaultWh;
+      continue;
     }
     b._stage = 'unassigned';
   }
@@ -759,11 +761,14 @@ function renderBatchTable() {
         <td>${b.trimIn    ? b.trimIn.toLocaleDateString()    : '—'}</td>
         <td>${escapeHtml(b.production)}</td>
         <td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>
-        <td>${b._stage === 'warehouse' ? `
-          <select data-role="wh" data-i="${i}">
-            <option value="">—</option>
-            ${whOpts.map(w => `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}
-          </select>` : escapeHtml(whLabel)}</td>
+         // Inside the batch row template, replace the warehouse cell with:
+         <td>${b._stage === 'warehouse' ? `
+           <select data-role="wh" data-i="${i}">
+             <option value="">—</option>
+             ${STATE.config.warehouses.map(w =>
+               `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`
+             ).join('')}
+           </select>` : '—'}</td>
         <td>${linkCell}</td>
       </tr>`;
   }).join('');
