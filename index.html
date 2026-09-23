@@ -1,325 +1,180 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EBRO Scrap Form Processor</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>">
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script type="module">
-  import { normalizeHeicFile } from "https://esm.sh/heic-normalize@latest";
-  window.normalizeHeicFile = normalizeHeicFile;
-</script>
-<link rel="stylesheet" href="style.css">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MRP Planner</title>
+<link rel="stylesheet" href="style.css" />
+<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 </head>
 <body>
-<div class="container">
-  <header class="page-header">
-    <h1>📄 EBRO Scrap Form Processor</h1>
-    <p class="subtitle">Choose AI platform, upload images, extract, edit, and export merged Excel.</p>
-  </header>
-
-  <div class="layout">
-
-    <!-- LEFT COLUMN -->
-    <aside class="col-config">
-
-      <!-- AI Configuration -->
-      <div class="card">
-        <h2 class="card-title">⚙️ AI Configuration</h2>
-
-        <div class="field">
-          <label for="platformSelect">AI Platform</label>
-          <select id="platformSelect">
-            <option value="gemini">Google Gemini</option>
-            <option value="deepseek">DeepSeek</option>
-          </select>
-          <p class="hint" id="platformHint"></p>
-        </div>
-
-        <div class="field">
-          <label for="apiKey">API Key
-            <span class="platform-badge gemini" id="apiKeyBadge">Gemini</span>
-          </label>
-          <input type="password" id="apiKey" placeholder="Paste your API Key..." />
-          <p class="hint" id="apiKeyHint"></p>
-        </div>
-
-        <div class="field" id="geminiModelRow" style="display: none;">
-          <label for="geminiModelSelect">Gemini Model</label>
-          <select id="geminiModelSelect"></select>
-          <p class="hint" id="geminiModelHint"></p>
-        </div>
-
-        <div id="balancePanel">
-          <div class="balance-header">
-            <span class="balance-title">💳 DeepSeek Balance</span>
-            <button id="refreshBalanceBtn">↻</button>
-          </div>
-          <div id="balanceContent">Enter your API Key to check balance.</div>
-        </div>
-
-        <div id="rateLimitsPanel" style="display: none;">
-          <div class="rate-limits-header">
-            <span class="rate-limits-title">⚡ Rate Limits</span>
-            <button id="resetRateLimitsBtn" title="Reset to model defaults">↺ Reset</button>
-          </div>
-          <div class="rate-limits-grid">
-            <div class="rate-limit-field">
-              <label for="limitRPM">RPM <small>req/min</small></label>
-              <input type="number" id="limitRPM" min="1" step="1" />
-            </div>
-            <div class="rate-limit-field">
-              <label for="limitTPM">TPM <small>tokens/min</small></label>
-              <input type="number" id="limitTPM" min="1000" step="1000" />
-            </div>
-            <div class="rate-limit-field">
-              <label for="limitRPD">RPD <small>req/day</small></label>
-              <input type="number" id="limitRPD" min="1" step="1" />
-            </div>
-          </div>
-          <p class="hint" id="rateLimitsHint">
-            These limits are enforced locally to prevent API errors.
-          </p>
-        </div>
-      </div>
-
-      <!-- Input -->
-      <div class="card">
-        <h2 class="card-title">📥 Input</h2>
-
-        <div class="input-method-selector">
-          <div class="ims-buttons" role="tablist">
-            <button class="ims-btn" id="imsFolderBtn" data-method="folder" role="tab">📁 Folder</button>
-            <button class="ims-btn" id="imsUploadBtn" data-method="upload" role="tab">📤 Upload</button>
-          </div>
-          <span class="local-status" id="localStatus">Not authorized</span>
-        </div>
-
-        <div id="localModePanel" class="input-method-panel" data-method="folder" style="display: none;">
-          <div class="local-path-row">
-            <label class="path-label" for="localInputLabel">Input folder</label>
-            <div class="path-input-group">
-              <input type="text" id="localInputLabel" placeholder="(no folder)" readonly />
-              <button id="localPickInputBtn">Select</button>
-            </div>
-          </div>
-          <div class="local-path-row">
-            <label class="path-label" for="localReadedLabel">Readed folder</label>
-            <div class="path-input-group">
-              <input type="text" id="localReadedLabel" placeholder="(no folder)" readonly />
-              <button id="localPickReadedBtn">Select</button>
-            </div>
-          </div>
-          <div class="local-path-row">
-            <label class="path-label" for="localErrorLabel">Error folder</label>
-            <div class="path-input-group">
-              <input type="text" id="localErrorLabel" placeholder="(no folder)" readonly />
-              <button id="localPickErrorBtn">Select</button>
-            </div>
-          </div>
-          <div class="button-row">
-            <button class="btn" id="localLoadBtn" disabled>📥 Load Images</button>
-            <button class="btn btn-excel" id="localProcessBtn" disabled>🚀 Process &amp; Move</button>
-          </div>
-          <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px; color:#555;">
-            <input type="checkbox" id="autoProcessToggleLocal" checked>
-            🚀 Auto-process as files are added
-          </label>
-        </div>
-
-        <div class="input-method-panel" data-method="upload" id="uploadPanel">
-          <div class="upload-area" id="uploadArea">
-            <div class="icon">📤</div>
-            <p>Click to select images, or drag &amp; drop here</p>
-            <p class="hint" style="margin-top: 4px;">JPG, PNG, WEBP</p>
-          </div>
-          <input type="file" id="fileInput" accept="image/*" multiple style="display: none;" />
-
-          <div class="button-row">
-            <button class="btn" id="extractBtn" disabled>🚀 Start Batch</button>
-          </div>
-          <div class="button-row">
-            <button class="btn btn-retry-all" id="retryAllBtn" disabled>🔁 Retry Failed</button>
-            <button class="btn btn-clear" id="clearBtn" disabled>🗑️ Clear</button>
-          </div>
-          <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px; color:#555;">
-            <input type="checkbox" id="autoProcessToggle" checked>
-            🚀 Auto-process as files are added
-          </label>
-        </div>
-
-        <div class="compress-progress-wrap" id="compressProgressWrap" style="display: none;">
-          <div class="compress-progress-label" id="compressProgressLabel"></div>
-          <div class="compress-progress-bar-bg">
-            <div class="compress-progress-bar" id="compressProgressBar"></div>
-          </div>
-        </div>
-
-        <div class="field" style="margin-top: 14px; margin-bottom: 0;">
-          <label for="maxSize">Max image dimension (px)</label>
-          <input type="number" id="maxSize" value="1600" min="600" max="4000" step="100" />
-          <p class="hint">Smaller = faster &amp; lower token cost.</p>
-        </div>
-      </div>
-
-      <!-- Scrap Submission -->
-      <div class="card">
-        <h2 class="card-title">🗑️ Scrap Submission</h2>
-        <p class="hint" style="margin-bottom: 12px;">
-          Material-level scrap submission. Download the template, fill it in, and upload it here.
-        </p>
-
-        <div class="button-row">
-          <button class="btn btn-excel" id="downloadTemplateBtn">📥 Download Template</button>
-          <button class="btn" id="uploadScrapBtn">📤 Upload Filled File</button>
-        </div>
-        <input type="file" id="scrapFileInput" accept=".xlsx,.xls,.csv" style="display: none;" />
-
-        <div id="scrapStatus" class="status" style="margin-top: 10px;"></div>
-
-        <div id="scrapPanel" style="display: none; margin-top: 12px;">
-          <div class="scrap-filter-bar" id="scrapFilterBar"></div>
-          <div class="scrap-table-wrap">
-            <table class="scrap-table" id="scrapTable"></table>
-          </div>
-          <div class="button-row" style="margin-top: 10px;">
-            <button class="btn btn-excel" id="exportFilteredScrapBtn">📊 Export Filtered</button>
-            <button class="btn btn-clear" id="clearScrapBtn">🗑️ Clear</button>
-          </div>
-        </div>
-      </div>
-
-    </aside>
-
-    <!-- RIGHT COLUMN -->
-    <main class="col-content">
-      <div class="card" id="sharedQueueCard">
-        <div class="status" id="status"></div>
-
-        <div class="progress-bar-wrap" id="progressWrap" style="display: none;">
-          <div class="progress-bar" id="progressBar"></div>
-        </div>
-
-        <div class="summary" id="summary" style="display: none;"></div>
-
-        <div class="queue-filter-bar" id="queueFilterBar"></div>
-
-        <div class="queue-scroll" id="queueScroll">
-          <div class="queue-list" id="queueList"></div>
-        </div>
-      </div>
-
-      <div class="card" id="errorPanel" style="display: none;">
-        <div class="error-panel-header">
-          <h2 style="font-size: 15px; margin: 0;">🚫 Error Files <span id="errorCount" style="color: #842029;">(0)</span></h2>
-          <button class="btn btn-excel" id="downloadErrorListBtn" style="width: auto; margin: 0; padding: 6px 14px; font-size: 12px;">
-            📊 Download Error List
-          </button>
-        </div>
-        <div class="error-filter-bar" id="errorFilterBar"></div>
-        <div class="error-scroll">
-          <div class="error-list" id="errorList"></div>
-        </div>
-      </div>
-    </main>
-
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <h1>MRP Planner</h1>
   </div>
+  <nav class="tabs">
+    <button class="tab active" data-tab="bom">BOM Management</button>
+    <button class="tab" data-tab="inventory">Inventory &amp; Stock</button>
+    <button class="tab" data-tab="planning">Production Planning</button>
+    <button class="tab" data-tab="settings">Settings</button>
+  </nav>
+  <div class="meta"><span id="todayBadge"></span></div>
+</header>
 
-  <div class="card" id="correctionPanel" style="display: none;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-      <h2 style="font-size: 16px;">📚 Correction Library</h2>
-      <button class="btn btn-clear" id="clearCorrectionsBtn" style="width: auto; margin: 0; padding: 6px 12px; font-size: 12px;">🗑️ Clear All</button>
-    </div>
-    <div id="correctionList"></div>
-  </div>
-
-  <div class="card result-section" id="resultSection">
-    <div class="result-header">
-      <h2>✅ Extraction Results</h2>
-      <div style="display: flex; gap: 10px; align-items: center;">
-        <button class="btn" id="toggleCorrectionsBtn" style="width: auto; margin: 0; padding: 6px 14px; font-size: 12px; background: #6c757d;">📚 View Corrections</button>
-      </div>
-    </div>
-
-    <div class="issues-banner" id="issuesBanner"></div>
-    <div id="summaryReport" class="summary-report"></div>
-    <div id="errorSummary" class="error-summary"></div>
-
-    <div class="result-filter-bar" id="resultFilterBar"></div>
-
-    <div class="table-wrap">
-      <table class="result-table" id="resultTable"></table>
-    </div>
-
-    <div class="legend">
-      <span><i class="dot dot-missing"></i> Missing</span>
-      <span><i class="dot dot-suspicious"></i> Suspicious</span>
-      <span><i class="dot dot-format"></i> Format</span>
-      <span><i class="dot dot-edited"></i> Edited</span>
-      <span><i class="dot dot-scrap"></i> Process Scrap</span>
-      <span><i class="dot dot-supplier"></i> Supplier Claim</span>
-    </div>
-
-    <div class="button-row">
-      <button class="btn btn-excel" id="downloadExcelBtn">📊 Download Merged Excel</button>
-    </div>
-  </div>
-</div>
-
-<!-- Edit Modal -->
-<div class="modal-overlay" id="modalOverlay">
-  <div class="modal">
-    <div class="modal-header">
-      <div>
-        <h3 id="modalTitle">Edit Extraction</h3>
-        <div class="file-label" id="modalFileLabel"></div>
-      </div>
-      <button class="modal-close" id="modalCloseBtn">×</button>
-    </div>
-    <div class="modal-body">
-      <div class="image-pane">
-        <div class="image-toolbar">
-          <button id="zoomOutBtn" title="Zoom out">−</button>
-          <span class="zoom-label" id="zoomLabel">100%</span>
-          <button id="zoomInBtn" title="Zoom in">+</button>
-          <button id="zoomResetBtn" title="Reset zoom">1:1</button>
-          <button id="zoomFitBtn" title="Fit to width">Fit W</button>
-          <button id="zoomFitHBtn" title="Fit to height">Fit H</button>
-          <span class="toolbar-sep"></span>
-          <button id="rotateLeftBtn" title="Rotate 90° left">↺</button>
-          <button id="rotateRightBtn" title="Rotate 90° right">↻</button>
-          <div class="spacer"></div>
-          <span class="toolbar-hint">Drag to pan · Ctrl+wheel to zoom</span>
-        </div>
-        <div class="image-scroll" id="imageScroll">
-          <div class="image-rotator" id="imageRotator">
-            <img id="modalImage" alt="Form preview" draggable="false" />
-          </div>
+<main>
+  <!-- ============ TAB: BOM ============ -->
+  <section class="tab-panel active" id="panel-bom">
+    <div class="card">
+      <h2>1. Upload BOM files</h2>
+      <p class="hint">Upload one BOM file per vehicle configuration. Each BOM = parts required to build <b>1 vehicle</b>. The Vehicle Material No. is auto-detected from the file header and can be edited below.</p>
+      <div class="dropzone" id="bomDrop">
+        <input type="file" id="bomInput" multiple accept=".xlsx,.xls,.csv" />
+        <div class="dz-inner">
+          <strong>Drop BOM files here</strong>
+          <span>or click to browse</span>
         </div>
       </div>
-      <div class="fields-pane">
-        <div class="fields-header">
-          <span>Edit extracted fields — changes are saved only when you click <b>Save changes</b>.</span>
-        </div>
-        <div class="fields-scroll" id="fieldsScroll">
-          <div class="modal-fields" id="modalFields"></div>
-        </div>
-      </div>
+      <div id="bomList" class="file-list"></div>
     </div>
-    <div class="modal-footer">
-      <div class="left">
-        <button class="btn-modal btn-modal-reset" id="modalResetBtn">↺ Reset</button>
-      </div>
-      <div class="right">
-        <button class="btn-modal btn-modal-cancel" id="modalCancelBtn">Cancel</button>
-        <button class="btn-modal btn-modal-save" id="modalSaveBtn">💾 Save changes</button>
-      </div>
-    </div>
-  </div>
-</div>
 
-<script src="config.js"></script>
+    <div class="card">
+      <h2>2. BOM analysis</h2>
+      <div class="toolbar">
+        <input id="bomSearch" type="search" placeholder="Search part no / name…" />
+        <select id="bomFilter">
+          <option value="all">All parts</option>
+          <option value="common">Common parts only</option>
+          <option value="specific">Model-specific only</option>
+        </select>
+        <button class="btn" id="exportBom">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="bomTable" class="compact"></table></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: INVENTORY ============ -->
+  <section class="tab-panel" id="panel-inventory">
+    <div class="card">
+      <h2>1. Upload Batch / Shipment file</h2>
+      <p class="hint">CSV or Excel with columns: <code>batch number, Modelo, Color, Cantidad, TRIM IN DATE, Name of ship, Week, Decanting date, …, Arrival Date, Production, …</code></p>
+      <div class="dropzone" id="batchDrop">
+        <input type="file" id="batchInput" accept=".csv,.xlsx,.xls" />
+        <div class="dz-inner">
+          <strong>Drop batch file here</strong>
+          <span>or click to browse</span>
+        </div>
+      </div>
+      <div class="row-2">
+        <button class="btn ghost" id="autoClassify">↻ Re-classify batches</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2. Batch status</h2>
+      <div class="stats" id="batchStats"></div>
+      <div class="table-wrap"><table id="batchTable"></table></div>
+    </div>
+
+    <div class="card">
+      <h2>3. Scrap submissions</h2>
+      <p class="hint">Record scrapped material. Scrap is subtracted from available inventory across all stages and considered in shortage checks.</p>
+      <div class="scrap-form">
+        <input list="partList" id="scrapPart" placeholder="Part No." />
+        <datalist id="partList"></datalist>
+        <input id="scrapQty" type="number" min="0" step="0.001" placeholder="Qty" />
+        <input id="scrapNote" type="text" placeholder="Note (optional)" />
+        <button class="btn primary" id="scrapAdd">+ Submit scrap</button>
+      </div>
+      <div id="scrapList" class="scrap-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>4. Material inventory</h2>
+      <div class="toolbar">
+        <input id="invSearch" type="search" placeholder="Search part…" />
+        <button class="btn" id="exportInv">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="invTable"></table></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: PLANNING ============ -->
+  <section class="tab-panel" id="panel-planning">
+    <div class="card">
+      <h2>Production plan</h2>
+      <div class="plan-add">
+        <select id="planModel"></select>
+        <input id="planQty" type="number" min="0" step="1" placeholder="Quantity" />
+        <button class="btn primary" id="planAdd">+ Add</button>
+        <button class="btn ghost" id="planClear">Clear plan</button>
+      </div>
+      <div id="planList" class="file-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>Shortage criteria</h2>
+      <p class="hint">Choose which stock counts as “available” when checking shortages. Scrap is always subtracted.</p>
+      <div class="criteria">
+        <label class="toggle"><input type="checkbox" id="c_factoryFloor" /> Factory Floor</label>
+        <label class="toggle"><input type="checkbox" id="c_edgeLine" /> Edge Line</label>
+        <div class="wh-group">
+          <span class="wh-label">Warehouses:</span>
+          <div id="whChecklist"></div>
+        </div>
+        <label class="toggle"><input type="checkbox" id="c_inTransit" /> In Transit</label>
+        <label class="safety">
+          Safety factor:
+          <input type="number" id="c_safety" min="0.1" step="0.05" value="1.0" />
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Material requirement &amp; shortage</h2>
+      <div class="stats" id="planStats"></div>
+      <div class="toolbar">
+        <input id="planSearch" type="search" placeholder="Search part…" />
+        <label class="toggle"><input type="checkbox" id="planOnlyShort" /> Only shortages</label>
+        <button class="btn" id="exportPlan">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="planTable"></table></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: SETTINGS ============ -->
+  <section class="tab-panel" id="panel-settings">
+    <div class="card">
+      <h2>Conversion table — Batch → BOM</h2>
+      <p class="hint">Maps <code>Modelo</code> (and optionally <code>Color</code>) from the batch file to a BOM’s <b>Vehicle Material No.</b> Leave Color blank to match any colour for that Modelo.</p>
+      <div id="convTable" class="conv-editor"></div>
+      <div class="row-2">
+        <button class="btn" id="convAdd">+ Add row</button>
+        <button class="btn primary" id="convSave">Save conversion table</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Warehouses</h2>
+      <p class="hint">Edit names or disable warehouses you don’t use.</p>
+      <div id="whEditor" class="wh-editor"></div>
+      <div class="row-2">
+        <button class="btn" id="whAdd">+ Add warehouse</button>
+        <button class="btn primary" id="whSave">Save</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Danger zone</h2>
+      <button class="btn danger" id="resetAll">Reset all data</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>MRP Planner · local-only · no data leaves your browser</span>
+</footer>
+
 <script src="app.js"></script>
 </body>
 </html>
