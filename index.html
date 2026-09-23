@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MRP Planner</title>
+<link rel="stylesheet" href="style.css" />
+<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <h1>MRP Planner</h1>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-tab="bom">BOM Management</button>
+    <button class="tab" data-tab="inventory">Inventory &amp; Stock</button>
+    <button class="tab" data-tab="planning">Production Planning</button>
+    <button class="tab" data-tab="settings">Settings</button>
+  </nav>
+  <div class="meta">
+    <span id="todayBadge"></span>
+  </div>
+</header>
+
+<main>
+  <!-- ============ TAB: BOM ============ -->
+  <section class="tab-panel active" id="panel-bom">
+    <div class="card">
+      <h2>1. Upload BOM files</h2>
+      <p class="hint">Upload one or more BOM files (xlsx / xls / csv). Each BOM represents the parts required to build <b>1 vehicle</b> of a given model.</p>
+      <div class="dropzone" id="bomDrop">
+        <input type="file" id="bomInput" multiple accept=".xlsx,.xls,.csv" />
+        <div class="dz-inner">
+          <strong>Drop BOM files here</strong>
+          <span>or click to browse</span>
+        </div>
+      </div>
+      <div id="bomList" class="file-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>2. BOM analysis</h2>
+      <div class="toolbar">
+        <input id="bomSearch" type="search" placeholder="Search part no / name / supplier…" />
+        <select id="bomFilter">
+          <option value="all">All parts</option>
+          <option value="common">Common parts only</option>
+          <option value="specific">Model-specific only</option>
+        </select>
+        <button class="btn" id="exportBom">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="bomTable"></table></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: INVENTORY ============ -->
+  <section class="tab-panel" id="panel-inventory">
+    <div class="card">
+      <h2>1. Upload Batch / Shipment file</h2>
+      <p class="hint">CSV file with columns: <code>batch number, Modelo, Color, Cantidad, TRIM IN DATE, Name of ship, Week, Decanting date, …, Arrival Date, Production, …</code></p>
+      <div class="dropzone" id="batchDrop">
+        <input type="file" id="batchInput" accept=".csv,.xlsx,.xls" />
+        <div class="dz-inner">
+          <strong>Drop batch file here</strong>
+          <span>or click to browse</span>
+        </div>
+      </div>
+      <div class="row-2">
+        <label class="toggle"><input type="checkbox" id="reassignMode" /> Manual status override</label>
+        <button class="btn ghost" id="autoClassify">↻ Re-classify batches</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2. Batch status</h2>
+      <div class="stats" id="batchStats"></div>
+      <div class="table-wrap"><table id="batchTable"></table></div>
+    </div>
+
+    <div class="card">
+      <h2>3. Material inventory</h2>
+      <div class="toolbar">
+        <input id="invSearch" type="search" placeholder="Search part…" />
+        <label class="toggle"><input type="checkbox" id="invShowAll" checked /> Show all stages</label>
+        <button class="btn" id="exportInv">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="invTable"></table></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: PLANNING ============ -->
+  <section class="tab-panel" id="panel-planning">
+    <div class="card">
+      <h2>Production plan</h2>
+      <div class="plan-add">
+        <select id="planModel"></select>
+        <input id="planQty" type="number" min="0" step="1" placeholder="Quantity" />
+        <button class="btn primary" id="planAdd">+ Add</button>
+        <button class="btn ghost" id="planClear">Clear plan</button>
+      </div>
+      <div id="planList" class="file-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>Shortage criteria</h2>
+      <p class="hint">Choose which stock to count as “available” when checking for shortages.</p>
+      <div class="criteria">
+        <label class="toggle"><input type="checkbox" id="c_factoryFloor" /> Factory Floor</label>
+        <label class="toggle"><input type="checkbox" id="c_edgeLine" /> Edge Line</label>
+        <div class="wh-group">
+          <span class="wh-label">Warehouses:</span>
+          <div id="whChecklist"></div>
+        </div>
+        <label class="toggle"><input type="checkbox" id="c_inTransit" /> In Transit</label>
+        <label class="safety">
+          Safety factor:
+          <input type="number" id="c_safety" min="0.1" step="0.05" value="1.0" />
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Material requirement &amp; shortage</h2>
+      <div class="stats" id="planStats"></div>
+      <div class="toolbar">
+        <input id="planSearch" type="search" placeholder="Search part…" />
+        <label class="toggle"><input type="checkbox" id="planOnlyShort" /> Only shortages</label>
+        <button class="btn" id="exportPlan">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="planTable"></table></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: SETTINGS ============ -->
+  <section class="tab-panel" id="panel-settings">
+    <div class="card">
+      <h2>Warehouses</h2>
+      <p class="hint">Edit names or disable warehouses you don't use. Changes apply instantly to filters and inventory.</p>
+      <div id="whEditor" class="wh-editor"></div>
+      <button class="btn" id="whAdd">+ Add warehouse</button>
+      <button class="btn primary" id="whSave">Save</button>
+    </div>
+
+    <div class="card">
+      <h2>Danger zone</h2>
+      <button class="btn danger" id="resetAll">Reset all data</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>MRP Planner · local-only · no data leaves your browser</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
