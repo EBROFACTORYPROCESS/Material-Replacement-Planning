@@ -1,0 +1,33 @@
+{
+  "appName": "MRP Planner",
+  "version": "1.0.0",
+  "warehouses": [
+    { "id": "WH1", "name": "Warehouse 1", "enabled": true },
+    { "id": "WH2", "name": "Warehouse 2", "enabled": true },
+    { "id": "WH3", "name": "Warehouse 3", "enabled": true },
+    { "id": "WH4", "name": "Warehouse 4", "enabled": true }
+  ],
+  "stages": {
+    "inTransit":    { "label": "In Transit",    "color": "#3b82f6" },
+    "warehouse":    { "label": "Warehouse",     "color": "#8b5cf6" },
+    "factoryFloor": { "label": "Factory Floor", "color": "#f59e0b" },
+    "edgeLine":     { "label": "Edge Line",     "color": "#10b981" },
+    "consumed":     { "label": "Consumed",      "color": "#9ca3af" }
+  },
+  "bomColumnHints": {
+    "partNo": ["零件号", "Part NO"],
+    "nameCN": ["零件名称(中文)", "Part Name(CN)"],
+    "nameEN": ["零件名称(英文)", "Part Name(EN)"],
+    "qty":    ["用量", "Qty"],
+    "uom":    ["度量单位", "UOM"],
+    "supplier": ["供应商名称", "SupplierName"],
+    "cpac":   ["CPAC编码", "CPAC"]
+  },
+  "shortageDefaults": {
+    "safetyFactor": 1.0,
+    "includeInTransit": false,
+    "includeWarehouses": true,
+    "includeFactoryFloor": true,
+    "includeEdgeLine": true
+  }
+}
