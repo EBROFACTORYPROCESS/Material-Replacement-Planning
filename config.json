@@ -1,7 +1,8 @@
 {
   "appName": "MRP Planner",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "defaultWarehouseId": "CY",
+  "autoAssignDefaultWarehouse": false,
   "warehouses": [
     { "id": "CY",  "name": "Container Yard", "enabled": true },
     { "id": "WH2", "name": "Warehouse 2",    "enabled": true },
