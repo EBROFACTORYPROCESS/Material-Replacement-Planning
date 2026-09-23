@@ -61,12 +61,12 @@ window.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function loadConfig() {
-  const defaults = {
+    defaultWarehouseId: 'CY',
     warehouses: [
-      {id:'WH1',name:'Warehouse 1',enabled:true},
-      {id:'WH2',name:'Warehouse 2',enabled:true},
-      {id:'WH3',name:'Warehouse 3',enabled:true},
-      {id:'WH4',name:'Warehouse 4',enabled:true}
+      {id:'CY', name:'Container Yard', enabled:true},
+      {id:'WH2',name:'Warehouse 2',    enabled:true},
+      {id:'WH3',name:'Warehouse 3',    enabled:true},
+      {id:'WH4',name:'Warehouse 4',    enabled:true}
     ],
     stages: {
       inTransit:{label:'In Transit',color:'#3b82f6'},
