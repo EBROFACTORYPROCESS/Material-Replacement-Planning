@@ -61,27 +61,37 @@ window.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function loadConfig() {
+  const defaults = {
     defaultWarehouseId: 'CY',
     warehouses: [
-      {id:'CY', name:'Container Yard', enabled:true},
-      {id:'WH2',name:'Warehouse 2',    enabled:true},
-      {id:'WH3',name:'Warehouse 3',    enabled:true},
-      {id:'WH4',name:'Warehouse 4',    enabled:true}
+      { id:'CY',  name:'Container Yard', enabled:true },
+      { id:'WH2', name:'Warehouse 2',    enabled:true },
+      { id:'WH3', name:'Warehouse 3',    enabled:true },
+      { id:'WH4', name:'Warehouse 4',    enabled:true }
     ],
     stages: {
-      inTransit:{label:'In Transit',color:'#3b82f6'},
-      warehouse:{label:'Warehouse',color:'#8b5cf6'},
-      factoryFloor:{label:'Factory Floor',color:'#f59e0b'},
-      edgeLine:{label:'Edge Line',color:'#10b981'},
-      consumed:{label:'Consumed',color:'#9ca3af'}
+      inTransit:    { label:'In Transit',    color:'#3b82f6' },
+      warehouse:    { label:'Warehouse',     color:'#8b5cf6' },
+      factoryFloor: { label:'Factory Floor', color:'#f59e0b' },
+      edgeLine:     { label:'Edge Line',     color:'#10b981' },
+      consumed:     { label:'Consumed',      color:'#9ca3af' }
     },
-    shortageDefaults:{safetyFactor:1.0,includeInTransit:false,includeWarehouses:true,includeFactoryFloor:true,includeEdgeLine:true},
+    shortageDefaults: {
+      safetyFactor: 1.0,
+      includeInTransit: false,
+      includeWarehouses: true,
+      includeFactoryFloor: true,
+      includeEdgeLine: true
+    },
     conversionTable: []
   };
+
   try {
     const res = await fetch('config.json');
     STATE.config = Object.assign({}, defaults, await res.json());
-    for (const k of Object.keys(defaults)) if (!(k in STATE.config)) STATE.config[k] = defaults[k];
+    for (const k of Object.keys(defaults)) {
+      if (!(k in STATE.config)) STATE.config[k] = defaults[k];
+    }
   } catch (e) {
     console.warn('config.json not loaded — using defaults', e);
     STATE.config = defaults;
