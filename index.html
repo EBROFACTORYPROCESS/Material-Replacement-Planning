@@ -73,18 +73,33 @@
     <div class="card">
       <h2>2. Batch status</h2>
       <div class="stats" id="batchStats"></div>
+      <div class="toolbar">
+        <input id="batchSearch" type="search" placeholder="Search batch / model / color / ship…" />
+        <select id="batchStageFilter">
+          <option value="all">All stages</option>
+          <option value="inTransit">In Transit</option>
+          <option value="warehouse">Warehouse</option>
+          <option value="factoryFloor">Factory Floor</option>
+          <option value="edgeLine">Edge Line</option>
+          <option value="consumed">Consumed</option>
+          <option value="unassigned">Unassigned</option>
+        </select>
+      </div>
       <div class="table-wrap"><table id="batchTable"></table></div>
     </div>
 
     <div class="card">
       <h2>3. Scrap submissions</h2>
-      <p class="hint">Record scrapped material. Scrap is subtracted from available inventory across all stages and considered in shortage checks.</p>
+      <p class="hint">Record scrapped material one-by-one or upload an Excel/CSV with columns: <code>Material Number</code>, <code>Quantity</code>, <code>Ubication</code>. Scrap is subtracted from <b>Available</b> inventory and considered in shortage checks.</p>
       <div class="scrap-form">
         <input list="partList" id="scrapPart" placeholder="Part No." />
         <datalist id="partList"></datalist>
-        <input id="scrapQty" type="number" min="0" step="0.001" placeholder="Qty" />
-        <input id="scrapNote" type="text" placeholder="Note (optional)" />
+        <input id="scrapQty"   type="number" min="0" step="0.001" placeholder="Qty" />
+        <input id="scrapUbi"   type="text" placeholder="Ubication" />
+        <input id="scrapNote"  type="text" placeholder="Note (optional)" />
         <button class="btn primary" id="scrapAdd">+ Submit scrap</button>
+        <button class="btn" id="scrapUploadBtn">⤒ Upload scrap file</button>
+        <input type="file" id="scrapFile" accept=".xlsx,.xls,.csv" hidden />
       </div>
       <div id="scrapList" class="scrap-list"></div>
     </div>
