@@ -1,5 +1,5 @@
 /* =========================================================
-   MRP Planner v1.3
+   MRP Planner v1.5
    ========================================================= */
 const STATE = {
   config: null,
@@ -63,35 +63,27 @@ window.addEventListener('DOMContentLoaded', async () => {
 async function loadConfig() {
   const defaults = {
     defaultWarehouseId: 'CY',
+    autoAssignDefaultWarehouse: true,
     warehouses: [
-      { id:'CY',  name:'Container Yard', enabled:true },
-      { id:'WH2', name:'Warehouse 2',    enabled:true },
-      { id:'WH3', name:'Warehouse 3',    enabled:true },
-      { id:'WH4', name:'Warehouse 4',    enabled:true }
+      {id:'CY',  name:'Container Yard', enabled:true},
+      {id:'WH2', name:'Warehouse 2',    enabled:true},
+      {id:'WH3', name:'Warehouse 3',    enabled:true},
+      {id:'WH4', name:'Warehouse 4',    enabled:true}
     ],
     stages: {
-      inTransit:    { label:'In Transit',    color:'#3b82f6' },
-      warehouse:    { label:'Warehouse',     color:'#8b5cf6' },
-      factoryFloor: { label:'Factory Floor', color:'#f59e0b' },
-      edgeLine:     { label:'Edge Line',     color:'#10b981' },
-      consumed:     { label:'Consumed',      color:'#9ca3af' }
+      inTransit:{label:'In Transit',color:'#3b82f6'},
+      warehouse:{label:'Warehouse',color:'#8b5cf6'},
+      factoryFloor:{label:'Factory Floor',color:'#f59e0b'},
+      edgeLine:{label:'Edge Line',color:'#10b981'},
+      consumed:{label:'Consumed',color:'#9ca3af'}
     },
-    shortageDefaults: {
-      safetyFactor: 1.0,
-      includeInTransit: false,
-      includeWarehouses: true,
-      includeFactoryFloor: true,
-      includeEdgeLine: true
-    },
+    shortageDefaults:{safetyFactor:1.0,includeInTransit:false,includeWarehouses:true,includeFactoryFloor:true,includeEdgeLine:true},
     conversionTable: []
   };
-
   try {
     const res = await fetch('config.json');
     STATE.config = Object.assign({}, defaults, await res.json());
-    for (const k of Object.keys(defaults)) {
-      if (!(k in STATE.config)) STATE.config[k] = defaults[k];
-    }
+    for (const k of Object.keys(defaults)) if (!(k in STATE.config)) STATE.config[k] = defaults[k];
   } catch (e) {
     console.warn('config.json not loaded — using defaults', e);
     STATE.config = defaults;
@@ -521,6 +513,9 @@ function parseDate(v) {
   return isNaN(d) ? null : d;
 }
 
+/* =========================================================
+   CLASSIFY — the auto-assign only fires for warehouse-stage batches
+   ========================================================= */
 function classifyBatches() {
   const t = today();
   const defaultWh  = STATE.config.defaultWarehouseId || null;
@@ -528,45 +523,43 @@ function classifyBatches() {
 
   for (const b of STATE.batches) {
 
-    // 1. CONSUMED
+    // 1. CONSUMED — production finished and start date in the past
     if (b.trimIn && b.trimIn < t && /^DONE$/i.test(b.production || '')) {
       b._stage = 'consumed';
       b._warehouse = null;
       continue;
     }
 
-    // 2. IN TRANSIT
+    // 2. IN TRANSIT — estimated arrival still in the future
     if (b.arrival && b.arrival > t) {
       b._stage = 'inTransit';
       b._warehouse = null;
       continue;
     }
 
-    // 3. FACTORY FLOOR
+    // 3. FACTORY FLOOR — decanting date already passed
     if (b.decanting && b.decanting <= t) {
       b._stage = 'factoryFloor';
       b._warehouse = null;
       continue;
     }
 
-    // 4. WAREHOUSE — arrived, not yet decanted
+    // 4. WAREHOUSE — arrived but decanting not yet occurred
+    //    → auto-assign default warehouse ONLY if flag is on AND none set
     if (b.arrival && b.arrival <= t && (!b.decanting || b.decanting > t)) {
       b._stage = 'warehouse';
-
-      // ONLY auto-assign when:
-      //   (a) the flag is on, AND
-      //   (b) no manual warehouse is already set
       if (autoAssign && !b._warehouse && defaultWh) {
         b._warehouse = defaultWh;
       }
       continue;
     }
 
-    // 5. Fallback
+    // 5. UNASSIGNED — no dates to place it
     b._stage = 'unassigned';
     b._warehouse = null;
   }
 }
+
 /* =========================================================
    CONVERSION TABLE
    ========================================================= */
@@ -594,7 +587,7 @@ function resolveModelForBatch(batch) {
 }
 
 /* =========================================================
-   BATCH CELL VALUE HELPERS (for filter/sort)
+   BATCH CELL VALUE HELPERS
    ========================================================= */
 function getBatchCellValue(b, colId) {
   switch (colId) {
@@ -619,7 +612,6 @@ function isoDate(d) {
   return `${y}-${m}-${dd}`;
 }
 
-/* Display label for a cell value (used in filter popup + rendering) */
 function getBatchCellLabel(b, colId) {
   const v = getBatchCellValue(b, colId);
   if (colId === 'stage') {
@@ -638,7 +630,6 @@ function getBatchCellLabel(b, colId) {
   return v === '' ? '—' : String(v);
 }
 
-/* Unique values for a column → [{ key, label }] */
 function getUniqueValues(colId) {
   const seen = new Map();
   for (const b of STATE.batches) {
@@ -657,7 +648,6 @@ function getUniqueValues(colId) {
 function renderBatchStats() {
   const stages = STATE.config.stages;
 
-  // aggregate per stage
   const agg = {};
   for (const b of STATE.batches) {
     if (!agg[b._stage]) agg[b._stage] = { count: 0, qty: 0, byModel: {} };
@@ -711,7 +701,7 @@ function renderBatchStats() {
           ${breakdownHtml(a.byModel)}
         </div>`;
     }).join('')}
-    <div class="stat" title="Could not be classified automatically">
+    <div class="stat" title="Could not be classified automatically — missing dates">
       <div class="label">Unassigned</div>
       <div class="value">${fmt((agg.unassigned||{}).qty||0)}<span class="unit">vehicles</span></div>
       <div class="sub"><b>${fmt((agg.unassigned||{}).count||0)}</b> batches</div>
@@ -721,7 +711,7 @@ function renderBatchStats() {
 }
 
 /* =========================================================
-   BATCH TABLE (with column filters + sorts)
+   BATCH TABLE
    ========================================================= */
 function renderBatchTable() {
   const tbl = $('#batchTable');
@@ -732,7 +722,6 @@ function renderBatchTable() {
 
   const searchText = ($('#batchSearch').value || '').trim().toLowerCase();
 
-  // 1) filter
   let list = STATE.batches.map((b, i) => ({ b, i }));
   for (const [colId, allowedSet] of Object.entries(STATE.batchView.filters)) {
     if (!allowedSet) continue;
@@ -745,19 +734,17 @@ function renderBatchTable() {
     });
   }
 
-  // 2) sort
-  const sortCol = Object.keys(STATE.batchView.sorts)[0]; // only one active sort at a time
+  const sortCol = Object.keys(STATE.batchView.sorts)[0];
   if (sortCol) {
     const dir = STATE.batchView.sorts[sortCol] === 'desc' ? -1 : 1;
     list.sort((x, y) => {
       const a = getBatchCellValue(x.b, sortCol);
       const b = getBatchCellValue(y.b, sortCol);
-      if (sortCol === 'qty') return (Number(a)||0) - (Number(b)||0) < 0 ? -1 * dir : 1 * dir;
+      if (sortCol === 'qty') return ((Number(a)||0) - (Number(b)||0)) * dir;
       return String(a).localeCompare(String(b), undefined, { numeric: true }) * dir;
     });
   }
 
-  // 3) header
   const header = BATCH_COLS.map(col => {
     const cls = [
       'col-head',
@@ -773,8 +760,7 @@ function renderBatchTable() {
     </th>`;
   }).join('');
 
-  // 4) rows
-  const whOpts = STATE.config.warehouses.filter(w => w.enabled);
+  const whOpts = STATE.config.warehouses;
   const stages = STATE.config.stages;
 
   const body = list.map(({ b, i }) => {
@@ -785,12 +771,20 @@ function renderBatchTable() {
       : (b.model
           ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
           : '—');
+
+    // NEW: flag unassigned rows with missing arrival date
+    const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
+    const unassignedFlag = isUnassignedNoDate
+      ? `<span class="pill warn" title="No Arrival Date — cannot be classified" style="margin-left:6px">⚠</span>`
+      : '';
+
     const whLabel = b._warehouse
       ? (STATE.config.warehouses.find(w => w.id === b._warehouse)?.name || b._warehouse)
       : '—';
+
     return `
       <tr data-i="${i}">
-        <td>${escapeHtml(b.batch)}</td>
+        <td>${escapeHtml(b.batch)}${unassignedFlag}</td>
         <td>${escapeHtml(b.model)}</td>
         <td>${escapeHtml(b.color)}</td>
         <td class="num">${fmt(b.qty)}</td>
@@ -800,21 +794,17 @@ function renderBatchTable() {
         <td>${b.trimIn    ? b.trimIn.toLocaleDateString()    : '—'}</td>
         <td>${escapeHtml(b.production)}</td>
         <td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>
-         // Inside the batch row template, replace the warehouse cell with:
-         <td>${b._stage === 'warehouse' ? `
-           <select data-role="wh" data-i="${i}">
-             <option value="">—</option>
-             ${STATE.config.warehouses.map(w =>
-               `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`
-             ).join('')}
-           </select>` : '—'}</td>
+        <td>${b._stage === 'warehouse' ? `
+          <select data-role="wh" data-i="${i}">
+            <option value="">—</option>
+            ${whOpts.map(w => `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}
+          </select>` : escapeHtml(whLabel)}</td>
         <td>${linkCell}</td>
       </tr>`;
   }).join('');
 
   tbl.innerHTML = `<thead><tr>${header}</tr></thead><tbody>${body || `<tr><td colspan="12" style="text-align:center;color:#6b7280;padding:16px">No batches match the current filters</td></tr>`}</tbody>`;
 
-  // 5) wire filter buttons
   tbl.querySelectorAll('.filter-btn').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -822,7 +812,6 @@ function renderBatchTable() {
     });
   });
 
-  // 6) wire warehouse selects
   tbl.querySelectorAll('select[data-role=wh]').forEach(sel => {
     sel.addEventListener('change', e => {
       const i = +e.target.dataset.i;
@@ -836,7 +825,6 @@ function renderBatchTable() {
    FILTER POPUP
    ========================================================= */
 function bindFilterPopupGlobal() {
-  // close on outside click
   document.addEventListener('click', e => {
     const popup = $('#filterPopup');
     if (popup.classList.contains('hidden')) return;
@@ -844,7 +832,6 @@ function bindFilterPopupGlobal() {
     if (e.target.closest('.filter-btn')) return;
     closeFilterPopup();
   });
-  // close on scroll of any ancestor (position is fixed)
   window.addEventListener('scroll', closeFilterPopup, true);
   window.addEventListener('resize', closeFilterPopup);
 }
@@ -861,7 +848,7 @@ function openFilterPopup(colId, anchor) {
   const popup = $('#filterPopup');
   popup.dataset.col = colId;
   const existingFilter = STATE.batchView.filters[colId];
-  popup._workingSet = existingFilter ? new Set(existingFilter) : null; // null = all
+  popup._workingSet = existingFilter ? new Set(existingFilter) : null;
   popup._search = '';
   popup.classList.remove('hidden');
   positionPopup(popup, anchor);
@@ -871,13 +858,13 @@ function openFilterPopup(colId, anchor) {
 function positionPopup(popup, anchor) {
   const r = anchor.getBoundingClientRect();
   const pw = 270, ph = 420;
-  let left = r.right - pw;                            // right-align to button
+  let left = r.right - pw;
   if (left < 8) left = 8;
   if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
 
   let top = r.bottom + 6;
   if (top + ph > window.innerHeight - 8) {
-    top = Math.max(8, r.top - ph - 6);                // open upward if no space below
+    top = Math.max(8, r.top - ph - 6);
   }
   popup.style.left = left + 'px';
   popup.style.top  = top + 'px';
@@ -888,7 +875,6 @@ function paintFilterPopup(colId) {
   const col = BATCH_COLS.find(c => c.id === colId);
   const allValues = getUniqueValues(colId);
 
-  // sort labels
   let ascLabel = '↑ Sort A → Z';
   let descLabel = '↓ Sort Z → A';
   if (col && col.date) { ascLabel = '↑ Sort oldest → newest'; descLabel = '↓ Sort newest → oldest'; }
@@ -897,7 +883,7 @@ function paintFilterPopup(colId) {
   const currentSort = STATE.batchView.sorts[colId];
   const search = (popup._search || '').toLowerCase();
 
-  const working = popup._workingSet; // null = all selected
+  const working = popup._workingSet;
 
   const visible = allValues.filter(v => !search || v.label.toLowerCase().includes(search));
 
@@ -928,7 +914,6 @@ function paintFilterPopup(colId) {
     </div>
   `;
 
-  // sort buttons
   popup.querySelectorAll('.fp-sort button').forEach(b => {
     b.addEventListener('click', e => {
       e.stopPropagation();
@@ -940,11 +925,9 @@ function paintFilterPopup(colId) {
     });
   });
 
-  // search box
   const si = popup.querySelector('#fpSearchInput');
   si.addEventListener('input', e => {
     popup._search = e.target.value;
-    // preserve checkbox state before re-paint
     const currentChecked = new Set();
     popup.querySelectorAll('.fp-value input[type=checkbox]:checked').forEach(c => currentChecked.add(c.dataset.key));
     const currentAll = popup.querySelectorAll('.fp-value input[type=checkbox]').length;
@@ -952,17 +935,14 @@ function paintFilterPopup(colId) {
     else popup._workingSet = currentChecked;
 
     paintFilterPopup(colId);
-    // restore focus to search box
     const newSi = $('#filterPopup #fpSearchInput');
     if (newSi) { newSi.focus(); newSi.setSelectionRange(newSi.value.length, newSi.value.length); }
   });
   si.addEventListener('click', e => e.stopPropagation());
 
-  // checkboxes
   popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(cb => {
     cb.addEventListener('change', e => {
       e.stopPropagation();
-      // materialise working set if currently "all"
       if (popup._workingSet === null) {
         popup._workingSet = new Set(allValues.map(v => v.key));
       }
@@ -970,12 +950,10 @@ function paintFilterPopup(colId) {
       else            popup._workingSet.delete(cb.dataset.key);
     });
   });
-  // click on the row shouldn't close the popup
   popup.querySelectorAll('.fp-value').forEach(lbl => {
     lbl.addEventListener('click', e => e.stopPropagation());
   });
 
-  // actions
   popup.querySelectorAll('.fp-actions button').forEach(b => {
     b.addEventListener('click', e => {
       e.stopPropagation();
@@ -987,9 +965,8 @@ function paintFilterPopup(colId) {
         popup._workingSet = new Set();
         popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(c => c.checked = false);
       } else if (act === 'apply') {
-        // if working set is null → no filter
         if (popup._workingSet === null) delete STATE.batchView.filters[colId];
-        else if (popup._workingSet.size === 0) STATE.batchView.filters[colId] = new Set(); // matches nothing
+        else if (popup._workingSet.size === 0) STATE.batchView.filters[colId] = new Set();
         else STATE.batchView.filters[colId] = new Set(popup._workingSet);
         closeFilterPopup();
         renderBatchTable();
