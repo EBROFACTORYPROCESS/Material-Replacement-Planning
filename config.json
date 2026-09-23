@@ -1,6 +1,6 @@
 {
   "appName": "MRP Planner",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "warehouses": [
     { "id": "WH1", "name": "Warehouse 1", "enabled": true },
     { "id": "WH2", "name": "Warehouse 2", "enabled": true },
@@ -14,20 +14,15 @@
     "edgeLine":     { "label": "Edge Line",     "color": "#10b981" },
     "consumed":     { "label": "Consumed",      "color": "#9ca3af" }
   },
-  "bomColumnHints": {
-    "partNo": ["零件号", "Part NO"],
-    "nameCN": ["零件名称(中文)", "Part Name(CN)"],
-    "nameEN": ["零件名称(英文)", "Part Name(EN)"],
-    "qty":    ["用量", "Qty"],
-    "uom":    ["度量单位", "UOM"],
-    "supplier": ["供应商名称", "SupplierName"],
-    "cpac":   ["CPAC编码", "CPAC"]
-  },
   "shortageDefaults": {
     "safetyFactor": 1.0,
     "includeInTransit": false,
     "includeWarehouses": true,
     "includeFactoryFloor": true,
     "includeEdgeLine": true
-  }
+  },
+  "conversionTable": [
+    { "modelo": "S400 HEV Excellence", "color": "Khaki white", "vehicleMatNo": "LE60U5BWL01" },
+    { "modelo": "S400 HEV Comfort",    "color": "Khaki white", "vehicleMatNo": "LE60U5BWS01" }
+  ]
 }
