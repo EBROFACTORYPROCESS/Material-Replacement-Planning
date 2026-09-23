@@ -126,3 +126,199 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 
 /* Footer */
 footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}
+/* ============================================================
+   Scrap Submission
+   ============================================================ */
+.scrap-filter-bar,
+.queue-filter-bar,
+.error-filter-bar,
+.result-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  margin: 10px 0;
+  background: #f8f9fa;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.filter-search {
+  flex: 1;
+  min-width: 140px;
+  padding: 6px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.filter-select {
+  padding: 6px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 12px;
+  background: #fff;
+}
+
+.filter-clear-btn {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  background: #6c757d;
+  color: #fff;
+}
+.filter-clear-btn:hover { background: #5a6268; }
+
+.filter-active-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  background: #e3f2fd;
+  color: #0d47a1;
+  border-radius: 12px;
+  font-size: 11px;
+}
+.filter-active-tag button {
+  background: transparent;
+  border: none;
+  color: #0d47a1;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+  line-height: 1;
+}
+
+/* Scrap table */
+.scrap-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+table.scrap-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  white-space: nowrap;
+}
+table.scrap-table th,
+table.scrap-table td {
+  border: 1px solid #eee;
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+table.scrap-table thead th {
+  position: sticky;
+  top: 0;
+  background: #f8f9fa;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  z-index: 2;
+}
+table.scrap-table thead th:hover {
+  background: #e9ecef;
+}
+table.scrap-table thead th .sort-indicator {
+  margin-left: 4px;
+  opacity: 0.4;
+  font-size: 10px;
+}
+table.scrap-table thead th.sorted-asc .sort-indicator::after {
+  content: '▲';
+  opacity: 1;
+}
+table.scrap-table thead th.sorted-desc .sort-indicator::after {
+  content: '▼';
+  opacity: 1;
+}
+table.scrap-table tbody tr:hover { background: #f8fbff; }
+
+.scrap-row-vehicle {
+  background: #fff8e6 !important;
+}
+.scrap-row-vehicle td {
+  font-weight: 500;
+}
+
+/* Sort indicators for the result table */
+table.result-table thead th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+table.result-table thead th.sortable:hover {
+  background: #e9ecef;
+}
+table.result-table thead th .sort-indicator {
+  margin-left: 4px;
+  opacity: 0.35;
+  font-size: 10px;
+}
+table.result-table thead th.sorted-asc .sort-indicator::after {
+  content: '▲';
+  opacity: 1;
+}
+table.result-table thead th.sorted-desc .sort-indicator::after {
+  content: '▼';
+  opacity: 1;
+}
+
+/* Filter dropdown for column headers */
+.filter-dropdown {
+  position: absolute;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+  padding: 8px;
+  min-width: 180px;
+  max-height: 300px;
+  overflow-y: auto;
+  z-index: 100;
+  font-size: 12px;
+}
+.filter-dropdown label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.filter-dropdown label:hover {
+  background: #f0f7ff;
+}
+.filter-dropdown input[type="checkbox"] {
+  cursor: pointer;
+}
+.filter-dropdown .fd-actions {
+  display: flex;
+  gap: 6px;
+  padding-top: 6px;
+  margin-top: 6px;
+  border-top: 1px solid #eee;
+}
+.filter-dropdown .fd-actions button {
+  flex: 1;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.filter-dropdown .fd-apply {
+  background: #4a90e2;
+  color: #fff;
+}
+.filter-dropdown .fd-clear {
+  background: #e9ecef;
+  color: #333;
+}
