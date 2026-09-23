@@ -523,21 +523,50 @@ function parseDate(v) {
 
 function classifyBatches() {
   const t = today();
-  const defaultWh = STATE.config.defaultWarehouseId || null;
+  const defaultWh  = STATE.config.defaultWarehouseId || null;
+  const autoAssign = STATE.config.autoAssignDefaultWarehouse === true;
 
   for (const b of STATE.batches) {
-    // ... (unchanged consumed / inTransit / factoryFloor checks)
 
-    if (b.arrival && b.arrival <= t && (!b.decanting || b.decanting > t)) {
-      b._stage = 'warehouse';
-      // NEW: assign default warehouse if the user hasn't set one
-      if (!b._warehouse && defaultWh) b._warehouse = defaultWh;
+    // 1. CONSUMED
+    if (b.trimIn && b.trimIn < t && /^DONE$/i.test(b.production || '')) {
+      b._stage = 'consumed';
+      b._warehouse = null;
       continue;
     }
+
+    // 2. IN TRANSIT
+    if (b.arrival && b.arrival > t) {
+      b._stage = 'inTransit';
+      b._warehouse = null;
+      continue;
+    }
+
+    // 3. FACTORY FLOOR
+    if (b.decanting && b.decanting <= t) {
+      b._stage = 'factoryFloor';
+      b._warehouse = null;
+      continue;
+    }
+
+    // 4. WAREHOUSE — arrived, not yet decanted
+    if (b.arrival && b.arrival <= t && (!b.decanting || b.decanting > t)) {
+      b._stage = 'warehouse';
+
+      // ONLY auto-assign when:
+      //   (a) the flag is on, AND
+      //   (b) no manual warehouse is already set
+      if (autoAssign && !b._warehouse && defaultWh) {
+        b._warehouse = defaultWh;
+      }
+      continue;
+    }
+
+    // 5. Fallback
     b._stage = 'unassigned';
+    b._warehouse = null;
   }
 }
-
 /* =========================================================
    CONVERSION TABLE
    ========================================================= */
