@@ -440,16 +440,34 @@ function parseDate(v) {
 function classifyBatches() {
   const t = today();
   for (const b of STATE.batches) {
-    // consumed: TRIM IN DATE in the past AND Production == DONE
-    const trimPast = b.trimIn && b.trimIn < t;
-    const isDone = /^DONE$/i.test(b.production);
-    if (trimPast && isDone) { b._stage = 'consumed'; continue; }
-    // in transit: arrival date in the future
-    if (b.arrival && b.arrival > t) { b._stage = 'inTransit'; continue; }
-    // arrived: decanting date exists (and past)
-    if (b.decanting && b.decanting <= t) { b._stage = 'factoryFloor'; continue; }
-    // arrived but no decanting → assume warehouse default
-    if (b.arrival && b.arrival <= t) { b._stage = 'warehouse'; b._warehouse = b._warehouse || null; continue; }
+
+    // 1. CONSUMED — production finished and start date already in the past
+    if (b.trimIn && b.trimIn < t && /^DONE$/i.test(b.production || '')) {
+      b._stage = 'consumed';
+      continue;
+    }
+
+    // 2. IN TRANSIT — estimated arrival still in the future
+    if (b.arrival && b.arrival > t) {
+      b._stage = 'inTransit';
+      continue;
+    }
+
+    // 3. FACTORY FLOOR — decanting date already passed
+    //    (covers: decanting past + trim-in future, and decanting past + trim-in past + not yet DONE)
+    if (b.decanting && b.decanting <= t) {
+      b._stage = 'factoryFloor';
+      continue;
+    }
+
+    // 4. WAREHOUSE — arrived but decanting not yet occurred
+    if (b.arrival && b.arrival <= t && (!b.decanting || b.decanting > t)) {
+      b._stage = 'warehouse';
+      // _warehouse stays as-is (user-selectable); defaults to null
+      continue;
+    }
+
+    // 5. Fallback
     b._stage = 'unassigned';
   }
 }
