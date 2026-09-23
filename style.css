@@ -113,11 +113,15 @@ table.compact td.num,table.compact th.num{width:78px}
 .stage .dot{width:8px;height:8px;border-radius:50%}
 
 /* Stats */
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
   gap:10px;margin-bottom:14px}
 .stat{background:#f8fafc;border:1px solid var(--border);border-radius:10px;padding:12px}
-.stat .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.stat .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;
+  display:flex;align-items:center;gap:6px}
 .stat .value{font-size:20px;font-weight:600;margin-top:4px}
+.stat .value .unit{font-size:12px;font-weight:500;color:var(--muted);margin-left:4px}
+.stat .sub{font-size:11px;color:var(--muted);margin-top:2px}
+.stat .sub b{color:var(--text);font-weight:600}
 
 /* Plan add */
 .plan-add{display:flex;gap:10px;flex-wrap:wrap}
@@ -157,12 +161,12 @@ table.compact td.num,table.compact th.num{width:78px}
 
 /* Scrap */
 .scrap-form{display:grid;
-  grid-template-columns:1.4fr 100px 1fr auto;gap:8px;margin-bottom:12px}
+  grid-template-columns:1.3fr 90px 1fr 1fr auto auto;gap:8px;margin-bottom:12px}
 .scrap-form input{padding:8px 12px;border:1px solid var(--border);
   border-radius:8px;font-size:13px;background:#fff}
 .scrap-list{display:flex;flex-direction:column;gap:6px}
 .scrap-item{display:grid;
-  grid-template-columns:140px 1fr 90px 1fr auto;gap:10px;align-items:center;
+  grid-template-columns:150px 1.1fr 90px 1.2fr 1fr auto;gap:10px;align-items:center;
   padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;
   font-size:12.5px}
 .scrap-item .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -179,4 +183,5 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}
   .scrap-form{grid-template-columns:1fr 1fr;}
   .conv-row,.conv-head{grid-template-columns:1fr 1fr;}
   .file-item.bom-item{grid-template-columns:1fr;}
+  .scrap-item{grid-template-columns:1fr 1fr;}
 }
