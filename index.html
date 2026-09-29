@@ -26,15 +26,37 @@
   <!-- ============ TAB: BOM ============ -->
   <section class="tab-panel active" id="panel-bom">
     <div class="card">
-      <h2>1. Upload BOM files</h2>
-      <p class="hint">Upload one BOM file per vehicle configuration. Each BOM = parts required to build <b>1 vehicle</b>. The Vehicle Material No. is auto-detected from the file header and can be edited below.</p>
-      <div class="dropzone" id="bomDrop">
-        <input type="file" id="bomInput" multiple accept=".xlsx,.xls,.csv" />
-        <div class="dz-inner">
-          <strong>Drop BOM files here</strong>
-          <span>or click to browse</span>
+      <h2>1. Load BOM folder</h2>
+      <p class="hint">Pick the folder that contains your BOM files. Subfolders are scanned recursively for <code>.xlsx</code>, <code>.xls</code>, and <code>.csv</code>. Each file may contain many vehicle+colour+batch combinations — they're grouped automatically.</p>
+    
+      <div class="folder-loader">
+        <div class="folder-path-row">
+          <input id="bomFolderPath" type="text" readonly placeholder="No folder selected…" />
+          <button class="btn" id="bomFolderPick">📁 Choose folder</button>
+          <button class="btn primary" id="bomFolderProcess" disabled>▶ Process files</button>
+        </div>
+        <div class="folder-hint" id="bomFolderInfo">No folder selected yet.</div>
+    
+        <!-- hidden fallback picker for browsers without File System Access API -->
+        <input type="file" id="bomFolderFallback" webkitdirectory directory multiple hidden />
+    
+        <div class="progress-wrap hidden" id="bomProgressWrap">
+          <div class="progress-bar"><div class="progress-fill" id="bomProgressFill"></div></div>
+          <div class="progress-label" id="bomProgressLabel">Preparing…</div>
+          <div class="progress-file-list" id="bomProgressList"></div>
         </div>
       </div>
+    
+      <details class="folder-fallback">
+        <summary>…or drop individual files here</summary>
+        <div class="dropzone" id="bomDrop" style="margin-top:12px">
+          <input type="file" id="bomInput" multiple accept=".xlsx,.xls,.csv" />
+          <div class="dz-inner">
+            <strong>Drop BOM files here</strong>
+            <span>or click to browse</span>
+          </div>
+        </div>
+      </details>
       <div id="bomList" class="file-list"></div>
     </div>
 
