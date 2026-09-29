@@ -242,3 +242,48 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}
 
 .file-item.bom-item{display:grid;grid-template-columns:auto 1fr 1fr 1fr auto;
   gap:12px;align-items:end}
+/* ===== Hierarchical BOM list (spec → colour → batches) ===== */
+.bom-spec-group{
+  border:1px solid var(--border);border-radius:10px;background:#fff;
+  margin-bottom:10px;overflow:hidden}
+.bom-spec-header{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 14px;background:#eef2f7;border-bottom:1px solid var(--border);
+  cursor:pointer;list-style:none}
+.bom-spec-header::-webkit-details-marker{display:none}
+.bom-spec-header::before{
+  content:'▾';color:var(--muted);font-size:11px;transition:transform .15s}
+details.bom-spec-group:not([open]) > .bom-spec-header::before{transform:rotate(-90deg)}
+.bom-spec-header .spec-name{font-weight:600;color:var(--text);flex:1}
+.bom-spec-header .spec-count{font-size:11px;color:var(--muted);font-weight:500}
+.bom-color-list{display:flex;flex-direction:column}
+.bom-color-group{padding:8px 14px 10px 22px;border-bottom:1px solid #f1f5f9}
+.bom-color-group:last-child{border-bottom:0}
+.bom-color-header{
+  display:flex;align-items:center;gap:10px;
+  padding:4px 0 6px;cursor:pointer;list-style:none}
+.bom-color-header::-webkit-details-marker{display:none}
+.bom-color-header::before{
+  content:'▾';color:var(--muted);font-size:10px;transition:transform .15s}
+details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate(-90deg)}
+.color-code{
+  display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;
+  letter-spacing:.06em}
+.color-name{font-size:13px;color:var(--text);font-weight:500;flex:1}
+.color-count{font-size:11px;color:var(--muted)}
+.bom-batch-list{display:flex;flex-direction:column;gap:4px;padding-left:8px}
+.bom-batch-item{
+  display:grid;grid-template-columns:auto 1.1fr 1.3fr 1.9fr auto;
+  gap:8px;align-items:center;
+  padding:5px 8px;background:#fafbfd;border:1px solid #eef2f7;border-radius:6px}
+.bom-batch-item input{
+  padding:4px 8px;border:1px solid var(--border);border-radius:5px;
+  font-size:12px;background:#fff;width:100%;min-width:0}
+.bom-batch-item input.mono{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
+.batch-parts-tag{
+  font-size:10px;font-weight:600;padding:2px 6px;border-radius:99px;
+  background:#e0e7ff;color:#3730a3;white-space:nowrap;min-width:22px;text-align:center}
+.bom-batch-item button[data-role=remove]{
+  color:var(--danger);padding:2px 6px;font-size:14px}
