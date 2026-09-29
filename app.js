@@ -1569,7 +1569,7 @@ function exportPlan() {
       partNo, info.nameCN || info.nameEN, info.uom,
       round3(req), round3(avail), round3(short), short > 0 ? 'SHORT' : 'OK'
     ]);
-  }
+  };
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Plan');
   downloadWorkbook(wb, `Production_Plan_${dateStamp()}.xlsx`);
