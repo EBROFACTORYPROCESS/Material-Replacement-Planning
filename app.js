@@ -1408,6 +1408,9 @@ function renderInventoryTable() {
    BUTTONS
    ========================================================= */
 function bindButtons() {
+  $('#bomFolderPick').addEventListener('click', pickBomFolder);
+  $('#bomFolderProcess').addEventListener('click', processBomFolder);
+  bindFolderFallback();   
   $('#bomSearch').addEventListener('input', renderBomTable);
   $('#bomFilter').addEventListener('change', renderBomTable);
   $('#invSearch').addEventListener('input', renderInventoryTable);
@@ -1419,6 +1422,12 @@ function bindButtons() {
 
   $('#batchClearFilters').addEventListener('click', () => {
     STATE.batchView = { sorts: {}, filters: {} };
+    _bomFolderHandle = null;
+    _bomFolderFiles  = [];
+    $('#bomFolderPath').value = '';
+    $('#bomFolderInfo').textContent = 'No folder selected yet.';
+    $('#bomFolderProcess').disabled = true;
+    $('#bomProgressWrap').classList.add('hidden');
     $('#batchSearch').value = '';
     renderBatchTable();
   });
@@ -1774,5 +1783,153 @@ function dateStamp() {
   return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
 }
 function round3(n) { return Math.round(n * 1000) / 1000; }
+/* =========================================================
+   BOM FOLDER LOADER
+   ========================================================= */
+let _bomFolderHandle = null;         // FileSystemDirectoryHandle (File System Access API)
+let _bomFolderFiles  = [];           // [{ file, path }]
 
+function isBomFile(name) {
+  return /\.(xlsx|xls|csv)$/i.test(name);
+}
+
+/* Small helper — yields to the browser so the UI can repaint mid-loop */
+function yieldToUI() {
+  return new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+}
+
+async function pickBomFolder() {
+  // 1. Modern API — recursive, live handle
+  if (typeof window.showDirectoryPicker === 'function') {
+    try {
+      const handle = await window.showDirectoryPicker({ mode: 'read' });
+      _bomFolderHandle = handle;
+      $('#bomFolderPath').value = '/' + handle.name + '/';
+      _bomFolderFiles = [];
+      $('#bomFolderInfo').textContent = 'Scanning folder…';
+      $('#bomFolderProcess').disabled = true;
+      await walkDirectory(handle, '');
+      updateFolderInfo();
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;          // user closed the dialog
+      console.warn('showDirectoryPicker failed, falling back to webkitdirectory', e);
+    }
+  }
+  // 2. Fallback — pick folder via native file input
+  $('#bomFolderFallback').click();
+}
+
+async function walkDirectory(dirHandle, prefix) {
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === 'file') {
+      if (!isBomFile(entry.name)) continue;
+      const file = await entry.getFile();
+      _bomFolderFiles.push({ file, path: prefix + entry.name });
+    } else if (entry.kind === 'directory') {
+      // skip hidden/system folders
+      if (entry.name.startsWith('.') || entry.name.startsWith('~')) continue;
+      await walkDirectory(entry, prefix + entry.name + '/');
+    }
+  }
+}
+
+function updateFolderInfo() {
+  const n = _bomFolderFiles.length;
+  $('#bomFolderInfo').textContent = n
+    ? `${n} BOM file${n===1?'':'s'} found — click “Process files”.`
+    : 'No BOM files found in that folder.';
+  $('#bomFolderProcess').disabled = n === 0;
+}
+
+async function processBomFolder() {
+  const files = _bomFolderFiles;
+  if (!files.length) return;
+
+  const wrap  = $('#bomProgressWrap');
+  const fill  = $('#bomProgressFill');
+  const label = $('#bomProgressLabel');
+  const list  = $('#bomProgressList');
+
+  wrap.classList.remove('hidden');
+  fill.style.width = '0%';
+  list.innerHTML = files.map((f, i) => `
+    <div class="progress-file" data-i="${i}">
+      <span class="pf-status pending">◌</span>
+      <span class="pf-name" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>
+      <span class="pf-note">waiting…</span>
+    </div>`).join('');
+
+  let ok = 0, fail = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const { file, path } = files[i];
+    const row = list.querySelector(`[data-i="${i}"]`);
+    const st  = row.querySelector('.pf-status');
+    const nt  = row.querySelector('.pf-note');
+
+    st.className = 'pf-status working';
+    st.textContent = '◐';
+    nt.textContent = 'parsing…';
+    label.textContent = `Parsing ${i+1} / ${files.length} — ${path}`;
+    await yieldToUI();
+
+    try {
+      const rows = await fileToRows(file);
+      const parsedList = parseBOM(rows, path);
+      if (!parsedList.length) throw new Error('no parts found');
+
+      for (const parsed of parsedList) {
+        const key = bomKeyOf(parsed);
+        const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
+        if (existing >= 0) STATE.boms.splice(existing, 1);
+        STATE.boms.push(parsed);
+      }
+      const partCount = parsedList.reduce((a, p) => a + p.parts.length, 0);
+
+      st.className = 'pf-status done';
+      st.textContent = '✓';
+      nt.textContent = `${parsedList.length} BOM${parsedList.length===1?'':'s'}, ${partCount} parts`;
+      ok++;
+    } catch (e) {
+      console.error(e);
+      st.className = 'pf-status fail';
+      st.textContent = '✕';
+      nt.textContent = e.message || 'failed';
+      fail++;
+    }
+
+    fill.style.width = (((i + 1) / files.length) * 100).toFixed(1) + '%';
+    await yieldToUI();
+  }
+
+  label.textContent = `Done — ${ok} succeeded, ${fail} failed`;
+
+  rebuildPartIndex();
+  renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
+  renderBatchTable(); renderBatchStats();
+  computeInventory(); renderInventoryTable(); renderPlanning();
+}
+
+/* Fallback: wire the <input webkitdirectory> */
+function bindFolderFallback() {
+  const inp = $('#bomFolderFallback');
+  if (!inp) return;
+  inp.addEventListener('change', e => {
+    const files = Array.from(e.target.files || []);
+    _bomFolderFiles = files
+      .filter(f => isBomFile(f.name))
+      .map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
+    // derive a display "path" from the first file's relative path
+    if (_bomFolderFiles.length) {
+      const first = _bomFolderFiles[0].path;
+      const root  = first.split('/')[0];
+      $('#bomFolderPath').value = '/' + root + '/';
+    } else {
+      $('#bomFolderPath').value = '';
+    }
+    updateFolderInfo();
+    e.target.value = '';
+  });
+}
 window.MRP = STATE;
