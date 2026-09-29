@@ -412,7 +412,7 @@ function renderBomTable() {
     if (mode === 'common'   && !p.isCommon) return false;
     if (mode === 'specific' &&  p.isCommon) return false;
     if (q) {
-      const hay = `${p.partNo} ${p.nameCN} ${p.nameEN}`.toLowerCase();
+      const hay = `${p.partNo} ${p.nameEN} ${p.nameCN}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -424,7 +424,7 @@ function renderBomTable() {
   const head = `
     <thead><tr>
       <th class="c-partno">Part No.</th>
-      <th class="c-nameen">Name</th>
+      <th class="c-nameen">Part Name (EN)</th>
       <th class="c-uom">UOM</th>
       <th class="c-type">Type</th>
       ${boms.map(b => {
@@ -436,7 +436,7 @@ function renderBomTable() {
   const body = rows.map(p => `
     <tr>
       <td class="c-partno" title="${escapeHtml(p.partNo)}">${escapeHtml(p.partNo)}</td>
-      <td class="c-nameen" title="${escapeHtml(p.nameEN || p.nameCN)}">${escapeHtml(p.nameEN || p.nameCN)}</td>
+      <td class="c-nameen" title="${escapeHtml(p.nameEN || p.nameCN || '')}">${escapeHtml(p.nameEN || p.nameCN || '')}</td>
       <td class="c-uom">${escapeHtml(p.uom)}</td>
       <td class="c-type">${p.isCommon
         ? '<span class="pill common">COMMON</span>'
