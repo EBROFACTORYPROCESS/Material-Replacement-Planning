@@ -21,6 +21,8 @@ const fmt = n => (n==null||isNaN(n)) ? '' : Number(n).toLocaleString(undefined,{
 const today = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
 const LS_CONFIG = 'mrp.configOverrides.v1';
 const LS_SCRAP  = 'mrp.scrap.v2';
+/* Which Material List rows have their Where-Used panel expanded */
+const WHERE_USED_OPEN = new Set();   // partNo strings
 
 /* --- Color / spec helpers ------------------------------------------- */
 function colorCodeOf(vehicleMatNo) {
@@ -515,38 +517,104 @@ function renderBomTable() {
     return true;
   });
 
-  if (!rows.length) { tbl.innerHTML = `<thead><tr><th>No BOM data</th></tr></thead>`; return; }
+  if (!rows.length) {
+    tbl.innerHTML = `<thead><tr><th>No material data</th></tr></thead>`;
+    return;
+  }
 
-  const boms = STATE.boms;
+  // Sort by part no.
+  rows.sort((a, b) => a.partNo.localeCompare(b.partNo, undefined, { numeric: true }));
+
+  /* ---------------- Header ---------------- */
   const head = `
     <thead><tr>
-      <th class="c-partno">Part No.</th>
-      <th class="c-nameen">Part Name (EN)</th>
-      <th class="c-uom">UOM</th>
-      <th class="c-type">Type</th>
-      ${boms.map(b => {
-        const n = bomDisplayName(b);
-        return `<th class="num" title="${escapeHtml(n)}">${escapeHtml(shorten(n,14))}</th>`;
-      }).join('')}
+      <th class="c-type">Material Type</th>
+      <th class="c-partno">Material Number</th>
+      <th class="c-nameen">Material Description</th>
+      <th class="c-action">Where Used</th>
     </tr></thead>`;
 
-  const body = rows.map(p => `
-    <tr>
-      <td class="c-partno" title="${escapeHtml(p.partNo)}">${escapeHtml(p.partNo)}</td>
-      <td class="c-nameen" title="${escapeHtml(p.nameEN || p.nameCN || '')}">${escapeHtml(p.nameEN || p.nameCN || '')}</td>
-      <td class="c-uom">${escapeHtml(p.uom)}</td>
-      <td class="c-type">${p.isCommon
-        ? '<span class="pill common">COMMON</span>'
-        : `<span class="pill specific" title="${escapeHtml([...p.bomKeys].join(', '))}">SPECIFIC</span>`}</td>
-      ${boms.map(b => {
-        const qv = p.perBomQty[bomKeyOf(b)];
-        return `<td class="num">${qv ? fmt(qv) : '—'}</td>`;
-      }).join('')}
-    </tr>`).join('');
+  /* ---------------- Body ---------------- */
+  const body = rows.map(p => {
+    const isOpen = WHERE_USED_OPEN.has(p.partNo);
+    const count  = p.bomKeys.size;
+
+    const mainRow = `
+      <tr class="mat-main-row ${isOpen ? 'row-open' : ''}" data-partno="${escapeHtml(p.partNo)}">
+        <td class="c-type">${p.isCommon
+          ? '<span class="pill common">COMMON</span>'
+          : `<span class="pill specific" title="${escapeHtml([...p.bomKeys].join(', '))}">SPECIFIC</span>`}</td>
+        <td class="c-partno" title="${escapeHtml(p.partNo)}">${escapeHtml(p.partNo)}</td>
+        <td class="c-nameen" title="${escapeHtml(p.nameEN || p.nameCN || '')}">${escapeHtml(p.nameEN || p.nameCN || '')}</td>
+        <td class="c-action">
+          <button class="btn tiny where-used-btn" data-partno="${escapeHtml(p.partNo)}">
+            ${isOpen ? '▾ Hide' : '▸ Where Used'} <span class="wu-count">${count}</span>
+          </button>
+        </td>
+      </tr>`;
+
+    if (!isOpen) return mainRow;
+
+    /* Build one column per vehicle batch (bomKey) */
+    const cols = Array.from(p.bomKeys).map(key => {
+      const bom = STATE.boms.find(b => bomKeyOf(b) === key);
+      return {
+        key,
+        topLabel:    bom ? (bom.vehicleDesc || bom.vehicleMatNo || '—') : key,
+        colourCode:  bom ? colorCodeOf(bom.vehicleMatNo) : '',
+        batchId:     bom ? (bom.batchId || '') : '',
+        qty:         p.perBomQty[key] || 0
+      };
+    }).sort((a, b) => a.topLabel.localeCompare(b.topLabel, undefined, { numeric: true }));
+
+    const headerCells = cols.map(c => `
+      <th class="wu-col" title="${escapeHtml(c.topLabel)} — ${escapeHtml(c.batchId)}">
+        <div class="wu-col-title">${escapeHtml(shorten(c.topLabel, 26))}</div>
+        <div class="wu-col-sub">
+          ${c.colourCode ? `<span class="color-code" style="${colorBadgeStyle(c.colourCode)}">${escapeHtml(c.colourCode)}</span>` : ''}
+          <span class="wu-col-batch">${escapeHtml(c.batchId || '—')}</span>
+        </div>
+      </th>
+    `).join('');
+
+    const valueCells = cols.map(c => `
+      <td class="wu-val" title="${escapeHtml(String(c.qty))}">
+        <div class="wu-qty">${fmt(c.qty)}</div>
+        <div class="wu-unit">per vehicle</div>
+      </td>
+    `).join('');
+
+    return mainRow + `
+      <tr class="where-used-row">
+        <td colspan="4">
+          <div class="where-used-panel">
+            <div class="wu-title">
+              Used in <b>${cols.length}</b> vehicle batch${cols.length === 1 ? '' : 'es'}
+            </div>
+            <div class="wu-scroll">
+              <table class="wu-grid">
+                <thead><tr>${headerCells}</tr></thead>
+                <tbody><tr>${valueCells}</tr></tbody>
+              </table>
+            </div>
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
 
   tbl.innerHTML = head + `<tbody>${body}</tbody>`;
-}
 
+  /* ---------------- Wire buttons ---------------- */
+  tbl.querySelectorAll('.where-used-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const pn = btn.dataset.partno;
+      if (WHERE_USED_OPEN.has(pn)) WHERE_USED_OPEN.delete(pn);
+      else                          WHERE_USED_OPEN.add(pn);
+      renderBomTable();
+    });
+  });
+}
 function populatePlanModels() {
   const sel = $('#planModel');
   sel.innerHTML = STATE.boms.length
