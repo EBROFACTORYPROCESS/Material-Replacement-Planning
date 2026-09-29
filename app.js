@@ -22,6 +22,19 @@ const today = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
 const LS_CONFIG = 'mrp.configOverrides.v1';
 const LS_SCRAP  = 'mrp.scrap.v2';
 
+/* BOM key helpers — a BOM is uniquely identified by Vehicle Mat No. + Sales Batch ID */
+function bomKeyOf(bom) {
+  if (!bom) return '';
+  return (bom.vehicleMatNo || '') + '||' + (bom.batchId || '');
+}
+function bomDisplayName(bom) {
+  if (!bom) return '';
+  const parts = [];
+  if (bom.vehicleDesc) parts.push(bom.vehicleDesc);
+  if (bom.batchId)     parts.push(bom.batchId);
+  return parts.join(' — ') || bom.vehicleMatNo || 'BOM';
+}
+
 /* Batch table column definitions */
 const BATCH_COLS = [
   { id:'batch',      label:'Batch' },
@@ -275,7 +288,7 @@ function parseBOM(rows, filename) {
     const key = vehicleMatNo + '||' + batchId;
     if (!groups.has(key)) {
       groups.set(key, {
-        id: crypto.randomUUID ? crypto.randomUUID() : (key + '|' + Date.now()),
+        id: crypto.randomUUID ? crypto.randomUUID() : (key + '|' + Date.now() + '|' + Math.random()),
         vehicleMatNo,
         vehicleDesc: String(r[cVehDesc] || '').trim(),
         batchId,
@@ -307,6 +320,7 @@ function parseBOM(rows, filename) {
   }
   return out;
 }
+
 function rebuildPartIndex() {
   const idx = {};
   for (const bom of STATE.boms) {
@@ -388,6 +402,7 @@ function renderBomList() {
     });
   });
 }
+
 function renderBomTable() {
   const tbl  = $('#bomTable');
   const q    = ($('#bomSearch').value || '').toLowerCase();
@@ -621,6 +636,7 @@ function resolveBomKeyForBatch(batch) {
 
   return null;
 }
+
 /* =========================================================
    BATCH CELL VALUE HELPERS
    ========================================================= */
@@ -637,7 +653,7 @@ function getBatchCellValue(b, colId) {
     case 'production': return b.production || '';
     case 'stage':      return b._stage || '';
     case 'warehouse':  return b._warehouse || '';
-    case 'linkedBom': return resolveBomKeyForBatch(b) || '';
+    case 'linkedBom':  return resolveBomKeyForBatch(b) || '';
   }
   return '';
 }
@@ -662,10 +678,10 @@ function getBatchCellLabel(b, colId) {
     return v ? new Date(v + 'T00:00:00').toLocaleDateString() : '—';
   }
   if (colId === 'linkedBom') {
-     if (!v) return '—';
-     const bom = STATE.boms.find(b => bomKeyOf(b) === v);
-     return bom ? bomDisplayName(bom) : v;
-   } 
+    if (!v) return '—';
+    const bom = STATE.boms.find(b => bomKeyOf(b) === v);
+    return bom ? bomDisplayName(bom) : v;
+  }
   if (colId === 'qty') return fmt(v);
   return v === '' ? '—' : String(v);
 }
@@ -804,15 +820,17 @@ function renderBatchTable() {
   const stages = STATE.config.stages;
 
   const body = list.map(({ b, i }) => {
-   const linkedKey  = resolveBomKeyForBatch(b);
-   const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
-   const linkCell = linkedBom
-     ? `<span title="${escapeHtml(bomDisplayName(linkedBom))}">${escapeHtml(shorten(bomDisplayName(linkedBom),18))}</span>`
-     : (b.model
-         ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
-         : '—');
+    const s = stages[b._stage] || { label: b._stage, color: '#9ca3af' };
 
-    // NEW: flag unassigned rows with missing arrival date
+    const linkedKey  = resolveBomKeyForBatch(b);
+    const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
+    const linkCell = linkedBom
+      ? `<span title="${escapeHtml(bomDisplayName(linkedBom))}">${escapeHtml(shorten(bomDisplayName(linkedBom),18))}</span>`
+      : (b.model
+          ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
+          : '—');
+
+    // flag unassigned rows with missing arrival date
     const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
     const unassignedFlag = isUnassignedNoDate
       ? `<span class="pill warn" title="No Arrival Date — cannot be classified" style="margin-left:6px">⚠</span>`
@@ -1246,9 +1264,9 @@ function bindButtons() {
   });
 
   $('#planAdd').addEventListener('click', () => {
-    const model = $('#planModel').value;
-    const qty = Number($('#planQty').value);
-    if (!model || !qty) return;
+    const bomKey = $('#planModel').value;
+    const qty    = Number($('#planQty').value);
+    if (!bomKey || !qty) return;
     STATE.plan.push({ bomKey, qty });
     $('#planQty').value = '';
     renderPlanList(); renderPlanning();
@@ -1307,6 +1325,7 @@ function renderPlanList() {
     renderPlanList(); renderPlanning();
   }));
 }
+
 function renderWarehouseChecklist() {
   const wrap = $('#whChecklist');
   const active = STATE.config.warehouses.filter(w => w.enabled);
@@ -1418,14 +1437,14 @@ function renderPlanning() {
   $$('#whChecklist input[data-wh]').forEach(i => whOn[i.dataset.wh] = i.checked);
   const scrapMap = scrapByPartNo();
 
-   const required = {};
-   for (const p of STATE.plan) {
-     for (const [partNo, info] of Object.entries(STATE.partIndex)) {
-       const q = info.perBomQty[p.bomKey];
-       if (!q) continue;
-       required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
-     }
-   }
+  const required = {};
+  for (const p of STATE.plan) {
+    for (const [partNo, info] of Object.entries(STATE.partIndex)) {
+      const q = info.perBomQty[p.bomKey];
+      if (!q) continue;
+      required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
+    }
+  }
 
   const q = ($('#planSearch').value || '').toLowerCase();
   const onlyShort = $('#planOnlyShort').checked;
@@ -1491,7 +1510,7 @@ function aoaToSheet(aoa) { return XLSX.utils.aoa_to_sheet(aoa); }
 
 function exportBom() {
   const boms = STATE.boms;
-  const aoa = [['Part No.','Name','UOM','Type','BOMs Used', ...boms.map(bomDisplayName)]];
+  const aoa = [['Part No.','Name','UOM','Type','BOMs Used', ...boms.map(b => bomDisplayName(b))]];
   for (const p of Object.values(STATE.partIndex)) {
     aoa.push([
       p.partNo, p.nameEN || p.nameCN, p.uom,
@@ -1537,19 +1556,19 @@ function exportPlan() {
   const scrapMap = scrapByPartNo();
 
   const required = {};
-   for (const p of STATE.plan) {
-     for (const [partNo, info] of Object.entries(STATE.partIndex)) {
-       const q = info.perBomQty[p.bomKey];
-       if (!q) continue;
-       required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
-     }
-   }}
+  for (const p of STATE.plan) {
+    for (const [partNo, info] of Object.entries(STATE.partIndex)) {
+      const q = info.perBomQty[p.bomKey];
+      if (!q) continue;
+      required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
+    }
+  }
 
   const aoa = [
     ['Plan:', ...STATE.plan.map(p => {
-     const bom = STATE.boms.find(b => bomKeyOf(b) === p.bomKey);
-     return `${bom ? bomDisplayName(bom) : p.bomKey} × ${p.qty}`;
-   })],
+      const bom = STATE.boms.find(b => bomKeyOf(b) === p.bomKey);
+      return `${bom ? bomDisplayName(bom) : p.bomKey} × ${p.qty}`;
+    })],
     ['Safety factor:', safety],
     [],
     ['Part No.','Name','UOM','Required','Available','Shortage','Status']
@@ -1569,7 +1588,7 @@ function exportPlan() {
       partNo, info.nameCN || info.nameEN, info.uom,
       round3(req), round3(avail), round3(short), short > 0 ? 'SHORT' : 'OK'
     ]);
-  };
+  }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Plan');
   downloadWorkbook(wb, `Production_Plan_${dateStamp()}.xlsx`);
