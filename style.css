@@ -239,3 +239,6 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}
   .file-item.bom-item{grid-template-columns:1fr;}
   .scrap-item{grid-template-columns:1fr 1fr;}
 }
+
+.file-item.bom-item{display:grid;grid-template-columns:auto 1fr 1fr 1fr auto;
+  gap:12px;align-items:end}
