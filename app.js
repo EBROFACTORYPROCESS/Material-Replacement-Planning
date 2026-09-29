@@ -22,6 +22,52 @@ const today = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
 const LS_CONFIG = 'mrp.configOverrides.v1';
 const LS_SCRAP  = 'mrp.scrap.v2';
 
+/* --- Color / spec helpers ------------------------------------------- */
+function colorCodeOf(vehicleMatNo) {
+  const v = (vehicleMatNo || '').trim();
+  if (v.length < 9) return '';
+  return v.substring(7, 9);          // chars 8–9, 1-based
+}
+function specKeyOf(vehicleMatNo) {
+  const v = (vehicleMatNo || '').trim();
+  if (v.length < 9) return v || '__no_matno__';
+  return v.substring(0, 7) + '··' + v.substring(9);
+}
+function longestCommonPrefix(strs) {
+  if (!strs.length) return '';
+  let p = strs[0];
+  for (const s of strs) {
+    while (p && !s.startsWith(p)) p = p.slice(0, -1);
+    if (!p) break;
+  }
+  return p;
+}
+function deriveSpecName(boms) {
+  if (boms.length === 1) return boms[0].vehicleDesc || boms[0].vehicleMatNo || '—';
+  const descs = boms.map(b => b.vehicleDesc || '').filter(Boolean);
+  if (!descs.length) return boms[0].vehicleMatNo || '—';
+  const lcp = longestCommonPrefix(descs)
+    .replace(/[\s\-–—:_,]+$/, '').trim();
+  return lcp || boms[0].vehicleMatNo || '—';
+}
+function deriveColorName(boms, specName) {
+  const desc = boms[0].vehicleDesc || '';
+  if (!desc) return '';
+  if (specName && desc.startsWith(specName)) {
+    const rest = desc.slice(specName.length)
+      .replace(/^[\s\-–—:_,]+/, '').trim();
+    if (rest && rest !== desc) return rest;
+  }
+  return '';
+}
+function colorBadgeStyle(code) {
+  if (!code) return 'background:#f1f5f9;color:#64748b';
+  let h = 0;
+  for (let i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) | 0;
+  const hue = Math.abs(h) % 360;
+  return `background:hsl(${hue},70%,92%);color:hsl(${hue},65%,32%)`;
+}
+
 /* BOM key helpers — a BOM is uniquely identified by Vehicle Mat No. + Sales Batch ID */
 function bomKeyOf(bom) {
   if (!bom) return '';
@@ -348,25 +394,57 @@ function renderBomList() {
   const wrap = $('#bomList');
   if (!STATE.boms.length) { wrap.innerHTML = ''; return; }
 
-  wrap.innerHTML = STATE.boms.map(b => `
-    <div class="file-item bom-item" data-id="${b.id}">
-      <span class="tag">${b.parts.length} parts</span>
-      <div class="field">
-        <label>Vehicle Description (matches batch “Modelo”)</label>
-        <input type="text" value="${escapeHtml(b.vehicleDesc || '')}" data-role="desc" />
-      </div>
-      <div class="field">
-        <label>Vehicle Material No.</label>
-        <input type="text" value="${escapeHtml(b.vehicleMatNo || '')}" data-role="vehno" />
-      </div>
-      <div class="field">
-        <label>Sales Batch ID</label>
-        <input type="text" value="${escapeHtml(b.batchId || '')}" data-role="batch" />
-      </div>
-      <button class="btn ghost" data-role="remove">✕</button>
-    </div>
-  `).join('');
+  /* --- 1. Build the spec → color → boms[] tree ---------------------- */
+  const specMap = new Map();
+  for (const b of STATE.boms) {
+    const sk = specKeyOf(b.vehicleMatNo);
+    const cc = colorCodeOf(b.vehicleMatNo);
+    if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, colors: new Map(), boms: [] });
+    const sg = specMap.get(sk);
+    sg.boms.push(b);
+    if (!sg.colors.has(cc)) sg.colors.set(cc, []);
+    sg.colors.get(cc).push(b);
+  }
 
+  /* --- 2. Derive friendly names ------------------------------------- */
+  for (const sg of specMap.values()) {
+    sg.specName = deriveSpecName(sg.boms);
+  }
+
+  /* --- 3. Render ---------------------------------------------------- */
+  wrap.innerHTML = Array.from(specMap.values()).map(sg => {
+    const colorHtml = Array.from(sg.colors.entries())
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+      .map(([cc, boms]) => {
+        const colorName = deriveColorName(boms, sg.specName);
+        const nameHtml  = colorName
+          ? `<span class="color-name">${escapeHtml(colorName)}</span>`
+          : '';
+        const batchHtml = boms.map(bomBatchItemHtml).join('');
+        return `
+          <details class="bom-color-group" open>
+            <summary class="bom-color-header">
+              <span class="color-code" style="${colorBadgeStyle(cc)}">${escapeHtml(cc || '??')}</span>
+              ${nameHtml}
+              <span class="color-count">${boms.length} batch${boms.length===1?'':'es'}</span>
+            </summary>
+            <div class="bom-batch-list">${batchHtml}</div>
+          </details>
+        `;
+      }).join('');
+
+    return `
+      <details class="bom-spec-group" open>
+        <summary class="bom-spec-header">
+          <span class="spec-name">${escapeHtml(sg.specName)}</span>
+          <span class="spec-count">${sg.boms.length} BOM${sg.boms.length===1?'':'s'}</span>
+        </summary>
+        <div class="bom-color-list">${colorHtml}</div>
+      </details>
+    `;
+  }).join('');
+
+  /* --- 4. Wire up edit / remove handlers ---------------------------- */
   const rerun = () => {
     rebuildPartIndex(); renderBomTable(); populatePlanModels();
     renderBatchTable(); renderBatchStats();
@@ -375,32 +453,51 @@ function renderBomList() {
 
   wrap.querySelectorAll('input[data-role=desc]').forEach(inp => {
     inp.addEventListener('change', e => {
-      const id = e.target.closest('.file-item').dataset.id;
+      const id = e.target.closest('[data-id]').dataset.id;
       const b  = STATE.boms.find(x => x.id === id); if (!b) return;
-      b.vehicleDesc = e.target.value.trim(); rerun();
+      b.vehicleDesc = e.target.value.trim();
+      rerun(); renderBomList();          // regroup
     });
   });
   wrap.querySelectorAll('input[data-role=vehno]').forEach(inp => {
     inp.addEventListener('change', e => {
-      const id = e.target.closest('.file-item').dataset.id;
+      const id = e.target.closest('[data-id]').dataset.id;
       const b  = STATE.boms.find(x => x.id === id); if (!b) return;
-      b.vehicleMatNo = e.target.value.trim(); rerun();
+      b.vehicleMatNo = e.target.value.trim();
+      rerun(); renderBomList();          // regroup
     });
   });
   wrap.querySelectorAll('input[data-role=batch]').forEach(inp => {
     inp.addEventListener('change', e => {
-      const id = e.target.closest('.file-item').dataset.id;
+      const id = e.target.closest('[data-id]').dataset.id;
       const b  = STATE.boms.find(x => x.id === id); if (!b) return;
-      b.batchId = e.target.value.trim(); rerun();
+      b.batchId = e.target.value.trim();
+      rerun();
     });
   });
   wrap.querySelectorAll('button[data-role=remove]').forEach(btn => {
     btn.addEventListener('click', e => {
-      const id = e.target.closest('.file-item').dataset.id;
+      const id = e.target.closest('[data-id]').dataset.id;
       STATE.boms = STATE.boms.filter(x => x.id !== id);
-      renderBomList(); populatePartDatalist(); rerun();
+      populatePartDatalist();
+      rerun(); renderBomList();
     });
   });
+}
+
+function bomBatchItemHtml(b) {
+  return `
+    <div class="bom-batch-item" data-id="${b.id}">
+      <span class="batch-parts-tag" title="${b.parts.length} parts">${b.parts.length}</span>
+      <input type="text" class="mono" data-role="batch"
+             value="${escapeHtml(b.batchId || '')}" placeholder="Sales Batch ID" />
+      <input type="text" class="mono" data-role="vehno"
+             value="${escapeHtml(b.vehicleMatNo || '')}" placeholder="Vehicle Mat. No." />
+      <input type="text" data-role="desc"
+             value="${escapeHtml(b.vehicleDesc || '')}" placeholder="Vehicle Description" />
+      <button class="btn ghost" data-role="remove" title="Remove">✕</button>
+    </div>
+  `;
 }
 
 function renderBomTable() {
