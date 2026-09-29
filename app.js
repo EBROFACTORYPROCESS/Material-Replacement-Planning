@@ -199,11 +199,14 @@ async function handleBomFiles(files) {
   for (const f of files) {
     try {
       const rows = await fileToRows(f);
-      const parsed = parseBOM(rows, f.name);
-      if (!parsed.parts.length) { alert(`No parts found in ${f.name}`); continue; }
-      const existing = STATE.boms.findIndex(b => b.label === parsed.label);
-      if (existing >= 0) STATE.boms.splice(existing, 1);
-      STATE.boms.push(parsed);
+      const parsedList = parseBOM(rows, f.name);   // returns array now
+      if (!parsedList.length) { alert(`No parts found in ${f.name}`); continue; }
+      for (const parsed of parsedList) {
+        const key = bomKeyOf(parsed);
+        const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
+        if (existing >= 0) STATE.boms.splice(existing, 1);
+        STATE.boms.push(parsed);
+      }
     } catch (e) {
       console.error(e);
       alert(`Failed to parse ${f.name}: ${e.message}`);
@@ -216,92 +219,113 @@ async function handleBomFiles(files) {
 }
 
 function parseBOM(rows, filename) {
+  if (!rows || !rows.length) throw new Error('Empty file');
+
+  // Locate header row
   let headerIdx = -1;
-  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+  for (let i = 0; i < Math.min(rows.length, 20); i++) {
     const joined = (rows[i] || []).map(c => String(c)).join('|');
-    if (joined.includes('零件号') || joined.includes('Part NO')) { headerIdx = i; break; }
+    if (joined.includes('Part NO') || joined.includes('Vehicle Matl')) { headerIdx = i; break; }
   }
   if (headerIdx === -1) throw new Error('Header row not found');
 
-  const headers = (rows[headerIdx] || []).map(h => String(h || '').split('\n')[0].trim());
-  const findCol = hints => {
+  const headers     = (rows[headerIdx] || []).map(h => String(h || '').split('\n')[0].trim());
+  const headerLower = headers.map(h => h.toLowerCase());
+
+  const findCol = (hints, exact = false) => {
     for (const h of hints) {
-      const i = headers.findIndex(x => x && x.toLowerCase().includes(h.toLowerCase()));
+      const hl = h.toLowerCase();
+      const i = headers.findIndex((_, idx) =>
+        exact ? headerLower[idx] === hl : headerLower[idx].includes(hl));
       if (i >= 0) return i;
     }
     return -1;
   };
-  const colPartNo   = findCol(['零件号','Part NO']);
-  const colNameCN   = findCol(['零件名称(中文)','Part Name(CN)']);
-  const colNameEN   = findCol(['零件名称(英文)','Part Name(EN)']);
-  const colQty      = findCol(['用量','Qty']);
-  const colUOM      = findCol(['度量单位','UOM']);
-  const colSupplier = findCol(['供应商名称','SupplierName']);
-  const colCPAC     = findCol(['CPAC编码','CPAC']);
-  if (colPartNo < 0 || colQty < 0) throw new Error('Required columns missing');
 
-  let vehicleMatNo = '';
-  const lastHeader = String(headers[headers.length - 1] || '');
-  const eqMatch = lastHeader.match(/=\s*([A-Z0-9\-]+)\s*$/i);
-  if (eqMatch) vehicleMatNo = eqMatch[1];
-  if (!vehicleMatNo && rows[0]) {
-    const firstCell = String(rows[0][0] || '');
-    const batchMatch = firstCell.match(/Batch\s*[：:]\s*([A-Z0-9\-]+)/i);
-    if (batchMatch) vehicleMatNo = batchMatch[1];
-  }
+  // Column positions per spec: A=0, B=1, E=4, J=9, K=10, T=19, U=20
+  let cVehMat = findCol(['vehicle matl', 'vehicle mat']); if (cVehMat < 0) cVehMat = 0;
+  let cVehDesc= findCol(['vehi. desc', 'vehicle desc', 'vehicle description']); if (cVehDesc < 0) cVehDesc = 1;
+  let cBatch  = findCol(['batch'], true);
+  if (cBatch < 0) cBatch = findCol(['sales batch', 'batch id']);
+  if (cBatch < 0) cBatch = 4;
+  let cPartNo = findCol(['part no']); if (cPartNo < 0) cPartNo = 9;
+  let cNameEN = findCol(['part name(en)', 'part name (en)', 'part name']); if (cNameEN < 0) cNameEN = 10;
+  let cQty    = findCol(['qty'], true);
+  if (cQty < 0) cQty = findCol(['quantity per', 'qty per']);
+  if (cQty < 0) cQty = 19;
+  let cUOM    = findCol(['uom'], true);
+  if (cUOM < 0) cUOM = findCol(['unit of measure', 'uom']);
+  if (cUOM < 0) cUOM = 20;
 
-  const parts = [];
+  // Group rows by (vehicleMatNo, batchId) — each group = one BOM
+  const groups = new Map();
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
-    if (!r) continue;
-    const partNo = String(r[colPartNo] || '').trim();
-    if (!partNo || partNo === '零件号') continue;
-    const qty = Number(String(r[colQty]).replace(/[^0-9.\-]/g,''));
-    if (!qty) continue;
-    parts.push({
+    if (!r || !r.length) continue;
+
+    const vehicleMatNo = String(r[cVehMat] || '').trim();
+    const batchId      = String(r[cBatch]  || '').trim();
+    const partNo       = String(r[cPartNo] || '').trim();
+    if (!vehicleMatNo && !batchId) continue;
+    if (!partNo) continue;
+
+    const qty = Number(String(r[cQty]).replace(/[^0-9.\-]/g, ''));
+    if (!qty || qty <= 0) continue;
+
+    const key = vehicleMatNo + '||' + batchId;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        id: crypto.randomUUID ? crypto.randomUUID() : (key + '|' + Date.now()),
+        vehicleMatNo,
+        vehicleDesc: String(r[cVehDesc] || '').trim(),
+        batchId,
+        parts: []
+      });
+    }
+    groups.get(key).parts.push({
       partNo,
-      nameCN:   String(r[colNameCN]   ?? '').trim(),
-      nameEN:   String(r[colNameEN]   ?? '').trim(),
+      nameEN: String(r[cNameEN] ?? '').trim(),
+      nameCN: '',
       qty,
-      uom:      String(r[colUOM]      ?? '').trim(),
-      supplier: String(r[colSupplier] ?? '').trim(),
-      cpac:     String(r[colCPAC]     ?? '').trim()
+      uom:    String(r[cUOM] ?? '').trim(),
+      supplier: '',
+      cpac: ''
     });
   }
 
-  const label = filename.replace(/\.(xlsx|xls|csv)$/i, '');
-  const model = vehicleMatNo || label;
-
-  return {
-    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random()),
-    label, batchCode: vehicleMatNo, vehicleMatNo, model, parts
-  };
+  // Merge duplicate part numbers within each group
+  const out = [];
+  for (const g of groups.values()) {
+    const merged = new Map();
+    for (const p of g.parts) {
+      if (!merged.has(p.partNo)) merged.set(p.partNo, { ...p, qty: 0 });
+      merged.get(p.partNo).qty += p.qty;
+    }
+    g.parts = Array.from(merged.values());
+    g.label = g.batchId || g.vehicleMatNo || filename;
+    out.push(g);
+  }
+  return out;
 }
-
 function rebuildPartIndex() {
   const idx = {};
   for (const bom of STATE.boms) {
-    const per = {};
+    const key = bomKeyOf(bom);
     for (const p of bom.parts) {
-      if (!per[p.partNo]) per[p.partNo] = { ...p, qty: 0 };
-      per[p.partNo].qty += p.qty;
-    }
-    for (const [partNo, p] of Object.entries(per)) {
-      if (!idx[partNo]) {
-        idx[partNo] = {
-          partNo, nameCN: p.nameCN, nameEN: p.nameEN, uom: p.uom,
-          supplier: p.supplier, cpac: p.cpac,
-          models: new Set(), vehicleMatNos: new Set(), perModelQty: {}
+      if (!idx[p.partNo]) {
+        idx[p.partNo] = {
+          partNo: p.partNo, nameCN: p.nameCN, nameEN: p.nameEN,
+          uom: p.uom, supplier: p.supplier, cpac: p.cpac,
+          bomKeys: new Set(), perBomQty: {}
         };
       }
-      idx[partNo].models.add(bom.model);
-      idx[partNo].vehicleMatNos.add(bom.vehicleMatNo || bom.model);
-      idx[partNo].perModelQty[bom.model] = (idx[partNo].perModelQty[bom.model] || 0) + p.qty;
+      idx[p.partNo].bomKeys.add(key);
+      idx[p.partNo].perBomQty[key] = (idx[p.partNo].perBomQty[key] || 0) + p.qty;
     }
   }
-  const totalModels = STATE.boms.length;
+  const totalBoms = STATE.boms.length;
   for (const p of Object.values(idx)) {
-    p.isCommon = p.models.size === totalModels && totalModels > 0;
+    p.isCommon = p.bomKeys.size === totalBoms && totalBoms > 0;
   }
   STATE.partIndex = idx;
 }
@@ -309,58 +333,64 @@ function rebuildPartIndex() {
 function renderBomList() {
   const wrap = $('#bomList');
   if (!STATE.boms.length) { wrap.innerHTML = ''; return; }
+
   wrap.innerHTML = STATE.boms.map(b => `
     <div class="file-item bom-item" data-id="${b.id}">
       <span class="tag">${b.parts.length} parts</span>
       <div class="field">
-        <label>Model Name (matches batch “Modelo”)</label>
-        <input type="text" value="${escapeHtml(b.model)}" data-role="model" />
+        <label>Vehicle Description (matches batch “Modelo”)</label>
+        <input type="text" value="${escapeHtml(b.vehicleDesc || '')}" data-role="desc" />
       </div>
       <div class="field">
         <label>Vehicle Material No.</label>
         <input type="text" value="${escapeHtml(b.vehicleMatNo || '')}" data-role="vehno" />
       </div>
+      <div class="field">
+        <label>Sales Batch ID</label>
+        <input type="text" value="${escapeHtml(b.batchId || '')}" data-role="batch" />
+      </div>
       <button class="btn ghost" data-role="remove">✕</button>
     </div>
   `).join('');
 
-  wrap.querySelectorAll('input[data-role=model]').forEach(inp => {
+  const rerun = () => {
+    rebuildPartIndex(); renderBomTable(); populatePlanModels();
+    renderBatchTable(); renderBatchStats();
+    computeInventory(); renderInventoryTable(); renderPlanning();
+  };
+
+  wrap.querySelectorAll('input[data-role=desc]').forEach(inp => {
     inp.addEventListener('change', e => {
       const id = e.target.closest('.file-item').dataset.id;
-      const b = STATE.boms.find(x => x.id === id);
-      if (!b) return;
-      b.model = e.target.value.trim();
-      rebuildPartIndex(); renderBomTable(); populatePlanModels();
-      renderBatchTable(); renderBatchStats();
-      computeInventory(); renderInventoryTable(); renderPlanning();
+      const b  = STATE.boms.find(x => x.id === id); if (!b) return;
+      b.vehicleDesc = e.target.value.trim(); rerun();
     });
   });
   wrap.querySelectorAll('input[data-role=vehno]').forEach(inp => {
     inp.addEventListener('change', e => {
       const id = e.target.closest('.file-item').dataset.id;
-      const b = STATE.boms.find(x => x.id === id);
-      if (!b) return;
-      b.vehicleMatNo = e.target.value.trim();
-      rebuildPartIndex(); renderBomTable();
-      renderBatchTable(); renderBatchStats();
-      computeInventory(); renderInventoryTable(); renderPlanning();
+      const b  = STATE.boms.find(x => x.id === id); if (!b) return;
+      b.vehicleMatNo = e.target.value.trim(); rerun();
+    });
+  });
+  wrap.querySelectorAll('input[data-role=batch]').forEach(inp => {
+    inp.addEventListener('change', e => {
+      const id = e.target.closest('.file-item').dataset.id;
+      const b  = STATE.boms.find(x => x.id === id); if (!b) return;
+      b.batchId = e.target.value.trim(); rerun();
     });
   });
   wrap.querySelectorAll('button[data-role=remove]').forEach(btn => {
     btn.addEventListener('click', e => {
       const id = e.target.closest('.file-item').dataset.id;
       STATE.boms = STATE.boms.filter(x => x.id !== id);
-      rebuildPartIndex(); renderBomList(); renderBomTable();
-      populatePlanModels(); populatePartDatalist();
-      renderBatchTable(); renderBatchStats();
-      computeInventory(); renderInventoryTable(); renderPlanning();
+      renderBomList(); populatePartDatalist(); rerun();
     });
   });
 }
-
 function renderBomTable() {
-  const tbl = $('#bomTable');
-  const q = ($('#bomSearch').value || '').toLowerCase();
+  const tbl  = $('#bomTable');
+  const q    = ($('#bomSearch').value || '').toLowerCase();
   const mode = $('#bomFilter').value;
 
   const rows = Object.values(STATE.partIndex).filter(p => {
@@ -373,43 +403,42 @@ function renderBomTable() {
     return true;
   });
 
-  if (!rows.length) {
-    tbl.innerHTML = `<thead><tr><th>No BOM data</th></tr></thead>`;
-    return;
-  }
+  if (!rows.length) { tbl.innerHTML = `<thead><tr><th>No BOM data</th></tr></thead>`; return; }
 
-  const models = STATE.boms.map(b => b.model);
+  const boms = STATE.boms;
   const head = `
     <thead><tr>
       <th class="c-partno">Part No.</th>
-      <th class="c-namecn">Name (CN)</th>
-      <th class="c-nameen">Name (EN)</th>
+      <th class="c-nameen">Name</th>
       <th class="c-uom">UOM</th>
       <th class="c-type">Type</th>
-      ${models.map(m => `<th class="num" title="${escapeHtml(m)}">${escapeHtml(shorten(m,12))}</th>`).join('')}
+      ${boms.map(b => {
+        const n = bomDisplayName(b);
+        return `<th class="num" title="${escapeHtml(n)}">${escapeHtml(shorten(n,14))}</th>`;
+      }).join('')}
     </tr></thead>`;
 
   const body = rows.map(p => `
     <tr>
       <td class="c-partno" title="${escapeHtml(p.partNo)}">${escapeHtml(p.partNo)}</td>
-      <td class="c-namecn" title="${escapeHtml(p.nameCN)}">${escapeHtml(p.nameCN)}</td>
-      <td class="c-nameen" title="${escapeHtml(p.nameEN)}">${escapeHtml(p.nameEN)}</td>
+      <td class="c-nameen" title="${escapeHtml(p.nameEN || p.nameCN)}">${escapeHtml(p.nameEN || p.nameCN)}</td>
       <td class="c-uom">${escapeHtml(p.uom)}</td>
       <td class="c-type">${p.isCommon
-          ? '<span class="pill common">COMMON</span>'
-          : `<span class="pill specific" title="${escapeHtml([...p.models].join(', '))}">SPECIFIC</span>`}</td>
-      ${models.map(m => `<td class="num">${p.perModelQty[m] ? fmt(p.perModelQty[m]) : '—'}</td>`).join('')}
-    </tr>
-  `).join('');
+        ? '<span class="pill common">COMMON</span>'
+        : `<span class="pill specific" title="${escapeHtml([...p.bomKeys].join(', '))}">SPECIFIC</span>`}</td>
+      ${boms.map(b => {
+        const qv = p.perBomQty[bomKeyOf(b)];
+        return `<td class="num">${qv ? fmt(qv) : '—'}</td>`;
+      }).join('')}
+    </tr>`).join('');
 
   tbl.innerHTML = head + `<tbody>${body}</tbody>`;
 }
 
 function populatePlanModels() {
   const sel = $('#planModel');
-  const models = STATE.boms.map(b => b.model);
-  sel.innerHTML = models.length
-    ? models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')
+  sel.innerHTML = STATE.boms.length
+    ? STATE.boms.map(b => `<option value="${escapeHtml(bomKeyOf(b))}">${escapeHtml(bomDisplayName(b))}</option>`).join('')
     : '<option value="">— upload BOMs first —</option>';
 }
 
@@ -563,29 +592,35 @@ function classifyBatches() {
 /* =========================================================
    CONVERSION TABLE
    ========================================================= */
-function resolveModelForBatch(batch) {
+function resolveBomKeyForBatch(batch) {
+  if (!STATE.boms.length) return null;
+
+  // 1. Direct match on Sales Batch ID (production batch number ↔ sales batch)
+  if (batch.batch) {
+    const direct = STATE.boms.find(b => b.batchId === batch.batch);
+    if (direct) return bomKeyOf(direct);
+  }
+
+  // 2. Conversion table (Modelo + optional Color) → vehicleMatNo (and optionally batchId)
   const ct = STATE.config.conversionTable || [];
   const modelo = (batch.model || '').toLowerCase();
   const color  = (batch.color || '').toLowerCase();
+  let row = ct.find(r => (r.modelo||'').toLowerCase() === modelo && (r.color||'').toLowerCase() === color);
+  if (!row) row = ct.find(r => (r.modelo||'').toLowerCase() === modelo && (!r.color || !r.color.trim()));
 
-  let row = ct.find(r =>
-    (r.modelo || '').toLowerCase() === modelo &&
-    (r.color  || '').toLowerCase() === color
-  );
-  if (!row) {
-    row = ct.find(r =>
-      (r.modelo || '').toLowerCase() === modelo &&
-      (!r.color || !r.color.trim())
-    );
+  if (row) {
+    let candidates = [];
+    if (row.vehicleMatNo) candidates = STATE.boms.filter(b => b.vehicleMatNo === row.vehicleMatNo);
+    if (!candidates.length && row.batchId) candidates = STATE.boms.filter(b => b.batchId === row.batchId);
+    if (candidates.length) return bomKeyOf(candidates[candidates.length - 1]);
   }
-  if (row && row.vehicleMatNo) {
-    const bom = STATE.boms.find(b => (b.vehicleMatNo || '') === row.vehicleMatNo);
-    if (bom) return bom.model;
-  }
-  const bom2 = STATE.boms.find(b => b.model === batch.model);
-  return bom2 ? bom2.model : null;
+
+  // 3. Fallback: match by vehicleDesc == Modelo
+  const byDesc = STATE.boms.filter(b => b.vehicleDesc === batch.model);
+  if (byDesc.length) return bomKeyOf(byDesc[byDesc.length - 1]);
+
+  return null;
 }
-
 /* =========================================================
    BATCH CELL VALUE HELPERS
    ========================================================= */
@@ -602,7 +637,7 @@ function getBatchCellValue(b, colId) {
     case 'production': return b.production || '';
     case 'stage':      return b._stage || '';
     case 'warehouse':  return b._warehouse || '';
-    case 'linkedBom':  return resolveModelForBatch(b) || '';
+    case 'linkedBom': return resolveBomKeyForBatch(b) || '';
   }
   return '';
 }
@@ -626,6 +661,11 @@ function getBatchCellLabel(b, colId) {
   if (colId === 'arrival' || colId === 'decanting' || colId === 'trimIn') {
     return v ? new Date(v + 'T00:00:00').toLocaleDateString() : '—';
   }
+  if (colId === 'linkedBom') {
+     if (!v) return '—';
+     const bom = STATE.boms.find(b => bomKeyOf(b) === v);
+     return bom ? bomDisplayName(bom) : v;
+   } 
   if (colId === 'qty') return fmt(v);
   return v === '' ? '—' : String(v);
 }
@@ -764,13 +804,13 @@ function renderBatchTable() {
   const stages = STATE.config.stages;
 
   const body = list.map(({ b, i }) => {
-    const s = stages[b._stage] || { label: b._stage, color:'#9ca3af' };
-    const linkedModel = resolveModelForBatch(b);
-    const linkCell = linkedModel
-      ? `<span title="${escapeHtml(linkedModel)}">${escapeHtml(shorten(linkedModel,18))}</span>`
-      : (b.model
-          ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
-          : '—');
+   const linkedKey  = resolveBomKeyForBatch(b);
+   const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
+   const linkCell = linkedBom
+     ? `<span title="${escapeHtml(bomDisplayName(linkedBom))}">${escapeHtml(shorten(bomDisplayName(linkedBom),18))}</span>`
+     : (b.model
+         ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
+         : '—');
 
     // NEW: flag unassigned rows with missing arrival date
     const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
@@ -1110,15 +1150,15 @@ function computeInventory() {
   }
   for (const b of STATE.batches) {
     if (!b.qty || b._stage === 'consumed' || b._stage === 'unassigned') continue;
-    const resolvedModel = resolveModelForBatch(b);
-    if (!resolvedModel) continue;
+    const key = resolveBomKeyForBatch(b);
+    if (!key) continue;
     for (const [partNo, p] of Object.entries(STATE.partIndex)) {
-      const q = p.perModelQty[resolvedModel];
+      const q = p.perBomQty[key];
       if (!q) continue;
       const amount = q * b.qty;
-      if (b._stage === 'inTransit') inv[partNo].inTransit += amount;
+      if (b._stage === 'inTransit')         inv[partNo].inTransit    += amount;
       else if (b._stage === 'factoryFloor') inv[partNo].factoryFloor += amount;
-      else if (b._stage === 'edgeLine')    inv[partNo].edgeLine    += amount;
+      else if (b._stage === 'edgeLine')     inv[partNo].edgeLine     += amount;
       else if (b._stage === 'warehouse') {
         const wh = b._warehouse || '__unassigned__';
         inv[partNo].warehouses[wh] = (inv[partNo].warehouses[wh] || 0) + amount;
@@ -1209,7 +1249,7 @@ function bindButtons() {
     const model = $('#planModel').value;
     const qty = Number($('#planQty').value);
     if (!model || !qty) return;
-    STATE.plan.push({ model, qty });
+    STATE.plan.push({ bomKey, qty });
     $('#planQty').value = '';
     renderPlanList(); renderPlanning();
   });
@@ -1252,19 +1292,21 @@ function bindButtons() {
 function renderPlanList() {
   const wrap = $('#planList');
   if (!STATE.plan.length) { wrap.innerHTML = '<span class="hint" style="margin:0">No plan items yet.</span>'; return; }
-  wrap.innerHTML = STATE.plan.map((p,i) => `
-    <div class="file-item">
-      <span class="tag">${escapeHtml(p.model)}</span>
-      <div class="grow">${fmt(p.qty)} vehicles</div>
-      <button class="btn ghost" data-i="${i}">✕</button>
-    </div>
-  `).join('');
+  wrap.innerHTML = STATE.plan.map((p, i) => {
+    const bom = STATE.boms.find(b => bomKeyOf(b) === p.bomKey);
+    const label = bom ? bomDisplayName(bom) : p.bomKey;
+    return `
+      <div class="file-item">
+        <span class="tag" title="${escapeHtml(label)}">${escapeHtml(shorten(label, 40))}</span>
+        <div class="grow">${fmt(p.qty)} vehicles</div>
+        <button class="btn ghost" data-i="${i}">✕</button>
+      </div>`;
+  }).join('');
   wrap.querySelectorAll('button').forEach(b => b.addEventListener('click', e => {
     STATE.plan.splice(+e.target.dataset.i, 1);
     renderPlanList(); renderPlanning();
   }));
 }
-
 function renderWarehouseChecklist() {
   const wrap = $('#whChecklist');
   const active = STATE.config.warehouses.filter(w => w.enabled);
@@ -1376,14 +1418,14 @@ function renderPlanning() {
   $$('#whChecklist input[data-wh]').forEach(i => whOn[i.dataset.wh] = i.checked);
   const scrapMap = scrapByPartNo();
 
-  const required = {};
-  for (const p of STATE.plan) {
-    for (const [partNo, info] of Object.entries(STATE.partIndex)) {
-      const q = info.perModelQty[p.model];
-      if (!q) continue;
-      required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
-    }
-  }
+   const required = {};
+   for (const p of STATE.plan) {
+     for (const [partNo, info] of Object.entries(STATE.partIndex)) {
+       const q = info.perBomQty[p.bomKey];
+       if (!q) continue;
+       required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
+     }
+   }
 
   const q = ($('#planSearch').value || '').toLowerCase();
   const onlyShort = $('#planOnlyShort').checked;
@@ -1448,14 +1490,14 @@ function downloadWorkbook(wb, filename) { XLSX.writeFile(wb, filename); }
 function aoaToSheet(aoa) { return XLSX.utils.aoa_to_sheet(aoa); }
 
 function exportBom() {
-  const models = STATE.boms.map(b => b.model);
-  const aoa = [['Part No.','Name CN','Name EN','UOM','Type','Models Used', ...models]];
+  const boms = STATE.boms;
+  const aoa = [['Part No.','Name','UOM','Type','BOMs Used', ...boms.map(bomDisplayName)]];
   for (const p of Object.values(STATE.partIndex)) {
     aoa.push([
-      p.partNo, p.nameCN, p.nameEN, p.uom,
+      p.partNo, p.nameEN || p.nameCN, p.uom,
       p.isCommon ? 'COMMON' : 'SPECIFIC',
-      [...p.models].join(' | '),
-      ...models.map(m => p.perModelQty[m] || '')
+      [...p.bomKeys].join(' | '),
+      ...boms.map(b => p.perBomQty[bomKeyOf(b)] || '')
     ]);
   }
   const wb = XLSX.utils.book_new();
@@ -1495,16 +1537,19 @@ function exportPlan() {
   const scrapMap = scrapByPartNo();
 
   const required = {};
-  for (const p of STATE.plan) {
-    for (const [partNo, info] of Object.entries(STATE.partIndex)) {
-      const q = info.perModelQty[p.model];
-      if (!q) continue;
-      required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
-    }
-  }
+   for (const p of STATE.plan) {
+     for (const [partNo, info] of Object.entries(STATE.partIndex)) {
+       const q = info.perBomQty[p.bomKey];
+       if (!q) continue;
+       required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
+     }
+   }}
 
   const aoa = [
-    ['Plan:', ...STATE.plan.map(p => `${p.model} × ${p.qty}`)],
+    ['Plan:', ...STATE.plan.map(p => {
+     const bom = STATE.boms.find(b => bomKeyOf(b) === p.bomKey);
+     return `${bom ? bomDisplayName(bom) : p.bomKey} × ${p.qty}`;
+   })],
     ['Safety factor:', safety],
     [],
     ['Part No.','Name','UOM','Required','Available','Shortage','Status']
