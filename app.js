@@ -522,7 +522,6 @@ function renderBomTable() {
     return;
   }
 
-  // Sort by part no.
   rows.sort((a, b) => a.partNo.localeCompare(b.partNo, undefined, { numeric: true }));
 
   /* ---------------- Header ---------------- */
@@ -555,48 +554,90 @@ function renderBomTable() {
 
     if (!isOpen) return mainRow;
 
-    /* Build one column per vehicle batch (bomKey) */
-    const cols = Array.from(p.bomKeys).map(key => {
-      const bom = STATE.boms.find(b => bomKeyOf(b) === key);
-      return {
-        key,
-        topLabel:    bom ? (bom.vehicleDesc || bom.vehicleMatNo || '—') : key,
-        colourCode:  bom ? colorCodeOf(bom.vehicleMatNo) : '',
-        batchId:     bom ? (bom.batchId || '') : '',
-        qty:         p.perBomQty[key] || 0
-      };
-    }).sort((a, b) => a.topLabel.localeCompare(b.topLabel, undefined, { numeric: true }));
+    /* ---- Rebuild the spec → colour → batch tree for the BOMs of this part ---- */
+    const bomsForPart = Array.from(p.bomKeys)
+      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
+      .filter(Boolean);
 
-    const headerCells = cols.map(c => `
-      <th class="wu-col" title="${escapeHtml(c.topLabel)} — ${escapeHtml(c.batchId)}">
-        <div class="wu-col-title">${escapeHtml(shorten(c.topLabel, 26))}</div>
-        <div class="wu-col-sub">
-          ${c.colourCode ? `<span class="color-code" style="${colorBadgeStyle(c.colourCode)}">${escapeHtml(c.colourCode)}</span>` : ''}
-          <span class="wu-col-batch">${escapeHtml(c.batchId || '—')}</span>
-        </div>
-      </th>
-    `).join('');
+    const specMap = new Map();
+    for (const bom of bomsForPart) {
+      const sk = specKeyOf(bom.vehicleMatNo);
+      const cc = colorCodeOf(bom.vehicleMatNo);
+      if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, colors: new Map(), boms: [] });
+      const sg = specMap.get(sk);
+      sg.boms.push(bom);
+      if (!sg.colors.has(cc)) sg.colors.set(cc, []);
+      sg.colors.get(cc).push(bom);
+    }
+    for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
 
-    const valueCells = cols.map(c => `
-      <td class="wu-val" title="${escapeHtml(String(c.qty))}">
-        <div class="wu-qty">${fmt(c.qty)}</div>
-        <div class="wu-unit">per vehicle</div>
-      </td>
-    `).join('');
+    /* ---- Emit vertical rows ---- */
+    const hierRows = [];
+    const specList = Array.from(specMap.values())
+      .sort((a, b) => a.specName.localeCompare(b.specName, undefined, { numeric: true }));
+
+    for (const sg of specList) {
+      hierRows.push(`
+        <tr class="wu-spec-row">
+          <td class="wu-hier-cell wu-spec">
+            <span class="wu-spec-name">${escapeHtml(sg.specName)}</span>
+          </td>
+          <td class="wu-qty-cell">—</td>
+          <td class="wu-uom-cell">—</td>
+        </tr>`);
+
+      const colorList = Array.from(sg.colors.entries())
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+
+      for (const [cc, boms] of colorList) {
+        const colorName = deriveColorName(boms, sg.specName);
+        hierRows.push(`
+          <tr class="wu-color-row">
+            <td class="wu-hier-cell wu-color">
+              <span class="wu-indent-1"></span>
+              <span class="color-code" style="${colorBadgeStyle(cc)}">${escapeHtml(cc || '??')}</span>
+              <span class="wu-color-name">${escapeHtml(colorName || '')}</span>
+            </td>
+            <td class="wu-qty-cell">—</td>
+            <td class="wu-uom-cell">—</td>
+          </tr>`);
+
+        const batchList = boms.slice().sort((a, b) =>
+          (a.batchId || '').localeCompare(b.batchId || '', undefined, { numeric: true }));
+
+        for (const bom of batchList) {
+          const key = bomKeyOf(bom);
+          const qty = p.perBomQty[key] || 0;
+          hierRows.push(`
+            <tr class="wu-batch-row">
+              <td class="wu-hier-cell wu-batch">
+                <span class="wu-indent-2"></span>
+                <span class="wu-batch-id mono">${escapeHtml(bom.batchId || '—')}</span>
+              </td>
+              <td class="wu-qty-cell"><b>${fmt(qty)}</b></td>
+              <td class="wu-uom-cell">${escapeHtml(p.uom || '—')}</td>
+            </tr>`);
+        }
+      }
+    }
 
     return mainRow + `
       <tr class="where-used-row">
         <td colspan="4">
           <div class="where-used-panel">
             <div class="wu-title">
-              Used in <b>${cols.length}</b> vehicle batch${cols.length === 1 ? '' : 'es'}
+              Used in <b>${bomsForPart.length}</b> vehicle batch${bomsForPart.length === 1 ? '' : 'es'}
             </div>
-            <div class="wu-scroll">
-              <table class="wu-grid">
-                <thead><tr>${headerCells}</tr></thead>
-                <tbody><tr>${valueCells}</tr></tbody>
-              </table>
-            </div>
+            <table class="wu-table">
+              <thead>
+                <tr>
+                  <th class="wu-th-hier">Model / Color / Batch</th>
+                  <th class="wu-th-qty">Qty per car</th>
+                  <th class="wu-th-uom">UoM</th>
+                </tr>
+              </thead>
+              <tbody>${hierRows.join('')}</tbody>
+            </table>
           </div>
         </td>
       </tr>`;
@@ -604,7 +645,6 @@ function renderBomTable() {
 
   tbl.innerHTML = head + `<tbody>${body}</tbody>`;
 
-  /* ---------------- Wire buttons ---------------- */
   tbl.querySelectorAll('.where-used-btn').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -615,6 +655,7 @@ function renderBomTable() {
     });
   });
 }
+
 function populatePlanModels() {
   const sel = $('#planModel');
   sel.innerHTML = STATE.boms.length
