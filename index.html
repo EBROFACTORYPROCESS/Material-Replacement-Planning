@@ -14,7 +14,7 @@
     <h1>MRP Planner</h1>
   </div>
   <nav class="tabs">
-    <button class="tab active" data-tab="bom">BOM Management</button>
+    <button class="tab active" data-tab="bom">Material List</button>
     <button class="tab" data-tab="inventory">Inventory &amp; Stock</button>
     <button class="tab" data-tab="planning">Production Planning</button>
     <button class="tab" data-tab="settings">Settings</button>
@@ -23,12 +23,12 @@
 </header>
 
 <main>
-  <!-- ============ TAB: BOM ============ -->
+  <!-- ============ TAB: BOM / Material List ============ -->
   <section class="tab-panel active" id="panel-bom">
     <div class="card">
       <h2>1. Load BOM folder</h2>
-      <p class="hint">Pick the folder that contains your BOM files. Subfolders are scanned recursively for <code>.xlsx</code>, <code>.xls</code>, and <code>.csv</code>. Each file may contain many vehicle+colour+batch combinations — they're grouped automatically.</p>
-    
+      <p class="hint">Pick the folder that contains your BOM files. Subfolders are scanned recursively for <code>.xlsx</code>, <code>.xls</code>, and <code>.csv</code>. Each file may contain many vehicle+colour+batch combinations — they’re grouped automatically. Files must contain columns for <b>Vehicle Matl. Num.</b> (A), <b>Vehicle Desc.</b> (B), <b>batch</b> (E), <b>Part NO.</b> (J), <b>Part Name(EN)</b> (K), <b>Qty</b> (T), and <b>UOM</b> (U).</p>
+
       <div class="folder-loader">
         <div class="folder-path-row">
           <input id="bomFolderPath" type="text" readonly placeholder="No folder selected…" />
@@ -36,17 +36,17 @@
           <button class="btn primary" id="bomFolderProcess" disabled>▶ Process files</button>
         </div>
         <div class="folder-hint" id="bomFolderInfo">No folder selected yet.</div>
-    
+
         <!-- hidden fallback picker for browsers without File System Access API -->
         <input type="file" id="bomFolderFallback" webkitdirectory directory multiple hidden />
-    
+
         <div class="progress-wrap hidden" id="bomProgressWrap">
           <div class="progress-bar"><div class="progress-fill" id="bomProgressFill"></div></div>
           <div class="progress-label" id="bomProgressLabel">Preparing…</div>
           <div class="progress-file-list" id="bomProgressList"></div>
         </div>
       </div>
-    
+
       <details class="folder-fallback">
         <summary>…or drop individual files here</summary>
         <div class="dropzone" id="bomDrop" style="margin-top:12px">
@@ -57,17 +57,17 @@
           </div>
         </div>
       </details>
+
       <div id="bomList" class="file-list"></div>
     </div>
 
     <div class="card">
       <h2>2. Material List</h2>
-      <p class="hint">Upload one BOM file per vehicle configuration. Each file must contain columns for <b>Vehicle Matl. Num.</b> (A), <b>Vehicle Desc.</b> (B), <b>batch</b> (E), <b>Part NO.</b> (J), <b>Part Name(EN)</b> (K), <b>Qty</b> (T), and <b>UOM</b> (U). One file may contain many vehicle+colour+batch combinations — they are grouped automatically.</p>
       <div class="toolbar">
-        <input id="bomSearch" type="search" placeholder="Search part no / name…" />
+        <input id="bomSearch" type="search" placeholder="Search material no / description…" />
         <select id="bomFilter">
-          <option value="all">All parts</option>
-          <option value="common">Common parts only</option>
+          <option value="all">All materials</option>
+          <option value="common">Common materials only</option>
           <option value="specific">Model-specific only</option>
         </select>
         <button class="btn" id="exportBom">⤓ Export Excel</button>
@@ -205,6 +205,23 @@
 <footer>
   <span>MRP Planner · local-only · no data leaves your browser</span>
 </footer>
+
+<!-- ============ Display BOM modal ============ -->
+<div id="bomDisplayModal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div>
+        <h3 class="bdm-title">BOM Contents</h3>
+        <div class="bdm-subtitle"></div>
+      </div>
+      <button class="modal-close" id="bdmClose" title="Close">✕</button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn primary" id="bdmExport">⤓ Export this BOM</button>
+    </div>
+    <div class="modal-body bdm-body"></div>
+  </div>
+</div>
 
 <div id="filterPopup" class="filter-popup hidden"></div>
 
