@@ -582,9 +582,6 @@ function rebuildPartIndex() {
   STATE.partIndex = idx;
 }
 
-/* =========================================================
-   BOM LIST (spec → colour → BOM-ID → batches)
-   ========================================================= */
 function renderBomList() {
   const wrap = $('#bomList');
   if (!STATE.boms.length) { wrap.innerHTML = ''; return; }
@@ -641,7 +638,12 @@ function renderBomList() {
                     Display BOM
                   </button>
                 </div>
-                <div class="bom-batch-list">${batchItems}</div>
+                <details class="bom-batch-toggle">
+                  <summary class="bom-batch-toggle-summary">
+                    Show ${boms.length} batch${boms.length === 1 ? '' : 'es'}
+                  </summary>
+                  <div class="bom-batch-list">${batchItems}</div>
+                </details>
               </div>
             `;
           }).join('');
@@ -676,32 +678,10 @@ function renderBomList() {
     computeInventory(); renderInventoryTable(); renderPlanning();
   };
 
-  wrap.querySelectorAll('input[data-role=desc]').forEach(inp => {
-    inp.addEventListener('change', e => {
-      const id = e.target.closest('[data-id]').dataset.id;
-      const b  = STATE.boms.find(x => x.id === id); if (!b) return;
-      b.vehicleDesc = e.target.value.trim();
-      rerun(); renderBomList();
-    });
-  });
-  wrap.querySelectorAll('input[data-role=vehno]').forEach(inp => {
-    inp.addEventListener('change', e => {
-      const id = e.target.closest('[data-id]').dataset.id;
-      const b  = STATE.boms.find(x => x.id === id); if (!b) return;
-      b.vehicleMatNo = e.target.value.trim();
-      rerun(); renderBomList();
-    });
-  });
-  wrap.querySelectorAll('input[data-role=batch]').forEach(inp => {
-    inp.addEventListener('change', e => {
-      const id = e.target.closest('[data-id]').dataset.id;
-      const b  = STATE.boms.find(x => x.id === id); if (!b) return;
-      b.batchId = e.target.value.trim();
-      rerun();
-    });
-  });
   wrap.querySelectorAll('button[data-role=remove]').forEach(btn => {
     btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
       const id = e.target.closest('[data-id]').dataset.id;
       STATE.boms = STATE.boms.filter(x => x.id !== id);
       populatePartDatalist();
@@ -716,22 +696,17 @@ function renderBomList() {
     });
   });
 }
-
 function bomBatchItemHtml(b) {
   return `
     <div class="bom-batch-item" data-id="${b.id}">
       <span class="batch-parts-tag" title="${b.parts.length} parts">${b.parts.length}</span>
-      <input type="text" class="mono" data-role="batch"
-             value="${escapeHtml(b.batchId || '')}" placeholder="Sales Batch ID" />
-      <input type="text" class="mono" data-role="vehno"
-             value="${escapeHtml(b.vehicleMatNo || '')}" placeholder="Vehicle Mat. No." />
-      <input type="text" data-role="desc"
-             value="${escapeHtml(b.vehicleDesc || '')}" placeholder="Vehicle Description" />
-      <button class="btn ghost" data-role="remove" title="Remove">✕</button>
+      <span class="mono bom-field-batch" title="${escapeHtml(b.batchId || '')}">${escapeHtml(b.batchId || '—')}</span>
+      <span class="mono bom-field-vehno" title="${escapeHtml(b.vehicleMatNo || '')}">${escapeHtml(b.vehicleMatNo || '—')}</span>
+      <span class="bom-field-desc" title="${escapeHtml(b.vehicleDesc || '')}">${escapeHtml(b.vehicleDesc || '—')}</span>
+      <button class="btn ghost" data-role="remove" title="Remove from list">✕</button>
     </div>
   `;
 }
-
 /* =========================================================
    MATERIAL LIST
    ========================================================= */
@@ -2048,18 +2023,8 @@ function exportPlan() {
    DISPLAY BOM MODAL
    ========================================================= */
 function openBomDisplay(bomId) {
-  const rep = STATE.boms.find(b => b.bomId === bomId);
-  if (!rep) { alert(`BOM "${bomId}" not found.`); return; }
-
-  const modal = $('#bomDisplayModal');
-  modal.dataset.bomid = bomId;
-
   /* --- Linked sales batches (that share this BOM ID) ---------------- */
   const linkedBoms = STATE.boms.filter(b => b.bomId === bomId);
-  const batchLabels = linkedBoms.map(b => {
-    const desc = b.vehicleDesc || b.vehicleMatNo || '—';
-    return b.batchId ? `${desc} · ${b.batchId}` : desc;
-  });
 
   /* --- MWOs of the production batches linked to this BOM ----------- */
   const linkedBatchIds = new Set(linkedBoms.map(b => b.batchId).filter(Boolean));
@@ -2072,11 +2037,11 @@ function openBomDisplay(bomId) {
   /* --- Header ------------------------------------------------------ */
   modal.querySelector('.bdm-title').textContent = `BOM Contents — ${bomId}`;
   const subtitleHtml =
-    (batchLabels.length
-      ? `${batchLabels.length} batch${batchLabels.length === 1 ? '' : 'es'}: ${batchLabels.map(escapeHtml).join('   |   ')}`
-      : '')
+    `<span class="bdm-meta">
+       ${linkedBoms.length} sales batch${linkedBoms.length === 1 ? '' : 'es'}
+     </span>`
     + (batchMwos.length
-      ? `<br><span class="bdm-mwo">MWO: ${batchMwos.map(escapeHtml).join(', ')}</span>`
+      ? ` <span class="bdm-mwo">MWO: ${batchMwos.map(escapeHtml).join(', ')}</span>`
       : '');
   modal.querySelector('.bdm-subtitle').innerHTML = subtitleHtml;
 
