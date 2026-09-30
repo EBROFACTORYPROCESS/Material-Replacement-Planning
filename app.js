@@ -80,12 +80,18 @@ function colorBadgeStyle(code) {
   return `background:hsl(${hue},70%,92%);color:hsl(${hue},65%,32%)`;
 }
 
-/* ---- BOM-ID assignment (scoped per spec + colour) ---------------- */
+/* ---------------- BOM-ID assignment (scoped per spec + colour) ---------------- */
 function bomSignature(bom) {
   if (!bom || !bom.parts) return '';
   return bom.parts
     .slice()
-    .sort((a, b) => String(a.partNo).localeCompare(String(b.partNo)))
+    .sort((a, b) => {
+      const p = String(a.partNo).localeCompare(String(b.partNo));
+      if (p) return p;
+      const q = (Number(a.qty) || 0) - (Number(b.qty) || 0);
+      if (q) return q;
+      return String(a.uom || '').localeCompare(String(b.uom || ''));
+    })
     .map(p => `${p.partNo}|${Number(p.qty) || 0}|${(p.uom || '').trim()}`)
     .join(';');
 }
@@ -114,6 +120,7 @@ function assignBomId(bom) {
   }
   return bom.bomId;
 }
+
 /* Material List rows with their Where Used panel expanded */
 const WHERE_USED_OPEN = new Set();
 
@@ -502,6 +509,10 @@ function parseBOM(rows, filename) {
   if (cUOM < 0) cUOM = findCol(['unit of measure', 'uom']);
   if (cUOM < 0) cUOM = 20;
 
+  // MWO column (per part)
+  let cMWO = findCol(['mwo'], true);
+  if (cMWO < 0) cMWO = findCol(['mwo number', 'mwo no']);
+
   // Group rows by (vehicleMatNo, batchId) — each group = one BOM
   const groups = new Map();
   for (let i = headerIdx + 1; i < rows.length; i++) {
@@ -533,20 +544,15 @@ function parseBOM(rows, filename) {
       nameCN: '',
       qty,
       uom:    String(r[cUOM] ?? '').trim(),
+      mwo:    cMWO >= 0 ? String(r[cMWO] ?? '').trim() : '',
       supplier: '',
       cpac: ''
     });
   }
 
-  // Merge duplicate part numbers within each group
+  // Keep every row as-is (no merge of duplicate part numbers)
   const out = [];
   for (const g of groups.values()) {
-    const merged = new Map();
-    for (const p of g.parts) {
-      if (!merged.has(p.partNo)) merged.set(p.partNo, { ...p, qty: 0 });
-      merged.get(p.partNo).qty += p.qty;
-    }
-    g.parts = Array.from(merged.values());
     g.label = g.batchId || g.vehicleMatNo || filename;
     out.push(g);
   }
@@ -727,7 +733,7 @@ function bomBatchItemHtml(b) {
 }
 
 /* =========================================================
-   MATERIAL LIST (was BOM analysis)
+   MATERIAL LIST
    ========================================================= */
 function renderBomTable() {
   const tbl  = $('#bomTable');
@@ -965,7 +971,8 @@ function parseBatches(rows) {
     arrival:    idx(['arrival date','arrival']),
     production: idx(['production']),
     colorCode:  idx(['color code']),
-    carroceria: idx(['batch carroceria'])
+    carroceria: idx(['batch carroceria']),
+    mwo:        idx(['mwo'])
   };
   const out = [];
   for (let i = 1; i < rows.length; i++) {
@@ -987,6 +994,7 @@ function parseBatches(rows) {
       production: String(r[c.production] || '').trim(),
       colorCode:  String(r[c.colorCode] || '').trim(),
       carroceria: String(r[c.carroceria] || '').trim(),
+      mwo:        String(r[c.mwo] || '').trim(),
       _stage: 'unassigned',
       _warehouse: null
     });
@@ -2046,18 +2054,34 @@ function openBomDisplay(bomId) {
   const modal = $('#bomDisplayModal');
   modal.dataset.bomid = bomId;
 
-  const batchList = STATE.boms
-    .filter(b => b.bomId === bomId)
-    .map(b => {
-      const desc = b.vehicleDesc || b.vehicleMatNo || '—';
-      return b.batchId ? `${desc} · ${b.batchId}` : desc;
-    });
+  /* --- Linked sales batches (that share this BOM ID) ---------------- */
+  const linkedBoms = STATE.boms.filter(b => b.bomId === bomId);
+  const batchLabels = linkedBoms.map(b => {
+    const desc = b.vehicleDesc || b.vehicleMatNo || '—';
+    return b.batchId ? `${desc} · ${b.batchId}` : desc;
+  });
 
+  /* --- MWOs of the production batches linked to this BOM ----------- */
+  const linkedBatchIds = new Set(linkedBoms.map(b => b.batchId).filter(Boolean));
+  const batchMwoSet = new Set();
+  for (const batch of STATE.batches) {
+    if (linkedBatchIds.has(batch.batch) && batch.mwo) batchMwoSet.add(batch.mwo);
+  }
+  const batchMwos = Array.from(batchMwoSet).sort();
+
+  /* --- Header ------------------------------------------------------ */
   modal.querySelector('.bdm-title').textContent = `BOM Contents — ${bomId}`;
-  modal.querySelector('.bdm-subtitle').textContent =
-    batchList.length
-      ? `${batchList.length} batch${batchList.length === 1 ? '' : 'es'}: ${batchList.join('   |   ')}`
-      : '';
+  const subtitleHtml =
+    (batchLabels.length
+      ? `${batchLabels.length} batch${batchLabels.length === 1 ? '' : 'es'}: ${batchLabels.map(escapeHtml).join('   |   ')}`
+      : '')
+    + (batchMwos.length
+      ? `<br><span class="bdm-mwo">MWO: ${batchMwos.map(escapeHtml).join(', ')}</span>`
+      : '');
+  modal.querySelector('.bdm-subtitle').innerHTML = subtitleHtml;
+
+  /* --- Parts table ------------------------------------------------- */
+  const hasMwo = rep.parts.some(p => p.mwo);
 
   const partsRows = rep.parts
     .slice()
@@ -2068,6 +2092,7 @@ function openBomDisplay(bomId) {
         <td>${escapeHtml(p.nameEN || p.nameCN || '')}</td>
         <td class="num">${fmt(p.qty)}</td>
         <td>${escapeHtml(p.uom || '')}</td>
+        ${hasMwo ? `<td class="mono">${escapeHtml(p.mwo || '')}</td>` : ''}
       </tr>`)
     .join('');
 
@@ -2079,6 +2104,7 @@ function openBomDisplay(bomId) {
           <th>Material Description</th>
           <th class="num">Qty per car</th>
           <th>UoM</th>
+          ${hasMwo ? '<th>MWO</th>' : ''}
         </tr>
       </thead>
       <tbody>${partsRows}</tbody>
@@ -2100,11 +2126,20 @@ function exportBomDisplay() {
   const rep = STATE.boms.find(b => b.bomId === bomId);
   if (!rep) return;
 
-  const aoa = [['Material Number', 'Material Description', 'Qty per car', 'UoM']];
+  const hasMwo = rep.parts.some(p => p.mwo);
+
+  const header = ['Material Number', 'Material Description', 'Qty per car', 'UoM'];
+  if (hasMwo) header.push('MWO');
+
+  const aoa = [header];
   rep.parts
     .slice()
     .sort((a, b) => String(a.partNo).localeCompare(String(b.partNo), undefined, { numeric: true }))
-    .forEach(p => aoa.push([p.partNo, p.nameEN || p.nameCN || '', p.qty, p.uom || '']));
+    .forEach(p => {
+      const row = [p.partNo, p.nameEN || p.nameCN || '', p.qty, p.uom || ''];
+      if (hasMwo) row.push(p.mwo || '');
+      aoa.push(row);
+    });
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), (bomId || 'BOM').substring(0, 28));
