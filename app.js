@@ -678,16 +678,6 @@ function renderBomList() {
     computeInventory(); renderInventoryTable(); renderPlanning();
   };
 
-  wrap.querySelectorAll('button[data-role=remove]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      const id = e.target.closest('[data-id]').dataset.id;
-      STATE.boms = STATE.boms.filter(x => x.id !== id);
-      populatePartDatalist();
-      rerun(); renderBomList();
-    });
-  });
   wrap.querySelectorAll('button[data-role=bom-display]').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -697,15 +687,7 @@ function renderBomList() {
   });
 }
 function bomBatchItemHtml(b) {
-  return `
-    <div class="bom-batch-item" data-id="${b.id}">
-      <span class="batch-parts-tag" title="${b.parts.length} parts">${b.parts.length}</span>
-      <span class="mono bom-field-batch" title="${escapeHtml(b.batchId || '')}">${escapeHtml(b.batchId || '—')}</span>
-      <span class="mono bom-field-vehno" title="${escapeHtml(b.vehicleMatNo || '')}">${escapeHtml(b.vehicleMatNo || '—')}</span>
-      <span class="bom-field-desc" title="${escapeHtml(b.vehicleDesc || '')}">${escapeHtml(b.vehicleDesc || '—')}</span>
-      <button class="btn ghost" data-role="remove" title="Remove from list">✕</button>
-    </div>
-  `;
+  return `<span class="bom-batch-chip mono" title="${escapeHtml(b.batchId || '')}">${escapeHtml(b.batchId || '—')}</span>`;
 }
 /* =========================================================
    MATERIAL LIST
@@ -2026,10 +2008,8 @@ function openBomDisplay(bomId) {
   const modal = $('#bomDisplayModal');
   modal.dataset.bomid = bomId;
 
-  /* --- Linked sales batches (that share this BOM ID) ---------------- */
   const linkedBoms = STATE.boms.filter(b => b.bomId === bomId);
 
-  /* --- MWOs of the production batches linked to this BOM ----------- */
   const linkedBatchIds = new Set(linkedBoms.map(b => b.batchId).filter(Boolean));
   const batchMwoSet = new Set();
   for (const batch of STATE.batches) {
@@ -2037,7 +2017,6 @@ function openBomDisplay(bomId) {
   }
   const batchMwos = Array.from(batchMwoSet).sort();
 
-  /* --- Header ------------------------------------------------------ */
   modal.querySelector('.bdm-title').textContent = `BOM Contents — ${bomId}`;
   const subtitleHtml =
     `<span class="bdm-meta">
@@ -2048,7 +2027,6 @@ function openBomDisplay(bomId) {
       : '');
   modal.querySelector('.bdm-subtitle').innerHTML = subtitleHtml;
 
-  /* --- Parts table ------------------------------------------------- */
   const hasMwo = rep.parts.some(p => p.mwo);
 
   const partsRows = rep.parts
