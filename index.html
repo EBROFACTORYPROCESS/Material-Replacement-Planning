@@ -15,6 +15,7 @@
   </div>
   <nav class="tabs">
     <button class="tab active" data-tab="bom">Material List</button>
+    <button class="tab" data-tab="bomlist">BOM List</button>
     <button class="tab" data-tab="inventory">Inventory &amp; Stock</button>
     <button class="tab" data-tab="planning">Production Planning</button>
     <button class="tab" data-tab="settings">Settings</button>
@@ -58,9 +59,6 @@
         </div>
       </details>
 
-      <div id="bomList" class="file-list"></div>
-    </div>
-
     <div class="card">
       <h2>2. Material List</h2>
       <div class="toolbar">
@@ -75,7 +73,23 @@
       <div class="table-wrap"><table id="bomTable" class="compact"></table></div>
     </div>
   </section>
-
+<!-- ============ TAB: BOM LIST ============ -->
+  <section class="tab-panel" id="panel-bomlist">
+    <div class="card">
+      <h2>BOM List</h2>
+      <p class="hint">Browse every loaded BOM by <b>Vehicle Spec → Colour → BOM ID → Sales Batches</b>. Type a Sales Batch ID below to jump straight to its BOM.</p>
+  
+      <div class="toolbar">
+        <input id="bomListSearch" type="search" placeholder="Search by Sales Batch ID…" />
+        <button class="btn ghost" id="bomListExpandAll">▾ Expand all</button>
+        <button class="btn ghost" id="bomListCollapseAll">▸ Collapse all</button>
+      </div>
+  
+      <div id="bomListSearchResult" class="bom-search-result hidden"></div>
+  
+      <div id="bomList" class="file-list"></div>
+    </div>
+  </section>
   <!-- ============ TAB: INVENTORY ============ -->
   <section class="tab-panel" id="panel-inventory">
     <div class="card">
