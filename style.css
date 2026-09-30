@@ -475,6 +475,12 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
 .bdm-table th.num{text-align:right;font-variant-numeric:tabular-nums}
 .bdm-table tr:hover td{background:#fafbff}
 
+.bdm-mwo{
+  display:inline-block;margin-top:4px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px;color:var(--brand);
+  background:#eef2ff;padding:2px 8px;border-radius:6px}
+
 /* =========================================================
    Responsive
    ========================================================= */
