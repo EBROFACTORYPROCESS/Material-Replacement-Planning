@@ -584,7 +584,10 @@ function rebuildPartIndex() {
 
 function renderBomList() {
   const wrap = $('#bomList');
-  if (!STATE.boms.length) { wrap.innerHTML = ''; return; }
+  if (!STATE.boms.length) {
+    wrap.innerHTML = '<div class="hint" style="margin:0">No BOMs loaded yet. Go to the <b>Material List</b> tab, load a folder, then come back here.</div>';
+    return;
+  }
 
   /* --- 1. spec → color → bomId → boms[] ------------------------------ */
   const specMap = new Map();
@@ -637,6 +640,7 @@ function renderBomList() {
                   <button class="btn tiny" data-role="bom-display" data-bomid="${escapeHtml(bomId)}">
                     Display BOM
                   </button>
+                  if ($('#bomListSearch') && $('#bomListSearch').value) handleBomListSearch();
                 </div>
                 <details class="bom-batch-toggle">
                   <summary class="bom-batch-toggle-summary">
@@ -677,17 +681,104 @@ function renderBomList() {
     renderBatchTable(); renderBatchStats();
     computeInventory(); renderInventoryTable(); renderPlanning();
   };
-
-  wrap.querySelectorAll('button[data-role=bom-display]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      openBomDisplay(btn.dataset.bomid);
-    });
-  });
 }
 function bomBatchItemHtml(b) {
-  return `<span class="bom-batch-chip mono" title="${escapeHtml(b.batchId || '')}">${escapeHtml(b.batchId || '—')}</span>`;
+  const bid = b.batchId || '—';
+  return `<span class="bom-batch-chip" data-batchid="${escapeHtml(b.batchId || '')}" title="${escapeHtml(bid)}">${escapeHtml(bid)}</span>`;
+}
+/* =========================================================
+   BOM LIST — SEARCH & EXPAND / COLLAPSE
+   ========================================================= */
+function handleBomListSearch() {
+  const wrap      = $('#bomList');
+  const resultBox = $('#bomListSearchResult');
+  if (!wrap || !resultBox) return;
+
+  const q = ($('#bomListSearch').value || '').trim().toLowerCase();
+
+  /* --- Clear state ----------------------------------------------- */
+  wrap.querySelectorAll('.hidden-for-search').forEach(el => el.classList.remove('hidden-for-search'));
+  wrap.querySelectorAll('.bom-search-hit').forEach(el => el.classList.remove('bom-search-hit'));
+
+  if (!q) { resultBox.classList.add('hidden'); resultBox.innerHTML = ''; return; }
+
+  /* --- Collect matches ------------------------------------------- */
+  const hits = [];
+  wrap.querySelectorAll('.bom-spec-group').forEach(specEl => {
+    const specName = specEl.querySelector('.spec-name')?.textContent || '';
+    specEl.querySelectorAll('.bom-color-group').forEach(colorEl => {
+      const cc = colorEl.querySelector('.color-code')?.textContent || '';
+      const cn = colorEl.querySelector('.color-name')?.textContent || '';
+      colorEl.querySelectorAll('.bom-id-group').forEach(bomEl => {
+        const bomId = bomEl.querySelector('.bom-id-badge')?.textContent || '';
+        bomEl.querySelectorAll('.bom-batch-chip').forEach(chip => {
+          const bid = chip.dataset.batchid || '';
+          if (bid.toLowerCase().includes(q)) {
+            hits.push({ specName, cc, cn, bomId, bid, chipEl: chip, bomEl, colorEl, specEl });
+          }
+        });
+      });
+    });
+  });
+
+  /* --- Apply tree filter ----------------------------------------- */
+  wrap.querySelectorAll('.bom-spec-group, .bom-color-group, .bom-id-group, .bom-batch-chip')
+    .forEach(el => el.classList.add('hidden-for-search'));
+
+  for (const h of hits) {
+    h.chipEl.classList.remove('hidden-for-search');
+    h.chipEl.classList.add('bom-search-hit');
+    h.bomEl.classList.remove('hidden-for-search');
+    h.colorEl.classList.remove('hidden-for-search');
+    h.specEl.classList.remove('hidden-for-search');
+    const det = h.bomEl.querySelector('details.bom-batch-toggle');
+    if (det) det.open = true;
+  }
+
+  /* --- Result card ------------------------------------------------ */
+  resultBox.classList.remove('hidden');
+
+  if (!hits.length) {
+    resultBox.innerHTML =
+      `<div class="bom-search-empty">No Sales Batch matches “${escapeHtml(q)}”.</div>`;
+    return;
+  }
+
+  const rows = hits.map(h => `
+    <div class="bom-search-row">
+      <span class="bom-search-spec">${escapeHtml(h.specName)}</span>
+      <span class="bom-search-arrow">›</span>
+      <span class="bom-search-color">
+        <span class="color-code" style="${colorBadgeStyle(h.cc)}">${escapeHtml(h.cc || '??')}</span>
+        ${h.cn ? `<span class="bom-search-color-name">${escapeHtml(h.cn)}</span>` : ''}
+      </span>
+      <span class="bom-search-arrow">›</span>
+      <span class="bom-search-bomid bom-id-badge">${escapeHtml(h.bomId)}</span>
+      <span class="bom-search-arrow">›</span>
+      <span class="bom-search-batch">${escapeHtml(h.bid)}</span>
+    </div>`).join('');
+
+  resultBox.innerHTML = `
+    <div class="bom-search-summary">
+      <b>${hits.length}</b> match${hits.length === 1 ? '' : 'es'} for “${escapeHtml(q)}”
+    </div>
+    <div class="bom-search-rows">${rows}</div>`;
+}
+
+function expandAllBomList() {
+  document.querySelectorAll('#bomList details').forEach(d => { d.open = true; });
+}
+
+function collapseAllBomList() {
+  document.querySelectorAll('#bomList details').forEach(d => { d.open = false; });
+}
+
+function bindBomListSearch() {
+  const inp = $('#bomListSearch');
+  if (!inp) return;
+  inp.addEventListener('input', handleBomListSearch);
+  $('#bomListExpandAll')?.addEventListener('click', expandAllBomList);
+  $('#bomListCollapseAll')?.addEventListener('click', collapseAllBomList);
 }
 /* =========================================================
    MATERIAL LIST
@@ -1640,7 +1731,7 @@ function bindButtons() {
   $('#bomFolderPick').addEventListener('click', pickBomFolder);
   $('#bomFolderProcess').addEventListener('click', processBomFolder);
   bindFolderFallback();
-
+  bindBomListSearch();
   $('#bomSearch').addEventListener('input', renderBomTable);
   $('#bomFilter').addEventListener('change', renderBomTable);
   $('#invSearch').addEventListener('input', renderInventoryTable);
