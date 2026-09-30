@@ -9,10 +9,9 @@ const STATE = {
   partIndex: {},
   scrap: [],
   plan: [],
-  batchView: {           // column filter/sort state for batch table
-    sorts:   {},         // colId -> 'asc' | 'desc'
-    filters: {}          // colId -> Set of allowed keys
-  }
+  batchView: { sorts: {}, filters: {} },
+  bomRegistry: new Map(),   // signature → "BOM 1"
+  bomCounter:  0
 };
 
 const $  = (s, r=document) => r.querySelector(s);
@@ -21,10 +20,21 @@ const fmt = n => (n==null||isNaN(n)) ? '' : Number(n).toLocaleString(undefined,{
 const today = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
 const LS_CONFIG = 'mrp.configOverrides.v1';
 const LS_SCRAP  = 'mrp.scrap.v2';
-/* Which Material List rows have their Where-Used panel expanded */
-const WHERE_USED_OPEN = new Set();   // partNo strings
 
-/* --- Color / spec helpers ------------------------------------------- */
+/* ---------------- BOM key helpers ---------------- */
+function bomKeyOf(bom) {
+  if (!bom) return '';
+  return (bom.vehicleMatNo || '') + '||' + (bom.batchId || '');
+}
+function bomDisplayName(bom) {
+  if (!bom) return '';
+  const parts = [];
+  if (bom.vehicleDesc) parts.push(bom.vehicleDesc);
+  if (bom.batchId)     parts.push(bom.batchId);
+  return parts.join(' — ') || bom.vehicleMatNo || 'BOM';
+}
+
+/* ---------------- Colour / spec helpers ---------------- */
 function colorCodeOf(vehicleMatNo) {
   const v = (vehicleMatNo || '').trim();
   if (v.length < 9) return '';
@@ -70,18 +80,31 @@ function colorBadgeStyle(code) {
   return `background:hsl(${hue},70%,92%);color:hsl(${hue},65%,32%)`;
 }
 
-/* BOM key helpers — a BOM is uniquely identified by Vehicle Mat No. + Sales Batch ID */
-function bomKeyOf(bom) {
-  if (!bom) return '';
-  return (bom.vehicleMatNo || '') + '||' + (bom.batchId || '');
+/* ---------------- BOM-ID assignment ---------------- */
+function bomSignature(bom) {
+  if (!bom || !bom.parts) return '';
+  return bom.parts
+    .slice()
+    .sort((a, b) => String(a.partNo).localeCompare(String(b.partNo)))
+    .map(p => `${p.partNo}|${Number(p.qty) || 0}|${(p.uom || '').trim()}`)
+    .join(';');
 }
-function bomDisplayName(bom) {
-  if (!bom) return '';
-  const parts = [];
-  if (bom.vehicleDesc) parts.push(bom.vehicleDesc);
-  if (bom.batchId)     parts.push(bom.batchId);
-  return parts.join(' — ') || bom.vehicleMatNo || 'BOM';
+function assignBomId(bom) {
+  if (!(STATE.bomRegistry instanceof Map)) STATE.bomRegistry = new Map();
+  if (typeof STATE.bomCounter !== 'number') STATE.bomCounter = 0;
+  const sig = bomSignature(bom);
+  if (STATE.bomRegistry.has(sig)) {
+    bom.bomId = STATE.bomRegistry.get(sig);
+  } else {
+    STATE.bomCounter += 1;
+    bom.bomId = 'BOM ' + STATE.bomCounter;
+    STATE.bomRegistry.set(sig, bom.bomId);
+  }
+  return bom.bomId;
 }
+
+/* Material List rows with their Where Used panel expanded */
+const WHERE_USED_OPEN = new Set();
 
 /* Batch table column definitions */
 const BATCH_COLS = [
@@ -109,6 +132,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindTabs();
   bindUploads();
   bindButtons();
+  bindBomDisplayModal();
   bindFilterPopupGlobal();
   renderConversionTable();
   renderWarehouseEditor();
@@ -199,6 +223,7 @@ function bindUploads() {
 }
 function wireDropzone(dzSel, inputSel, handler) {
   const dz = $(dzSel), input = $(inputSel);
+  if (!dz || !input) return;
   input.addEventListener('change', e => handler(Array.from(e.target.files)));
   ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
     e.preventDefault(); dz.classList.add('drag');
@@ -254,18 +279,166 @@ function parseCSV(text) {
 }
 
 /* =========================================================
+   BOM FOLDER LOADER
+   ========================================================= */
+let _bomFolderHandle = null;
+let _bomFolderFiles  = [];
+
+function isBomFile(name) {
+  return /\.(xlsx|xls|csv)$/i.test(name);
+}
+function yieldToUI() {
+  return new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+}
+
+async function pickBomFolder() {
+  if (typeof window.showDirectoryPicker === 'function') {
+    try {
+      const handle = await window.showDirectoryPicker({ mode: 'read' });
+      _bomFolderHandle = handle;
+      $('#bomFolderPath').value = '/' + handle.name + '/';
+      _bomFolderFiles = [];
+      $('#bomFolderInfo').textContent = 'Scanning folder…';
+      $('#bomFolderProcess').disabled = true;
+      await walkDirectory(handle, '');
+      updateFolderInfo();
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      console.warn('showDirectoryPicker failed, falling back', e);
+    }
+  }
+  $('#bomFolderFallback').click();
+}
+
+async function walkDirectory(dirHandle, prefix) {
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === 'file') {
+      if (!isBomFile(entry.name)) continue;
+      const file = await entry.getFile();
+      _bomFolderFiles.push({ file, path: prefix + entry.name });
+    } else if (entry.kind === 'directory') {
+      if (entry.name.startsWith('.') || entry.name.startsWith('~')) continue;
+      await walkDirectory(entry, prefix + entry.name + '/');
+    }
+  }
+}
+
+function updateFolderInfo() {
+  const n = _bomFolderFiles.length;
+  $('#bomFolderInfo').textContent = n
+    ? `${n} BOM file${n===1?'':'s'} found — click “Process files”.`
+    : 'No BOM files found in that folder.';
+  $('#bomFolderProcess').disabled = n === 0;
+}
+
+async function processBomFolder() {
+  const files = _bomFolderFiles;
+  if (!files.length) return;
+
+  // Deterministic order — first file becomes BOM 1
+  files.sort((a, b) => a.path.localeCompare(b.path));
+
+  const wrap  = $('#bomProgressWrap');
+  const fill  = $('#bomProgressFill');
+  const label = $('#bomProgressLabel');
+  const list  = $('#bomProgressList');
+
+  wrap.classList.remove('hidden');
+  fill.style.width = '0%';
+  list.innerHTML = files.map((f, i) => `
+    <div class="progress-file" data-i="${i}">
+      <span class="pf-status pending">◌</span>
+      <span class="pf-name" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>
+      <span class="pf-note">waiting…</span>
+    </div>`).join('');
+
+  let ok = 0, fail = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const { file, path } = files[i];
+    const row = list.querySelector(`[data-i="${i}"]`);
+    const st  = row.querySelector('.pf-status');
+    const nt  = row.querySelector('.pf-note');
+
+    st.className = 'pf-status working';
+    st.textContent = '◐';
+    nt.textContent = 'parsing…';
+    label.textContent = `Parsing ${i+1} / ${files.length} — ${path}`;
+    await yieldToUI();
+
+    try {
+      const rows = await fileToRows(file);
+      const parsedList = parseBOM(rows, path);
+      if (!parsedList.length) throw new Error('no parts found');
+
+      for (const parsed of parsedList) {
+        const key = bomKeyOf(parsed);
+        const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
+        if (existing >= 0) STATE.boms.splice(existing, 1);
+        assignBomId(parsed);
+        STATE.boms.push(parsed);
+      }
+      const partCount = parsedList.reduce((a, p) => a + p.parts.length, 0);
+
+      st.className = 'pf-status done';
+      st.textContent = '✓';
+      nt.textContent = `${parsedList.length} BOM${parsedList.length===1?'':'s'}, ${partCount} parts`;
+      ok++;
+    } catch (e) {
+      console.error(e);
+      st.className = 'pf-status fail';
+      st.textContent = '✕';
+      nt.textContent = e.message || 'failed';
+      fail++;
+    }
+
+    fill.style.width = (((i + 1) / files.length) * 100).toFixed(1) + '%';
+    await yieldToUI();
+  }
+
+  label.textContent = `Done — ${ok} succeeded, ${fail} failed`;
+
+  rebuildPartIndex();
+  renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
+  renderBatchTable(); renderBatchStats();
+  computeInventory(); renderInventoryTable(); renderPlanning();
+}
+
+function bindFolderFallback() {
+  const inp = $('#bomFolderFallback');
+  if (!inp) return;
+  inp.addEventListener('change', e => {
+    const files = Array.from(e.target.files || []);
+    _bomFolderFiles = files
+      .filter(f => isBomFile(f.name))
+      .map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
+    if (_bomFolderFiles.length) {
+      const first = _bomFolderFiles[0].path;
+      const root  = first.split('/')[0];
+      $('#bomFolderPath').value = '/' + root + '/';
+    } else {
+      $('#bomFolderPath').value = '';
+    }
+    updateFolderInfo();
+    e.target.value = '';
+  });
+}
+
+/* =========================================================
    BOM
    ========================================================= */
 async function handleBomFiles(files) {
   for (const f of files) {
     try {
       const rows = await fileToRows(f);
-      const parsedList = parseBOM(rows, f.name);   // returns array now
+      const parsedList = parseBOM(rows, f.name);
       if (!parsedList.length) { alert(`No parts found in ${f.name}`); continue; }
       for (const parsed of parsedList) {
         const key = bomKeyOf(parsed);
         const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
         if (existing >= 0) STATE.boms.splice(existing, 1);
+        assignBomId(parsed);
         STATE.boms.push(parsed);
       }
     } catch (e) {
@@ -392,45 +565,78 @@ function rebuildPartIndex() {
   STATE.partIndex = idx;
 }
 
+/* =========================================================
+   BOM LIST (spec → colour → BOM-ID → batches)
+   ========================================================= */
 function renderBomList() {
   const wrap = $('#bomList');
   if (!STATE.boms.length) { wrap.innerHTML = ''; return; }
 
-  /* --- 1. Build the spec → color → boms[] tree ---------------------- */
+  /* --- 1. spec → color → bomId → boms[] ------------------------------ */
   const specMap = new Map();
   for (const b of STATE.boms) {
-    const sk = specKeyOf(b.vehicleMatNo);
-    const cc = colorCodeOf(b.vehicleMatNo);
+    const sk  = specKeyOf(b.vehicleMatNo);
+    const cc  = colorCodeOf(b.vehicleMatNo);
+    const bid = b.bomId || '(unassigned)';
     if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, colors: new Map(), boms: [] });
     const sg = specMap.get(sk);
     sg.boms.push(b);
-    if (!sg.colors.has(cc)) sg.colors.set(cc, []);
-    sg.colors.get(cc).push(b);
+    if (!sg.colors.has(cc)) sg.colors.set(cc, new Map());
+    const cg = sg.colors.get(cc);
+    if (!cg.has(bid)) cg.set(bid, []);
+    cg.get(bid).push(b);
   }
+  for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
 
-  /* --- 2. Derive friendly names ------------------------------------- */
-  for (const sg of specMap.values()) {
-    sg.specName = deriveSpecName(sg.boms);
-  }
-
-  /* --- 3. Render ---------------------------------------------------- */
+  /* --- 2. Render ------------------------------------------------------ */
   wrap.innerHTML = Array.from(specMap.values()).map(sg => {
     const colorHtml = Array.from(sg.colors.entries())
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
-      .map(([cc, boms]) => {
-        const colorName = deriveColorName(boms, sg.specName);
-        const nameHtml  = colorName
-          ? `<span class="color-name">${escapeHtml(colorName)}</span>`
-          : '';
-        const batchHtml = boms.map(bomBatchItemHtml).join('');
+      .map(([cc, bomGroupMap]) => {
+        const allBomsInColor = Array.from(bomGroupMap.values()).flat();
+        const colorName = deriveColorName(allBomsInColor, sg.specName);
+        const batchCount = allBomsInColor.length;
+
+        const bomGroupsHtml = Array.from(bomGroupMap.entries())
+          .sort((a, b) => {
+            const na = parseInt(String(a[0]).replace(/\D/g, ''), 10) || 0;
+            const nb = parseInt(String(b[0]).replace(/\D/g, ''), 10) || 0;
+            return na - nb;
+          })
+          .map(([bomId, boms]) => {
+            const rep = boms[0];
+            const partCount = rep.parts.length;
+
+            const batchItems = boms
+              .slice()
+              .sort((a, b) => String(a.batchId || '').localeCompare(String(b.batchId || '')))
+              .map(bomBatchItemHtml)
+              .join('');
+
+            return `
+              <div class="bom-id-group" data-bomid="${escapeHtml(bomId)}">
+                <div class="bom-id-header">
+                  <span class="bom-id-badge">${escapeHtml(bomId)}</span>
+                  <span class="bom-id-stats">
+                    ${boms.length} batch${boms.length === 1 ? '' : 'es'} · ${partCount} parts
+                  </span>
+                  <button class="btn tiny" data-role="bom-display" data-bomid="${escapeHtml(bomId)}">
+                    Display BOM
+                  </button>
+                </div>
+                <div class="bom-batch-list">${batchItems}</div>
+              </div>
+            `;
+          }).join('');
+
         return `
           <details class="bom-color-group" open>
             <summary class="bom-color-header">
               <span class="color-code" style="${colorBadgeStyle(cc)}">${escapeHtml(cc || '??')}</span>
-              ${nameHtml}
-              <span class="color-count">${boms.length} batch${boms.length===1?'':'es'}</span>
+              ${colorName ? `<span class="color-name">${escapeHtml(colorName)}</span>` : ''}
+              <span class="color-count">${batchCount} batch${batchCount === 1 ? '' : 'es'}</span>
             </summary>
-            <div class="bom-batch-list">${batchHtml}</div>
+            <div class="bom-id-list">${bomGroupsHtml}</div>
           </details>
         `;
       }).join('');
@@ -439,14 +645,14 @@ function renderBomList() {
       <details class="bom-spec-group" open>
         <summary class="bom-spec-header">
           <span class="spec-name">${escapeHtml(sg.specName)}</span>
-          <span class="spec-count">${sg.boms.length} BOM${sg.boms.length===1?'':'s'}</span>
+          <span class="spec-count">${sg.boms.length} BOM${sg.boms.length === 1 ? '' : 's'}</span>
         </summary>
         <div class="bom-color-list">${colorHtml}</div>
       </details>
     `;
   }).join('');
 
-  /* --- 4. Wire up edit / remove handlers ---------------------------- */
+  /* --- 3. Wire up handlers ------------------------------------------- */
   const rerun = () => {
     rebuildPartIndex(); renderBomTable(); populatePlanModels();
     renderBatchTable(); renderBatchStats();
@@ -458,7 +664,7 @@ function renderBomList() {
       const id = e.target.closest('[data-id]').dataset.id;
       const b  = STATE.boms.find(x => x.id === id); if (!b) return;
       b.vehicleDesc = e.target.value.trim();
-      rerun(); renderBomList();          // regroup
+      rerun(); renderBomList();
     });
   });
   wrap.querySelectorAll('input[data-role=vehno]').forEach(inp => {
@@ -466,7 +672,7 @@ function renderBomList() {
       const id = e.target.closest('[data-id]').dataset.id;
       const b  = STATE.boms.find(x => x.id === id); if (!b) return;
       b.vehicleMatNo = e.target.value.trim();
-      rerun(); renderBomList();          // regroup
+      rerun(); renderBomList();
     });
   });
   wrap.querySelectorAll('input[data-role=batch]').forEach(inp => {
@@ -483,6 +689,13 @@ function renderBomList() {
       STATE.boms = STATE.boms.filter(x => x.id !== id);
       populatePartDatalist();
       rerun(); renderBomList();
+    });
+  });
+  wrap.querySelectorAll('button[data-role=bom-display]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      openBomDisplay(btn.dataset.bomid);
     });
   });
 }
@@ -502,6 +715,9 @@ function bomBatchItemHtml(b) {
   `;
 }
 
+/* =========================================================
+   MATERIAL LIST (was BOM analysis)
+   ========================================================= */
 function renderBomTable() {
   const tbl  = $('#bomTable');
   const q    = ($('#bomSearch').value || '').toLowerCase();
@@ -524,7 +740,6 @@ function renderBomTable() {
 
   rows.sort((a, b) => a.partNo.localeCompare(b.partNo, undefined, { numeric: true }));
 
-  /* ---------------- Header ---------------- */
   const head = `
     <thead><tr>
       <th class="c-type">Material Type</th>
@@ -533,7 +748,6 @@ function renderBomTable() {
       <th class="c-action">Where Used</th>
     </tr></thead>`;
 
-  /* ---------------- Body ---------------- */
   const body = rows.map(p => {
     const isOpen = WHERE_USED_OPEN.has(p.partNo);
     const count  = p.bomKeys.size;
@@ -554,7 +768,7 @@ function renderBomTable() {
 
     if (!isOpen) return mainRow;
 
-    /* ---- Rebuild the spec → colour → batch tree for the BOMs of this part ---- */
+    /* ---- Rebuild spec → color → bomId → batches for the BOMs using this part ---- */
     const bomsForPart = Array.from(p.bomKeys)
       .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
       .filter(Boolean);
@@ -563,15 +777,18 @@ function renderBomTable() {
     for (const bom of bomsForPart) {
       const sk = specKeyOf(bom.vehicleMatNo);
       const cc = colorCodeOf(bom.vehicleMatNo);
+      const bid = bom.bomId || '(unassigned)';
       if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, colors: new Map(), boms: [] });
       const sg = specMap.get(sk);
       sg.boms.push(bom);
-      if (!sg.colors.has(cc)) sg.colors.set(cc, []);
-      sg.colors.get(cc).push(bom);
+      if (!sg.colors.has(cc)) sg.colors.set(cc, { colorCode: cc, bomIds: new Map(), boms: [] });
+      const cg = sg.colors.get(cc);
+      cg.boms.push(bom);
+      if (!cg.bomIds.has(bid)) cg.bomIds.set(bid, []);
+      cg.bomIds.get(bid).push(bom);
     }
     for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
 
-    /* ---- Emit vertical rows ---- */
     const hierRows = [];
     const specList = Array.from(specMap.values())
       .sort((a, b) => a.specName.localeCompare(b.specName, undefined, { numeric: true }));
@@ -589,8 +806,8 @@ function renderBomTable() {
       const colorList = Array.from(sg.colors.entries())
         .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
 
-      for (const [cc, boms] of colorList) {
-        const colorName = deriveColorName(boms, sg.specName);
+      for (const [cc, cg] of colorList) {
+        const colorName = deriveColorName(cg.boms, sg.specName);
         hierRows.push(`
           <tr class="wu-color-row">
             <td class="wu-hier-cell wu-color">
@@ -602,21 +819,40 @@ function renderBomTable() {
             <td class="wu-uom-cell">—</td>
           </tr>`);
 
-        const batchList = boms.slice().sort((a, b) =>
-          (a.batchId || '').localeCompare(b.batchId || '', undefined, { numeric: true }));
+        const bomIdList = Array.from(cg.bomIds.entries())
+          .sort((a, b) => {
+            const na = parseInt(String(a[0]).replace(/\D/g, ''), 10) || 0;
+            const nb = parseInt(String(b[0]).replace(/\D/g, ''), 10) || 0;
+            return na - nb;
+          });
 
-        for (const bom of batchList) {
-          const key = bomKeyOf(bom);
-          const qty = p.perBomQty[key] || 0;
+        for (const [bomId, boms] of bomIdList) {
           hierRows.push(`
-            <tr class="wu-batch-row">
-              <td class="wu-hier-cell wu-batch">
+            <tr class="wu-bomid-row">
+              <td class="wu-hier-cell wu-bomid">
                 <span class="wu-indent-2"></span>
-                <span class="wu-batch-id mono">${escapeHtml(bom.batchId || '—')}</span>
+                <span class="bom-id-badge">${escapeHtml(bomId)}</span>
               </td>
-              <td class="wu-qty-cell"><b>${fmt(qty)}</b></td>
-              <td class="wu-uom-cell">${escapeHtml(p.uom || '—')}</td>
+              <td class="wu-qty-cell">—</td>
+              <td class="wu-uom-cell">—</td>
             </tr>`);
+
+          const batchList = boms.slice().sort((a, b) =>
+            (a.batchId || '').localeCompare(b.batchId || '', undefined, { numeric: true }));
+
+          for (const bom of batchList) {
+            const key = bomKeyOf(bom);
+            const qty = p.perBomQty[key] || 0;
+            hierRows.push(`
+              <tr class="wu-batch-row">
+                <td class="wu-hier-cell wu-batch">
+                  <span class="wu-indent-3"></span>
+                  <span class="wu-batch-id mono">${escapeHtml(bom.batchId || '—')}</span>
+                </td>
+                <td class="wu-qty-cell"><b>${fmt(qty)}</b></td>
+                <td class="wu-uom-cell">${escapeHtml(p.uom || '—')}</td>
+              </tr>`);
+          }
         }
       }
     }
@@ -631,7 +867,7 @@ function renderBomTable() {
             <table class="wu-table">
               <thead>
                 <tr>
-                  <th class="wu-th-hier">Model / Color / Batch</th>
+                  <th class="wu-th-hier">Model / Color / BOM / Batch</th>
                   <th class="wu-th-qty">Qty per car</th>
                   <th class="wu-th-uom">UoM</th>
                 </tr>
@@ -764,7 +1000,7 @@ function parseDate(v) {
 }
 
 /* =========================================================
-   CLASSIFY — the auto-assign only fires for warehouse-stage batches
+   CLASSIFY
    ========================================================= */
 function classifyBatches() {
   const t = today();
@@ -772,41 +1008,21 @@ function classifyBatches() {
   const autoAssign = STATE.config.autoAssignDefaultWarehouse === true;
 
   for (const b of STATE.batches) {
-
-    // 1. CONSUMED — production finished and start date in the past
     if (b.trimIn && b.trimIn < t && /^DONE$/i.test(b.production || '')) {
-      b._stage = 'consumed';
-      b._warehouse = null;
-      continue;
+      b._stage = 'consumed'; b._warehouse = null; continue;
     }
-
-    // 2. IN TRANSIT — estimated arrival still in the future
     if (b.arrival && b.arrival > t) {
-      b._stage = 'inTransit';
-      b._warehouse = null;
-      continue;
+      b._stage = 'inTransit'; b._warehouse = null; continue;
     }
-
-    // 3. FACTORY FLOOR — decanting date already passed
     if (b.decanting && b.decanting <= t) {
-      b._stage = 'factoryFloor';
-      b._warehouse = null;
-      continue;
+      b._stage = 'factoryFloor'; b._warehouse = null; continue;
     }
-
-    // 4. WAREHOUSE — arrived but decanting not yet occurred
-    //    → auto-assign default warehouse ONLY if flag is on AND none set
     if (b.arrival && b.arrival <= t && (!b.decanting || b.decanting > t)) {
       b._stage = 'warehouse';
-      if (autoAssign && !b._warehouse && defaultWh) {
-        b._warehouse = defaultWh;
-      }
+      if (autoAssign && !b._warehouse && defaultWh) b._warehouse = defaultWh;
       continue;
     }
-
-    // 5. UNASSIGNED — no dates to place it
-    b._stage = 'unassigned';
-    b._warehouse = null;
+    b._stage = 'unassigned'; b._warehouse = null;
   }
 }
 
@@ -816,13 +1032,13 @@ function classifyBatches() {
 function resolveBomKeyForBatch(batch) {
   if (!STATE.boms.length) return null;
 
-  // 1. Direct match on Sales Batch ID (production batch number ↔ sales batch)
+  // 1. Direct match on Sales Batch ID
   if (batch.batch) {
     const direct = STATE.boms.find(b => b.batchId === batch.batch);
     if (direct) return bomKeyOf(direct);
   }
 
-  // 2. Conversion table (Modelo + optional Color) → vehicleMatNo (and optionally batchId)
+  // 2. Conversion table (Modelo + optional Color) → vehicleMatNo
   const ct = STATE.config.conversionTable || [];
   const modelo = (batch.model || '').toLowerCase();
   const color  = (batch.color || '').toLowerCase();
@@ -836,7 +1052,7 @@ function resolveBomKeyForBatch(batch) {
     if (candidates.length) return bomKeyOf(candidates[candidates.length - 1]);
   }
 
-  // 3. Fallback: match by vehicleDesc == Modelo
+  // 3. Fallback: vehicleDesc == Modelo
   const byDesc = STATE.boms.filter(b => b.vehicleDesc === batch.model);
   if (byDesc.length) return bomKeyOf(byDesc[byDesc.length - 1]);
 
@@ -905,11 +1121,10 @@ function getUniqueValues(colId) {
 }
 
 /* =========================================================
-   BATCH STATS (with per-model breakdown)
+   BATCH STATS
    ========================================================= */
 function renderBatchStats() {
   const stages = STATE.config.stages;
-
   const agg = {};
   for (const b of STATE.batches) {
     if (!agg[b._stage]) agg[b._stage] = { count: 0, qty: 0, byModel: {} };
@@ -1036,7 +1251,6 @@ function renderBatchTable() {
           ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
           : '—');
 
-    // flag unassigned rows with missing arrival date
     const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
     const unassignedFlag = isUnassignedNoDate
       ? `<span class="pill warn" title="No Arrival Date — cannot be classified" style="margin-left:6px">⚠</span>`
@@ -1146,9 +1360,7 @@ function paintFilterPopup(colId) {
 
   const currentSort = STATE.batchView.sorts[colId];
   const search = (popup._search || '').toLowerCase();
-
   const working = popup._workingSet;
-
   const visible = allValues.filter(v => !search || v.label.toLowerCase().includes(search));
 
   const valuesHtml = visible.length
@@ -1451,7 +1663,8 @@ function renderInventoryTable() {
 function bindButtons() {
   $('#bomFolderPick').addEventListener('click', pickBomFolder);
   $('#bomFolderProcess').addEventListener('click', processBomFolder);
-  bindFolderFallback();   
+  bindFolderFallback();
+
   $('#bomSearch').addEventListener('input', renderBomTable);
   $('#bomFilter').addEventListener('change', renderBomTable);
   $('#invSearch').addEventListener('input', renderInventoryTable);
@@ -1463,12 +1676,6 @@ function bindButtons() {
 
   $('#batchClearFilters').addEventListener('click', () => {
     STATE.batchView = { sorts: {}, filters: {} };
-    _bomFolderHandle = null;
-    _bomFolderFiles  = [];
-    $('#bomFolderPath').value = '';
-    $('#bomFolderInfo').textContent = 'No folder selected yet.';
-    $('#bomFolderProcess').disabled = true;
-    $('#bomProgressWrap').classList.add('hidden');
     $('#batchSearch').value = '';
     renderBatchTable();
   });
@@ -1509,8 +1716,17 @@ function bindButtons() {
     STATE.boms = []; STATE.batches = []; STATE.plan = []; STATE.scrap = [];
     STATE.inventory = {}; STATE.partIndex = {};
     STATE.batchView = { sorts: {}, filters: {} };
+    STATE.bomRegistry = new Map();
+    STATE.bomCounter  = 0;
+    WHERE_USED_OPEN.clear();
     savePersistedScrap();
     try { localStorage.removeItem(LS_CONFIG); } catch(e){}
+    _bomFolderHandle = null;
+    _bomFolderFiles  = [];
+    $('#bomFolderPath').value = '';
+    $('#bomFolderInfo').textContent = 'No folder selected yet.';
+    $('#bomFolderProcess').disabled = true;
+    $('#bomProgressWrap').classList.add('hidden');
     renderBomList(); renderBomTable(); renderBatchTable(); renderBatchStats();
     renderInventoryTable(); renderPlanList(); renderPlanning();
     renderScrapList(); renderConversionTable();
@@ -1735,8 +1951,8 @@ function exportBom() {
     ]);
   }
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'BOM Analysis');
-  downloadWorkbook(wb, `BOM_Analysis_${dateStamp()}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Material List');
+  downloadWorkbook(wb, `Material_List_${dateStamp()}.xlsx`);
 }
 
 function exportInventory() {
@@ -1810,6 +2026,93 @@ function exportPlan() {
 }
 
 /* =========================================================
+   DISPLAY BOM MODAL
+   ========================================================= */
+function openBomDisplay(bomId) {
+  const rep = STATE.boms.find(b => b.bomId === bomId);
+  if (!rep) { alert(`BOM "${bomId}" not found.`); return; }
+
+  const modal = $('#bomDisplayModal');
+  modal.dataset.bomid = bomId;
+
+  const batchList = STATE.boms
+    .filter(b => b.bomId === bomId)
+    .map(b => {
+      const desc = b.vehicleDesc || b.vehicleMatNo || '—';
+      return b.batchId ? `${desc} · ${b.batchId}` : desc;
+    });
+
+  modal.querySelector('.bdm-title').textContent = `BOM Contents — ${bomId}`;
+  modal.querySelector('.bdm-subtitle').textContent =
+    batchList.length
+      ? `${batchList.length} batch${batchList.length === 1 ? '' : 'es'}: ${batchList.join('   |   ')}`
+      : '';
+
+  const partsRows = rep.parts
+    .slice()
+    .sort((a, b) => String(a.partNo).localeCompare(String(b.partNo), undefined, { numeric: true }))
+    .map(p => `
+      <tr>
+        <td class="mono">${escapeHtml(p.partNo)}</td>
+        <td>${escapeHtml(p.nameEN || p.nameCN || '')}</td>
+        <td class="num">${fmt(p.qty)}</td>
+        <td>${escapeHtml(p.uom || '')}</td>
+      </tr>`)
+    .join('');
+
+  modal.querySelector('.bdm-body').innerHTML = `
+    <table class="bdm-table">
+      <thead>
+        <tr>
+          <th>Material Number</th>
+          <th>Material Description</th>
+          <th class="num">Qty per car</th>
+          <th>UoM</th>
+        </tr>
+      </thead>
+      <tbody>${partsRows}</tbody>
+    </table>`;
+
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeBomDisplay() {
+  const modal = $('#bomDisplayModal');
+  modal.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+function exportBomDisplay() {
+  const modal = $('#bomDisplayModal');
+  const bomId = modal.dataset.bomid;
+  const rep = STATE.boms.find(b => b.bomId === bomId);
+  if (!rep) return;
+
+  const aoa = [['Material Number', 'Material Description', 'Qty per car', 'UoM']];
+  rep.parts
+    .slice()
+    .sort((a, b) => String(a.partNo).localeCompare(String(b.partNo), undefined, { numeric: true }))
+    .forEach(p => aoa.push([p.partNo, p.nameEN || p.nameCN || '', p.qty, p.uom || '']));
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), (bomId || 'BOM').substring(0, 28));
+  downloadWorkbook(wb, `${(bomId || 'BOM').replace(/\s+/g, '_')}_${dateStamp()}.xlsx`);
+}
+
+function bindBomDisplayModal() {
+  $('#bdmClose')?.addEventListener('click', closeBomDisplay);
+  $('#bdmExport')?.addEventListener('click', exportBomDisplay);
+  $('#bomDisplayModal')?.addEventListener('click', e => {
+    if (e.target.id === 'bomDisplayModal') closeBomDisplay();
+  });
+  document.addEventListener('keydown', e => {
+    const m = $('#bomDisplayModal');
+    if (e.key === 'Escape' && m && !m.classList.contains('hidden')) closeBomDisplay();
+  });
+}
+
+/* =========================================================
    UTILITIES
    ========================================================= */
 function escapeHtml(s) {
@@ -1824,153 +2127,5 @@ function dateStamp() {
   return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
 }
 function round3(n) { return Math.round(n * 1000) / 1000; }
-/* =========================================================
-   BOM FOLDER LOADER
-   ========================================================= */
-let _bomFolderHandle = null;         // FileSystemDirectoryHandle (File System Access API)
-let _bomFolderFiles  = [];           // [{ file, path }]
 
-function isBomFile(name) {
-  return /\.(xlsx|xls|csv)$/i.test(name);
-}
-
-/* Small helper — yields to the browser so the UI can repaint mid-loop */
-function yieldToUI() {
-  return new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
-}
-
-async function pickBomFolder() {
-  // 1. Modern API — recursive, live handle
-  if (typeof window.showDirectoryPicker === 'function') {
-    try {
-      const handle = await window.showDirectoryPicker({ mode: 'read' });
-      _bomFolderHandle = handle;
-      $('#bomFolderPath').value = '/' + handle.name + '/';
-      _bomFolderFiles = [];
-      $('#bomFolderInfo').textContent = 'Scanning folder…';
-      $('#bomFolderProcess').disabled = true;
-      await walkDirectory(handle, '');
-      updateFolderInfo();
-      return;
-    } catch (e) {
-      if (e.name === 'AbortError') return;          // user closed the dialog
-      console.warn('showDirectoryPicker failed, falling back to webkitdirectory', e);
-    }
-  }
-  // 2. Fallback — pick folder via native file input
-  $('#bomFolderFallback').click();
-}
-
-async function walkDirectory(dirHandle, prefix) {
-  for await (const entry of dirHandle.values()) {
-    if (entry.kind === 'file') {
-      if (!isBomFile(entry.name)) continue;
-      const file = await entry.getFile();
-      _bomFolderFiles.push({ file, path: prefix + entry.name });
-    } else if (entry.kind === 'directory') {
-      // skip hidden/system folders
-      if (entry.name.startsWith('.') || entry.name.startsWith('~')) continue;
-      await walkDirectory(entry, prefix + entry.name + '/');
-    }
-  }
-}
-
-function updateFolderInfo() {
-  const n = _bomFolderFiles.length;
-  $('#bomFolderInfo').textContent = n
-    ? `${n} BOM file${n===1?'':'s'} found — click “Process files”.`
-    : 'No BOM files found in that folder.';
-  $('#bomFolderProcess').disabled = n === 0;
-}
-
-async function processBomFolder() {
-  const files = _bomFolderFiles;
-  if (!files.length) return;
-
-  const wrap  = $('#bomProgressWrap');
-  const fill  = $('#bomProgressFill');
-  const label = $('#bomProgressLabel');
-  const list  = $('#bomProgressList');
-
-  wrap.classList.remove('hidden');
-  fill.style.width = '0%';
-  list.innerHTML = files.map((f, i) => `
-    <div class="progress-file" data-i="${i}">
-      <span class="pf-status pending">◌</span>
-      <span class="pf-name" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>
-      <span class="pf-note">waiting…</span>
-    </div>`).join('');
-
-  let ok = 0, fail = 0;
-
-  for (let i = 0; i < files.length; i++) {
-    const { file, path } = files[i];
-    const row = list.querySelector(`[data-i="${i}"]`);
-    const st  = row.querySelector('.pf-status');
-    const nt  = row.querySelector('.pf-note');
-
-    st.className = 'pf-status working';
-    st.textContent = '◐';
-    nt.textContent = 'parsing…';
-    label.textContent = `Parsing ${i+1} / ${files.length} — ${path}`;
-    await yieldToUI();
-
-    try {
-      const rows = await fileToRows(file);
-      const parsedList = parseBOM(rows, path);
-      if (!parsedList.length) throw new Error('no parts found');
-
-      for (const parsed of parsedList) {
-        const key = bomKeyOf(parsed);
-        const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
-        if (existing >= 0) STATE.boms.splice(existing, 1);
-        STATE.boms.push(parsed);
-      }
-      const partCount = parsedList.reduce((a, p) => a + p.parts.length, 0);
-
-      st.className = 'pf-status done';
-      st.textContent = '✓';
-      nt.textContent = `${parsedList.length} BOM${parsedList.length===1?'':'s'}, ${partCount} parts`;
-      ok++;
-    } catch (e) {
-      console.error(e);
-      st.className = 'pf-status fail';
-      st.textContent = '✕';
-      nt.textContent = e.message || 'failed';
-      fail++;
-    }
-
-    fill.style.width = (((i + 1) / files.length) * 100).toFixed(1) + '%';
-    await yieldToUI();
-  }
-
-  label.textContent = `Done — ${ok} succeeded, ${fail} failed`;
-
-  rebuildPartIndex();
-  renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
-  renderBatchTable(); renderBatchStats();
-  computeInventory(); renderInventoryTable(); renderPlanning();
-}
-
-/* Fallback: wire the <input webkitdirectory> */
-function bindFolderFallback() {
-  const inp = $('#bomFolderFallback');
-  if (!inp) return;
-  inp.addEventListener('change', e => {
-    const files = Array.from(e.target.files || []);
-    _bomFolderFiles = files
-      .filter(f => isBomFile(f.name))
-      .map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
-    // derive a display "path" from the first file's relative path
-    if (_bomFolderFiles.length) {
-      const first = _bomFolderFiles[0].path;
-      const root  = first.split('/')[0];
-      $('#bomFolderPath').value = '/' + root + '/';
-    } else {
-      $('#bomFolderPath').value = '';
-    }
-    updateFolderInfo();
-    e.target.value = '';
-  });
-}
 window.MRP = STATE;
