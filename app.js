@@ -2019,10 +2019,13 @@ function exportPlan() {
   downloadWorkbook(wb, `Production_Plan_${dateStamp()}.xlsx`);
 }
 
-/* =========================================================
-   DISPLAY BOM MODAL
-   ========================================================= */
 function openBomDisplay(bomId) {
+  const rep = STATE.boms.find(b => b.bomId === bomId);
+  if (!rep) { alert(`BOM "${bomId}" not found.`); return; }
+
+  const modal = $('#bomDisplayModal');
+  modal.dataset.bomid = bomId;
+
   /* --- Linked sales batches (that share this BOM ID) ---------------- */
   const linkedBoms = STATE.boms.filter(b => b.bomId === bomId);
 
