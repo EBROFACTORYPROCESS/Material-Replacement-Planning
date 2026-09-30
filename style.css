@@ -97,9 +97,9 @@ th{background:#f8fafc;position:sticky;top:0;font-weight:600;color:#334155;
 tr:hover td{background:#fafbff}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 
-/* Compact BOM analysis */
+/* Compact Material List table */
 table.compact{font-size:12px;table-layout:fixed;width:100%}
-table.compact th,table.compact td{padding:4px 8px}
+table.compact th,table.compact td{padding:6px 10px}
 table.compact td,table.compact th{
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 table.compact .c-partno{width:130px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
@@ -298,7 +298,7 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}
 .folder-fallback[open] > summary{color:var(--text);margin-bottom:6px}
 
 /* =========================================================
-   Hierarchical BOM list (spec → colour → batches)
+   Hierarchical BOM list (spec → colour → BOM-ID → batches)
    ========================================================= */
 .bom-spec-group{
   border:1px solid var(--border);border-radius:10px;background:#fff;
@@ -344,6 +344,23 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
   background:#e0e7ff;color:#3730a3;white-space:nowrap;min-width:22px;text-align:center}
 .bom-batch-item button[data-role=remove]{
   color:var(--danger);padding:2px 6px;font-size:14px}
+
+/* =========================================================
+   BOM ID group inside a color group
+   ========================================================= */
+.bom-id-list{display:flex;flex-direction:column;gap:6px;padding-left:8px}
+.bom-id-group{
+  border:1px solid #eef2f7;border-radius:8px;background:#fff;
+  overflow:hidden}
+.bom-id-header{
+  display:flex;align-items:center;gap:10px;
+  padding:6px 10px;background:#f8fafc;border-bottom:1px solid #eef2f7}
+.bom-id-badge{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;
+  background:#dbeafe;color:var(--brand);letter-spacing:.04em}
+.bom-id-stats{font-size:11.5px;color:var(--muted);flex:1}
+.bom-id-group .bom-batch-list{padding:6px 8px 8px 8px}
 
 /* =========================================================
    Material List
@@ -392,6 +409,7 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
 .wu-hier-cell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wu-indent-1{display:inline-block;width:22px}
 .wu-indent-2{display:inline-block;width:44px}
+.wu-indent-3{display:inline-block;width:66px}
 
 /* Spec row */
 .wu-spec-row > td{background:#eef2f7}
@@ -406,6 +424,12 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
 .wu-color-row .wu-qty-cell,
 .wu-color-row .wu-uom-cell{color:#cbd5e1;text-align:right}
 
+/* BOM ID row */
+.wu-bomid-row > td{background:#f8fafc}
+.wu-bomid-row .wu-hier-cell{font-weight:600;color:var(--text)}
+.wu-bomid-row .wu-qty-cell,
+.wu-bomid-row .wu-uom-cell{color:#cbd5e1;text-align:right}
+
 /* Batch row */
 .wu-batch-row > td{background:#fff}
 .wu-batch-row .wu-qty-cell{
@@ -414,6 +438,42 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
 .wu-batch-row .wu-uom-cell{
   text-align:right;color:var(--muted);font-size:11.5px}
 .wu-batch-id{font-size:12px;color:var(--text)}
+
+/* =========================================================
+   Display BOM modal
+   ========================================================= */
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(15,23,42,.45);
+  z-index:300;display:flex;align-items:center;justify-content:center;
+  padding:24px}
+.modal-overlay.hidden{display:none}
+.modal-box{
+  background:#fff;border-radius:14px;width:min(900px,100%);
+  max-height:88vh;display:flex;flex-direction:column;
+  box-shadow:0 20px 60px rgba(16,24,40,.25);overflow:hidden}
+.modal-header{
+  display:flex;align-items:flex-start;gap:16px;
+  padding:16px 20px;border-bottom:1px solid var(--border)}
+.modal-header h3{margin:0 0 4px;font-size:16px}
+.bdm-subtitle{font-size:12px;color:var(--muted);line-height:1.5}
+.modal-close{
+  background:transparent;border:0;font-size:18px;color:var(--muted);
+  cursor:pointer;padding:4px 8px;border-radius:6px;margin-left:auto}
+.modal-close:hover{background:#f1f5f9;color:var(--text)}
+.modal-actions{
+  padding:10px 20px;border-bottom:1px solid var(--border);
+  display:flex;gap:8px}
+.modal-body{overflow:auto;flex:1;padding:0}
+.bdm-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.bdm-table th{
+  background:#f8fafc;position:sticky;top:0;z-index:1;
+  padding:8px 14px;text-align:left;font-size:12px;font-weight:600;
+  color:#334155;border-bottom:1px solid var(--border)}
+.bdm-table td{padding:7px 14px;border-bottom:1px solid #f1f5f9}
+.bdm-table td.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
+.bdm-table td.num,
+.bdm-table th.num{text-align:right;font-variant-numeric:tabular-nums}
+.bdm-table tr:hover td{background:#fafbff}
 
 /* =========================================================
    Responsive
