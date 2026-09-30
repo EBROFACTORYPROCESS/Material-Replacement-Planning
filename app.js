@@ -80,7 +80,7 @@ function colorBadgeStyle(code) {
   return `background:hsl(${hue},70%,92%);color:hsl(${hue},65%,32%)`;
 }
 
-/* ---------------- BOM-ID assignment ---------------- */
+/* ---- BOM-ID assignment (scoped per spec + colour) ---------------- */
 function bomSignature(bom) {
   if (!bom || !bom.parts) return '';
   return bom.parts
@@ -89,20 +89,31 @@ function bomSignature(bom) {
     .map(p => `${p.partNo}|${Number(p.qty) || 0}|${(p.uom || '').trim()}`)
     .join(';');
 }
+
+/* Group key = spec (material number with colour blanked) + colour code */
+function bomGroupKey(bom) {
+  const spec = specKeyOf(bom.vehicleMatNo);
+  const cc   = colorCodeOf(bom.vehicleMatNo);
+  return spec + '||' + cc;
+}
+
 function assignBomId(bom) {
   if (!(STATE.bomRegistry instanceof Map)) STATE.bomRegistry = new Map();
-  if (typeof STATE.bomCounter !== 'number') STATE.bomCounter = 0;
-  const sig = bomSignature(bom);
-  if (STATE.bomRegistry.has(sig)) {
-    bom.bomId = STATE.bomRegistry.get(sig);
+  if (!(STATE.bomCounter  instanceof Map)) STATE.bomCounter  = new Map();
+
+  const groupKey = bomGroupKey(bom);
+  const sigKey   = groupKey + '||' + bomSignature(bom);
+
+  if (STATE.bomRegistry.has(sigKey)) {
+    bom.bomId = STATE.bomRegistry.get(sigKey);
   } else {
-    STATE.bomCounter += 1;
-    bom.bomId = 'BOM ' + STATE.bomCounter;
-    STATE.bomRegistry.set(sig, bom.bomId);
+    const n = (STATE.bomCounter.get(groupKey) || 0) + 1;
+    STATE.bomCounter.set(groupKey, n);
+    bom.bomId = 'BOM ' + n;
+    STATE.bomRegistry.set(sigKey, bom.bomId);
   }
   return bom.bomId;
 }
-
 /* Material List rows with their Where Used panel expanded */
 const WHERE_USED_OPEN = new Set();
 
@@ -1717,7 +1728,7 @@ function bindButtons() {
     STATE.inventory = {}; STATE.partIndex = {};
     STATE.batchView = { sorts: {}, filters: {} };
     STATE.bomRegistry = new Map();
-    STATE.bomCounter  = 0;
+    STATE.bomCounter  = new Map();
     WHERE_USED_OPEN.clear();
     savePersistedScrap();
     try { localStorage.removeItem(LS_CONFIG); } catch(e){}
