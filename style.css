@@ -494,3 +494,62 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
   .wu-th-qty{width:100px;}
   .wu-th-uom{width:64px;}
 }
+/* ===== Collapsible batch list inside each BOM ID group ===== */
+.bom-batch-toggle{
+  border-top:1px solid #eef2f7;
+  background:#fbfcfe}
+.bom-batch-toggle > summary{
+  cursor:pointer;
+  padding:6px 12px;
+  font-size:11.5px;
+  color:var(--muted);
+  list-style:none;
+  user-select:none}
+.bom-batch-toggle > summary::-webkit-details-marker{display:none}
+.bom-batch-toggle > summary::before{
+  content:'▸';
+  display:inline-block;
+  width:12px;
+  color:var(--muted);
+  font-size:10px;
+  transition:transform .15s}
+.bom-batch-toggle[open] > summary::before{content:'▾'}
+.bom-batch-toggle > summary:hover{color:var(--brand);background:#f1f5f9}
+.bom-batch-toggle[open] > summary{
+  border-bottom:1px solid #eef2f7;
+  background:#f8fafc;
+  color:var(--text);font-weight:500}
+
+/* ===== Batch row — display-only fields ===== */
+.bom-batch-item{
+  display:grid;
+  grid-template-columns:auto 1.1fr 1.3fr 1.9fr auto;
+  gap:8px;align-items:center;
+  padding:5px 8px;
+  background:#fff;
+  border:1px solid #eef2f7;
+  border-radius:6px;
+  margin:4px 8px}
+.bom-batch-item:last-child{margin-bottom:8px}
+.bom-field-batch,
+.bom-field-vehno{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px;color:var(--text);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bom-field-desc{
+  font-size:12px;color:#475569;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bom-batch-item button[data-role=remove]{
+  color:var(--danger);padding:2px 6px;font-size:14px;
+  opacity:.6;transition:opacity .15s}
+.bom-batch-item:hover button[data-role=remove]{opacity:1}
+
+/* ===== Modal meta line ===== */
+.bdm-meta{
+  display:inline-block;
+  font-size:12px;color:var(--muted);
+  margin-right:8px}
+
+/* ===== Modal header / subtitle tweak ===== */
+.bdm-subtitle{
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px}
