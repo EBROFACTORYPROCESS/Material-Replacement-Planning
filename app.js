@@ -10,8 +10,8 @@ const STATE = {
   scrap: [],
   plan: [],
   batchView: { sorts: {}, filters: {} },
-  bomRegistry: new Map(),   // signature → "BOM 1"
-  bomCounter:  0
+  bomRegistry: new Map(),   // "specKey||color||signature" → "BOM N"
+  bomCounter:  new Map()    // "specKey||color"            → N
 };
 
 const $  = (s, r=document) => r.querySelector(s);
