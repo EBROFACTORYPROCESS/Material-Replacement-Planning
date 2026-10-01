@@ -2811,8 +2811,7 @@ function renderProductionChart() {
 
   const granularity = $('#prodChartGranularity').value;
   const stageKey    = $('#prodChartStage').value;
-  const fromVal     = ($('#prodChartFrom').value || '').trim();   // 'YYYY-MM-DD' or ''
-  const toVal       = ($('#prodChartTo').value   || '').trim();
+
 
   const buckets = new Map();
   for (const r of STATE.production.records) {
