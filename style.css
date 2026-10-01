@@ -571,6 +571,104 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
   font-weight:600}
 
 /* =========================================================
+   Production Monitoring
+   ========================================================= */
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.prod-stat .value .unit {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 6px;
+  font-weight: 500;
+}
+
+.prod-bar {
+  height: 6px;
+  background: #eef2f7;
+  border-radius: 99px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.prod-bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  transition: width .3s ease;
+}
+
+.prod-timeline {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  justify-content: flex-start;
+}
+.prod-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.prod-dot.empty {
+  background: #e5e7eb;
+  border: 1px solid #d1d5db;
+}
+
+.prod-time-col {
+  font-size: 11.5px;
+  color: #475569;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.prod-empty { color: #cbd5e1; }
+
+.prod-pct {
+  display: inline-block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 5px;
+  margin-right: 4px;
+}
+.prod-pct.ok      { background: #dcfce7; color: #166534; }
+.prod-pct.partial { background: #fef3c7; color: #92400e; }
+.prod-pct.empty   { background: #f1f5f9; color: #94a3b8; }
+
+/* Pagination */
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 0 0;
+  flex-wrap: wrap;
+}
+.pagination .btn.tiny {
+  min-width: 32px;
+  padding: 4px 8px;
+}
+.pagination .btn.tiny.primary {
+  background: var(--brand);
+  color: #fff;
+  border-color: var(--brand);
+}
+.pagination .btn.tiny[disabled] {
+  opacity: .4;
+  cursor: not-allowed;
+}
+.pagination .pg-dots {
+  color: var(--muted);
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+/* Make table header sticky for tall production tables */
+#prodBatchTable th,
+#prodVinTable th { position: sticky; top: 0; }
+
+/* =========================================================
    Responsive
    ========================================================= */
 @media (max-width:900px){
