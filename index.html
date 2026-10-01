@@ -16,6 +16,7 @@
   <nav class="tabs">
     <button class="tab active" data-tab="bomlist">BOM List</button>
     <button class="tab" data-tab="bom">Material List</button>
+    <button class="tab" data-tab="production">Production Monitoring</button>
     <button class="tab" data-tab="inventory">Inventory &amp; Stock</button>
     <button class="tab" data-tab="planning">Production Planning</button>
     <button class="tab" data-tab="settings">Settings</button>
@@ -97,7 +98,80 @@
       <div class="table-wrap"><table id="bomTable" class="compact"></table></div>
     </div>
   </section>
-
+  <!-- ============ TAB: PRODUCTION MONITORING ============ -->
+  <section class="tab-panel" id="panel-production">
+  
+    <div class="card">
+      <h2>1. Load Production Tracking file</h2>
+      <p class="hint">
+        Large CSV with one row per VIN. Columns are auto-detected by header name:
+        <code>vinId, sequence, batch, description, color, materialCode</code> and the milestone
+        columns <code>005 DEVANNING</code>, <code>020 TRIM IN</code>, <code>030 OFF LINE OK</code>,
+        <code>BUY OFF OK</code>, <code>COMPOUND GATE IN IN</code>, <code>COMPOUND GATE OUT OK</code>.
+        Files up to ~50 MB / hundreds of thousands of VINs are supported (parsed in chunks with progress).
+      </p>
+      <div class="dropzone" id="prodDrop">
+        <input type="file" id="prodInput" accept=".csv,.tsv,.txt" />
+        <div class="dz-inner">
+          <strong>Drop production tracking CSV here</strong>
+          <span>or click to browse</span>
+        </div>
+      </div>
+      <div class="progress-wrap hidden" id="prodProgressWrap">
+        <div class="progress-bar"><div class="progress-fill" id="prodProgressFill"></div></div>
+        <div class="progress-header">
+          <span class="progress-label" id="prodProgressLabel">Preparing…</span>
+        </div>
+      </div>
+      <div class="row-2">
+        <button class="btn ghost" id="prodClear">✕ Clear production data</button>
+      </div>
+    </div>
+  
+    <div class="card">
+      <h2>2. Overall KPIs</h2>
+      <div class="stats" id="prodStats">
+        <div class="hint" style="margin:0">No production data loaded yet.</div>
+      </div>
+    </div>
+  
+    <div class="card">
+      <h2>3. Batch summary</h2>
+      <p class="hint">Per-batch progress. Each column counts VINs that reached that milestone.</p>
+      <div class="toolbar">
+        <input id="prodBatchSearch" type="search" placeholder="Search batch…" />
+        <select id="prodBatchFilter">
+          <option value="all">All batches</option>
+          <option value="inProgress">In progress</option>
+          <option value="completed">Completed (gate-out)</option>
+        </select>
+        <button class="btn" id="prodBatchExport">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="prodBatchTable"></table></div>
+    </div>
+  
+    <div class="card">
+      <h2>4. VIN detail</h2>
+      <p class="hint">Individual VIN timeline through each milestone. Use the filters to focus on stalled vehicles.</p>
+      <div class="toolbar">
+        <input id="prodVinSearch" type="search" placeholder="Search VIN / batch / sequence / model…" />
+        <select id="prodVinStage">
+          <option value="all">All VINs</option>
+          <option value="complete">Complete (Gate-out OK)</option>
+          <option value="notDev">Not de-vanned</option>
+          <option value="notTrim">Not trim-in</option>
+          <option value="notOff">Not off-line</option>
+          <option value="notBuyOff">Not buy-off OK</option>
+          <option value="notCompoundIn">Not in compound</option>
+          <option value="notCompoundOut">Not gate-out</option>
+        </select>
+        <button class="btn" id="prodVinExport">⤓ Export Excel</button>
+      </div>
+      <div class="hint" id="prodVinCount" style="margin:-4px 0 8px"></div>
+      <div class="table-wrap"><table id="prodVinTable"></table></div>
+      <div class="pagination" id="prodVinPagination"></div>
+    </div>
+  </section>
   <!-- ============ TAB: INVENTORY ============ -->
   <section class="tab-panel" id="panel-inventory">
     <div class="card">
