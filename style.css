@@ -667,7 +667,20 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
 /* Make table header sticky for tall production tables */
 #prodBatchTable th,
 #prodVinTable th { position: sticky; top: 0; }
-
+function clearProduction() {
+  if (!STATE.production.loaded) return;
+  if (!confirm('Clear all loaded production tracking data?')) return;
+  STATE.production = {
+    records: [], batches: new Map(), header: null, loaded: false,
+    batchView: { search: '', filter: 'all' },
+    vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
+  };
+  PROD_BATCH_EXPANDED.clear();        // ← add this line
+  $('#prodProgressWrap').classList.add('hidden');
+  renderProductionStats();
+  renderProductionBatchTable();
+  renderProductionVinTable();
+}
 /* =========================================================
    Responsive
    ========================================================= */
