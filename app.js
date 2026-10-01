@@ -2337,11 +2337,25 @@ function dominantField(vins, field) {
   }
   return best;
 }
-
+/* Most-frequent production line across a batch's VINs. */
+function dominantLine(batch) {
+  if (!batch || !batch.vins || !batch.vins.length) return '—';
+  const counts = {};
+  for (const r of batch.vins) {
+    const l = lineOfSequence(r.sequence);
+    counts[l] = (counts[l] || 0) + 1;
+  }
+  let best = '—', bestN = 0;
+  for (const [k, n] of Object.entries(counts)) {
+    if (n > bestN) { best = k; bestN = n; }
+  }
+  return best;
+}
 /* Track which spec / colour groups the user has collapsed.
    (Batch expansion already uses PROD_BATCH_EXPANDED.) */
 const PROD_SPEC_COLLAPSED  = new Set();
 const PROD_COLOR_COLLAPSED = new Set();
+const PROD_LINE_COLLAPSED = new Set();
 
 function lineOfSequence(seq) {
   if (!seq) return '—';
@@ -2523,9 +2537,10 @@ async function handleProductionFiles(files) {
     $('#prodVinSearch').value = '';
     $('#prodVinStage').value = 'all';
 
-    PROD_BATCH_EXPANDED.clear();
-    PROD_SPEC_COLLAPSED.clear();
-    PROD_COLOR_COLLAPSED.clear();
+     PROD_BATCH_EXPANDED.clear();
+     PROD_LINE_COLLAPSED.clear();     // ← add
+     PROD_SPEC_COLLAPSED.clear();
+     PROD_COLOR_COLLAPSED.clear();
 
     /* --- Default monitoring period = entire file --- */
     const { min, max } = getFileDateBounds();
@@ -2832,6 +2847,7 @@ function renderProductionStats() {
     </div>`).join('');
 }
 function prodBatchExpandAll() {
+  PROD_LINE_COLLAPSED.clear();
   PROD_SPEC_COLLAPSED.clear();
   PROD_COLOR_COLLAPSED.clear();
   if (STATE.production.loaded) renderProductionBatchTable();
@@ -2840,11 +2856,14 @@ function prodBatchExpandAll() {
 function prodBatchCollapseAll() {
   if (!STATE.production.loaded) return;
   for (const b of STATE.production.batches.values()) {
+    const line  = dominantLine(b);
     const model = dominantField(b.vins, 'description') || '(no model)';
     const color = dominantField(b.vins, 'color')       || '(no colour)';
     const ccode = dominantField(b.vins, 'colorCode')   || '';
-    PROD_SPEC_COLLAPSED.add(model);
-    PROD_COLOR_COLLAPSED.add(model + '||' + color + '||' + ccode);
+
+    PROD_LINE_COLLAPSED.add(line);
+    PROD_SPEC_COLLAPSED.add(line + '||' + model);
+    PROD_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + ccode);
   }
   renderProductionBatchTable();
 }
@@ -3013,7 +3032,7 @@ function renderProductionBatchTable() {
   let batches = Array.from(STATE.production.batches.values())
     .filter(b => b.vins.some(recordInPeriod));
 
-  /* --- 2. Enrich with period counts + dominant model/colour --- */
+  /* --- 2. Enrich with period counts + dominant line/model/colour --- */
   const enriched = [];
   for (const b of batches) {
     const periodVins = b.vins.filter(recordInPeriod);
@@ -3024,6 +3043,7 @@ function renderProductionBatchTable() {
       periodVins,
       periodCounts: batchCountsInPeriod(b),
       fullCounts:   b.counts,
+      line:      dominantLine(b),
       model:     dominantField(b.vins, 'description') || '(no model)',
       color:     dominantField(b.vins, 'color')       || '(no colour)',
       colorCode: dominantField(b.vins, 'colorCode')   || ''
@@ -3042,7 +3062,7 @@ function renderProductionBatchTable() {
   if (search) {
     batches = batches.filter(b => {
       if (b.id.toLowerCase().includes(search)) return true;
-      return `${b.model} ${b.color}`.toLowerCase().includes(search);
+      return `${b.line} ${b.model} ${b.color}`.toLowerCase().includes(search);
     });
   }
 
@@ -3051,162 +3071,193 @@ function renderProductionBatchTable() {
     return;
   }
 
-  /* --- 5. Group: model → colour → batches --- */
-  const specMap = new Map();
+  /* --- 5. Group: line → model → colour → batches --- */
+  const lineMap = new Map();
   for (const b of batches) {
+    if (!lineMap.has(b.line)) lineMap.set(b.line, new Map());
+    const specMap = lineMap.get(b.line);
+
     if (!specMap.has(b.model)) specMap.set(b.model, new Map());
     const colorMap = specMap.get(b.model);
+
     const ckey = b.color + '||' + b.colorCode;
     if (!colorMap.has(ckey)) colorMap.set(ckey, { color: b.color, colorCode: b.colorCode, batches: [] });
     colorMap.get(ckey).batches.push(b);
   }
 
-  const sortedSpecs = Array.from(specMap.entries())
+  const sortedLines = Array.from(lineMap.entries())
     .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
   /* --- 6. Render tree --- */
   let html = '';
-  for (const [model, colorMap] of sortedSpecs) {
-    const allBatches = Array.from(colorMap.values()).flatMap(c => c.batches);
-    const specVinTotal = allBatches.reduce((s, b) => s + b.periodVins.length, 0);
-    const specComplete = allBatches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
-    const specBatchCnt = allBatches.length;
-    const specColorCnt = colorMap.size;
-    const specOpen     = !PROD_SPEC_COLLAPSED.has(model);
+  for (const [line, specMap] of sortedLines) {
+    const lineBatches   = Array.from(specMap.values()).flatMap(cm =>
+      Array.from(cm.values()).flatMap(cg => cg.batches));
+    const lineVinTotal  = lineBatches.reduce((s, b) => s + b.periodVins.length, 0);
+    const lineComplete  = lineBatches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
+    const lineBatchCnt  = lineBatches.length;
+    const lineModelCnt  = specMap.size;
+    const lineOpen      = !PROD_LINE_COLLAPSED.has(line);
 
-    html += `<details class="prod-spec-group" data-spec="${escapeHtml(model)}" ${specOpen ? 'open' : ''}>
-      <summary class="prod-spec-header">
-        <span class="spec-name">${escapeHtml(model)}</span>
-        <span class="spec-count">
-          ${specBatchCnt} batch${specBatchCnt === 1 ? '' : 'es'} ·
-          ${specColorCnt} colour${specColorCnt === 1 ? '' : 's'} ·
-          ${fmt(specVinTotal)} VINs ·
-          <b>${fmt(specComplete)}</b> complete
+    html += `<details class="prod-line-group" data-line="${escapeHtml(line)}" ${lineOpen ? 'open' : ''}>
+      <summary class="prod-line-header">
+        <span class="line-name">${escapeHtml(line)}</span>
+        <span class="line-count">
+          ${lineModelCnt} model${lineModelCnt === 1 ? '' : 's'} ·
+          ${lineBatchCnt} batch${lineBatchCnt === 1 ? '' : 'es'} ·
+          ${fmt(lineVinTotal)} VINs ·
+          <b>${fmt(lineComplete)}</b> complete
         </span>
       </summary>
-      <div class="prod-color-list">`;
+      <div class="prod-spec-list">`;
 
-    const sortedColors = Array.from(colorMap.entries())
+    const sortedSpecs = Array.from(specMap.entries())
       .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-    for (const [ckey, cg] of sortedColors) {
-      const colorVinTotal = cg.batches.reduce((s, b) => s + b.periodVins.length, 0);
-      const colorComplete = cg.batches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
-      const colorOpen     = !PROD_COLOR_COLLAPSED.has(model + '||' + ckey);
+    for (const [model, colorMap] of sortedSpecs) {
+      const allBatches   = Array.from(colorMap.values()).flatMap(c => c.batches);
+      const specVinTotal = allBatches.reduce((s, b) => s + b.periodVins.length, 0);
+      const specComplete = allBatches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
+      const specBatchCnt = allBatches.length;
+      const specColorCnt = colorMap.size;
+      const specOpen     = !PROD_SPEC_COLLAPSED.has(line + '||' + model);
 
-      html += `<details class="prod-color-group" data-spec="${escapeHtml(model)}" data-color="${escapeHtml(ckey)}" ${colorOpen ? 'open' : ''}>
-        <summary class="prod-color-header">
-          <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
-          <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
-          <span class="color-count">
-            ${cg.batches.length} batch${cg.batches.length === 1 ? '' : 'es'} ·
-            ${fmt(colorVinTotal)} VINs ·
-            <b>${fmt(colorComplete)}</b> complete
+      html += `<details class="prod-spec-group" data-line="${escapeHtml(line)}" data-spec="${escapeHtml(model)}" ${specOpen ? 'open' : ''}>
+        <summary class="prod-spec-header">
+          <span class="spec-name">${escapeHtml(model)}</span>
+          <span class="spec-count">
+            ${specBatchCnt} batch${specBatchCnt === 1 ? '' : 'es'} ·
+            ${specColorCnt} colour${specColorCnt === 1 ? '' : 's'} ·
+            ${fmt(specVinTotal)} VINs ·
+            <b>${fmt(specComplete)}</b> complete
           </span>
         </summary>
-        <div class="prod-batch-list">
-          <table class="prod-batch-inner-table">
-            <thead>
-              <tr>
-                <th style="width:32px"></th>
-                <th>Batch</th>
-                <th class="num">VINs</th>
-                ${PROD_STAGES.map(s => `<th class="num" title="${s.label}">${s.short}</th>`).join('')}
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>`;
+        <div class="prod-color-list">`;
 
-      const sortedBatches = cg.batches.slice()
-        .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+      const sortedColors = Array.from(colorMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-      for (const b of sortedBatches) {
-        const allTotal    = b.allVins.length;
-        const periodTotal = b.periodVins.length;
-        const isOpen      = PROD_BATCH_EXPANDED.has(b.id);
+      for (const [ckey, cg] of sortedColors) {
+        const colorVinTotal = cg.batches.reduce((s, b) => s + b.periodVins.length, 0);
+        const colorComplete = cg.batches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
+        const colorOpen     = !PROD_COLOR_COLLAPSED.has(line + '||' + model + '||' + ckey);
 
-        const vinsCell = (periodTotal === allTotal)
-          ? `${periodTotal}`
-          : `${periodTotal}<small style="color:var(--muted)">/${allTotal}</small>`;
+        html += `<details class="prod-color-group" data-line="${escapeHtml(line)}" data-spec="${escapeHtml(model)}" data-color="${escapeHtml(ckey)}" ${colorOpen ? 'open' : ''}>
+          <summary class="prod-color-header">
+            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
+            <span class="color-count">
+              ${cg.batches.length} batch${cg.batches.length === 1 ? '' : 'es'} ·
+              ${fmt(colorVinTotal)} VINs ·
+              <b>${fmt(colorComplete)}</b> complete
+            </span>
+          </summary>
+          <div class="prod-batch-list">
+            <table class="prod-batch-inner-table">
+              <thead>
+                <tr>
+                  <th style="width:32px"></th>
+                  <th>Batch</th>
+                  <th class="num">VINs</th>
+                  ${PROD_STAGES.map(s => `<th class="num" title="${s.label}">${s.short}</th>`).join('')}
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>`;
 
-        const stageCells = PROD_STAGES.map(s => {
-          const n   = b.periodCounts[s.key] || 0;
-          const pct = periodTotal ? Math.round(n / periodTotal * 100) : 0;
-          const cls = pct === 100 ? 'ok' : pct > 0 ? 'partial' : 'empty';
-          return `<td class="num"><span class="prod-pct ${cls}">${n}/${periodTotal}</span><small style="color:var(--muted);margin-left:4px">${pct}%</small></td>`;
-        }).join('');
+        const sortedBatches = cg.batches.slice()
+          .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
 
-        let status;
-        if ((b.fullCounts.compoundOut || 0) === allTotal && allTotal > 0)
-          status = '<span class="pill ok">COMPLETE</span>';
-        else if ((b.fullCounts.compoundIn || 0) === allTotal && allTotal > 0)
-          status = '<span class="pill" style="background:#dbeafe;color:#1e40af">IN COMPOUND</span>';
-        else
-          status = '<span class="pill warn">IN PROGRESS</span>';
+        for (const b of sortedBatches) {
+          const allTotal    = b.allVins.length;
+          const periodTotal = b.periodVins.length;
+          const isOpen      = PROD_BATCH_EXPANDED.has(b.id);
 
-        html += `<tr class="prod-batch-row ${isOpen ? 'row-open' : ''}" data-batch="${escapeHtml(b.id)}">
-          <td class="prod-batch-toggle-cell">
-            <button class="btn tiny prod-batch-toggle" data-batch="${escapeHtml(b.id)}"
-                    title="${isOpen ? 'Hide VIN details' : 'Show VIN details'}">
-              ${isOpen ? '▾' : '▸'}
-            </button>
-          </td>
-          <td><b class="mono">${escapeHtml(b.id)}</b></td>
-          <td class="num">${vinsCell}</td>
-          ${stageCells}
-          <td>${status}</td>
-        </tr>`;
+          const vinsCell = (periodTotal === allTotal)
+            ? `${periodTotal}`
+            : `${periodTotal}<small style="color:var(--muted)">/${allTotal}</small>`;
 
-        if (isOpen) {
-          const vins = b.periodVins.slice().sort((x, y) => {
-            const c = String(x.sequence || '').localeCompare(String(y.sequence || ''), undefined, { numeric: true });
-            return c || displayVin(x).localeCompare(displayVin(y));
-          });
+          const stageCells = PROD_STAGES.map(s => {
+            const n   = b.periodCounts[s.key] || 0;
+            const pct = periodTotal ? Math.round(n / periodTotal * 100) : 0;
+            const cls = pct === 100 ? 'ok' : pct > 0 ? 'partial' : 'empty';
+            return `<td class="num"><span class="prod-pct ${cls}">${n}/${periodTotal}</span><small style="color:var(--muted);margin-left:4px">${pct}%</small></td>`;
+          }).join('');
 
-          const colspan = 4 + PROD_STAGES.length;
+          let status;
+          if ((b.fullCounts.compoundOut || 0) === allTotal && allTotal > 0)
+            status = '<span class="pill ok">COMPLETE</span>';
+          else if ((b.fullCounts.compoundIn || 0) === allTotal && allTotal > 0)
+            status = '<span class="pill" style="background:#dbeafe;color:#1e40af">IN COMPOUND</span>';
+          else
+            status = '<span class="pill warn">IN PROGRESS</span>';
 
-          html += `<tr class="prod-batch-detail-row">
-            <td colspan="${colspan}">
-              <div class="prod-batch-detail">
-                <div class="prod-batch-detail-title">
-                  VINs in <b>${escapeHtml(b.id)}</b> — ${vins.length} vehicle${vins.length === 1 ? '' : 's'} in period
-                </div>
-                <div class="table-wrap prod-batch-detail-scroll">
-                  <table class="prod-batch-detail-table">
-                    <thead>
-                      <tr>
-                        <th>Seq</th>
-                        <th>VIN</th>
-                        <th>Line</th>
-                        <th>Colour</th>
-                        ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
-                        <th>Timeline</th>
-                      </tr>
-                    </thead>
-                    <tbody>`;
+          html += `<tr class="prod-batch-row ${isOpen ? 'row-open' : ''}" data-batch="${escapeHtml(b.id)}">
+            <td class="prod-batch-toggle-cell">
+              <button class="btn tiny prod-batch-toggle" data-batch="${escapeHtml(b.id)}"
+                      title="${isOpen ? 'Hide VIN details' : 'Show VIN details'}">
+                ${isOpen ? '▾' : '▸'}
+              </button>
+            </td>
+            <td><b class="mono">${escapeHtml(b.id)}</b></td>
+            <td class="num">${vinsCell}</td>
+            ${stageCells}
+            <td>${status}</td>
+          </tr>`;
 
-          for (const r of vins) {
-            const line = lineOfSequence(r.sequence);
-            const dots = PROD_STAGES.map(s =>
-              r[s.key]
-                ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
-                : `<span class="prod-dot empty" title="${s.label}: —"></span>`
-            ).join('');
-            html += `<tr>
-              <td class="mono">${escapeHtml(r.sequence || '—')}</td>
-              <td class="mono">${escapeHtml(displayVin(r))}</td>
-              <td>${escapeHtml(line)}</td>
-              <td>${escapeHtml(r.color || '—')}</td>
-              ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
-              <td><div class="prod-timeline">${dots}</div></td>
-            </tr>`;
+          if (isOpen) {
+            const vins = b.periodVins.slice().sort((x, y) => {
+              const c = String(x.sequence || '').localeCompare(String(y.sequence || ''), undefined, { numeric: true });
+              return c || displayVin(x).localeCompare(displayVin(y));
+            });
+
+            const colspan = 4 + PROD_STAGES.length;
+
+            html += `<tr class="prod-batch-detail-row">
+              <td colspan="${colspan}">
+                <div class="prod-batch-detail">
+                  <div class="prod-batch-detail-title">
+                    VINs in <b>${escapeHtml(b.id)}</b> — ${vins.length} vehicle${vins.length === 1 ? '' : 's'} in period
+                  </div>
+                  <div class="table-wrap prod-batch-detail-scroll">
+                    <table class="prod-batch-detail-table">
+                      <thead>
+                        <tr>
+                          <th>Seq</th>
+                          <th>VIN</th>
+                          <th>Line</th>
+                          <th>Colour</th>
+                          ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
+                          <th>Timeline</th>
+                        </tr>
+                      </thead>
+                      <tbody>`;
+
+            for (const r of vins) {
+              const lineOf = lineOfSequence(r.sequence);
+              const dots = PROD_STAGES.map(s =>
+                r[s.key]
+                  ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
+                  : `<span class="prod-dot empty" title="${s.label}: —"></span>`
+              ).join('');
+              html += `<tr>
+                <td class="mono">${escapeHtml(r.sequence || '—')}</td>
+                <td class="mono">${escapeHtml(displayVin(r))}</td>
+                <td>${escapeHtml(lineOf)}</td>
+                <td>${escapeHtml(r.color || '—')}</td>
+                ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
+                <td><div class="prod-timeline">${dots}</div></td>
+              </tr>`;
+            }
+
+            html += `</tbody></table></div></div></td></tr>`;
           }
-
-          html += `</tbody></table></div></div></td></tr>`;
         }
+
+        html += `</tbody></table></div></details>`;
       }
 
-      html += `</tbody></table></div></details>`;
+      html += `</div></details>`;
     }
 
     html += `</div></details>`;
@@ -3236,9 +3287,17 @@ function renderProductionBatchTable() {
     });
   });
 
+  tree.querySelectorAll('details.prod-line-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line;
+      if (d.open) PROD_LINE_COLLAPSED.delete(key);
+      else        PROD_LINE_COLLAPSED.add(key);
+    });
+  });
+
   tree.querySelectorAll('details.prod-spec-group').forEach(d => {
     d.addEventListener('toggle', () => {
-      const key = d.dataset.spec;
+      const key = d.dataset.line + '||' + d.dataset.spec;
       if (d.open) PROD_SPEC_COLLAPSED.delete(key);
       else        PROD_SPEC_COLLAPSED.add(key);
     });
@@ -3246,7 +3305,7 @@ function renderProductionBatchTable() {
 
   tree.querySelectorAll('details.prod-color-group').forEach(d => {
     d.addEventListener('toggle', () => {
-      const key = d.dataset.spec + '||' + d.dataset.color;
+      const key = d.dataset.line + '||' + d.dataset.spec + '||' + d.dataset.color;
       if (d.open) PROD_COLOR_COLLAPSED.delete(key);
       else        PROD_COLOR_COLLAPSED.add(key);
     });
