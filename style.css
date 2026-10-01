@@ -682,6 +682,99 @@ function clearProduction() {
   renderProductionVinTable();
 }
 /* =========================================================
+   Production — hierarchical batch tree
+   ========================================================= */
+.prod-batch-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.prod-spec-group {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+.prod-spec-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: #eef2f7;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  list-style: none;
+}
+.prod-spec-header::-webkit-details-marker { display: none; }
+.prod-spec-header::before {
+  content: '▾';
+  color: var(--muted);
+  font-size: 11px;
+  transition: transform .15s;
+}
+details.prod-spec-group:not([open]) > .prod-spec-header::before { transform: rotate(-90deg); }
+.prod-spec-header .spec-name { font-weight: 600; color: var(--text); flex: 1; }
+.prod-spec-header .spec-count { font-size: 11px; color: var(--muted); font-weight: 500; }
+
+.prod-color-list { display: flex; flex-direction: column; }
+
+.prod-color-group {
+  padding: 8px 14px 12px 22px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.prod-color-group:last-child { border-bottom: 0; }
+.prod-color-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.prod-color-header::-webkit-details-marker { display: none; }
+.prod-color-header::before {
+  content: '▾';
+  color: var(--muted);
+  font-size: 10px;
+  transition: transform .15s;
+}
+details.prod-color-group:not([open]) > .prod-color-header::before { transform: rotate(-90deg); }
+.prod-color-header .color-name { font-size: 13px; color: var(--text); font-weight: 500; flex: 1; }
+.prod-color-header .color-count { font-size: 11px; color: var(--muted); }
+.prod-color-header .color-count b { color: var(--text); }
+
+.prod-batch-list {
+  padding: 4px 0 0;
+}
+.prod-batch-inner-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  border: 1px solid #eef2f7;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.prod-batch-inner-table th {
+  background: #f8fafc;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #334155;
+  text-align: left;
+  border-bottom: 1px solid #eef2f7;
+  white-space: nowrap;
+}
+.prod-batch-inner-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+.prod-batch-inner-table tr:last-child > td { border-bottom: 0; }
+.prod-batch-inner-table td.num,
+.prod-batch-inner-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* =========================================================
    Responsive
    ========================================================= */
 @media (max-width:900px){
