@@ -2505,6 +2505,7 @@ async function handleProductionFiles(files) {
     renderProductionStats();
     renderProductionBatchTable();
     renderProductionVinTable();
+    resetProductionChartDateRange();  
     renderProductionChart();
      
     setTimeout(() => wrap.classList.add('hidden'), 3000);
@@ -2527,11 +2528,55 @@ function clearProduction() {
   renderProductionStats();
   renderProductionBatchTable();
   renderProductionVinTable();
+  resetProductionChartDateRange();     // ← add this line
+  renderProductionChart();
   PROD_SPEC_COLLAPSED.clear();
   PROD_COLOR_COLLAPSED.clear();
   PROD_BATCH_EXPANDED.clear(); 
 }
+/* Find the min/max YYYY-MM-DD present for a given stage across all records. */
+function productionDateBounds(stageKey) {
+  let min = null, max = null;
+  for (const r of STATE.production.records) {
+    const t = r[stageKey];
+    if (!t) continue;
+    const m = String(t).match(/^(\d{4}-\d{2}-\d{2})/);
+    if (!m) continue;
+    const d = m[1];
+    if (min === null || d < min) min = d;
+    if (max === null || d > max) max = d;
+  }
+  return { min, max };
+}
 
+/* Snap the two date inputs to the full range of the currently-selected stage. */
+function resetProductionChartDateRange() {
+  const fromEl = $('#prodChartFrom');
+  const toEl   = $('#prodChartTo');
+  if (!fromEl || !toEl) return;
+
+  if (!STATE.production.loaded) {
+    fromEl.value = ''; toEl.value = '';
+    fromEl.min = fromEl.max = '';
+    toEl.min   = toEl.max   = '';
+    return;
+  }
+
+  const stageKey = $('#prodChartStage').value;
+  const { min, max } = productionDateBounds(stageKey);
+
+  if (!min || !max) {
+    fromEl.value = ''; toEl.value = '';
+    fromEl.min = fromEl.max = '';
+    toEl.min   = toEl.max   = '';
+    return;
+  }
+
+  fromEl.min = toEl.min = min;
+  fromEl.max = toEl.max = max;
+  fromEl.value = min;
+  toEl.value   = max;
+}
 /* =========================================================
    RENDER — Overall KPIs
    ========================================================= */
@@ -2636,11 +2681,16 @@ function renderProductionChart() {
 
   const granularity = $('#prodChartGranularity').value;
   const stageKey    = $('#prodChartStage').value;
+  const fromVal     = ($('#prodChartFrom').value || '').trim();   // 'YYYY-MM-DD' or ''
+  const toVal       = ($('#prodChartTo').value   || '').trim();
 
   const buckets = new Map();
   for (const r of STATE.production.records) {
     const t = r[stageKey];
     if (!t) continue;
+    const dayKey = String(t).slice(0, 10);   // 'YYYY-MM-DD'
+    if (fromVal && dayKey < fromVal) continue;
+    if (toVal   && dayKey > toVal)   continue;
     const key = bucketKeyFor(t, granularity);
     if (!key) continue;
     buckets.set(key, (buckets.get(key) || 0) + 1);
@@ -3180,7 +3230,20 @@ function bindProduction() {
   $('#prodBatchCollapseAll').addEventListener('click', prodBatchCollapseAll);   
   $('#prodClear').addEventListener('click', clearProduction);
   $('#prodChartGranularity').addEventListener('change', renderProductionChart);
-  $('#prodChartStage').addEventListener('change', renderProductionChart);
+
+  // On stage change, snap the date range to that stage's full range, then redraw
+  $('#prodChartStage').addEventListener('change', () => {
+    resetProductionChartDateRange();
+    renderProductionChart();
+  });
+
+  $('#prodChartFrom').addEventListener('change', renderProductionChart);
+  $('#prodChartTo').addEventListener('change',   renderProductionChart);
+  $('#prodChartReset').addEventListener('click', () => {
+    resetProductionChartDateRange();
+    renderProductionChart();
+  });
+
   window.addEventListener('resize', () => {
     if (STATE.production.loaded) renderProductionChart();
   });
