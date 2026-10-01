@@ -17,7 +17,8 @@ const STATE = {
     batches: new Map(),
     header: null,
     loaded: false,
-    period: { from: '', to: '' },      // ← ADD
+    period:        { from: '', to: '' },   // applied  (used by all renders)
+    pendingPeriod: { from: '', to: '' },   // staged   (set by UI controls)
     batchView: { search: '', filter: 'all' },
     vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
   }
@@ -2507,11 +2508,12 @@ async function handleProductionFiles(files) {
 
     /* --- Default monitoring period = entire file --- */
     const { min, max } = getFileDateBounds();
-    STATE.production.period = { from: min || '', to: max || '' };
+    STATE.production.period        = { from: min || '', to: max || '' };
+    STATE.production.pendingPeriod = { from: min || '', to: max || '' };
     $('#prodPeriodFrom').value = min || '';
     $('#prodPeriodTo').value   = max || '';
 
-    /* Highlight the "Full range" quick-range button */
+    /* Highlight the "Full Range" button */
     $$('.prod-period-btn').forEach(b =>
       b.classList.toggle('primary', b.dataset.range === 'all'));
 
@@ -2521,6 +2523,7 @@ async function handleProductionFiles(files) {
 
     renderAllProductionViews();
     updateProductionPeriodHint();
+    updateApplyButtonState();
 
     setTimeout(() => wrap.classList.add('hidden'), 3000);
   } catch (e) {
@@ -2533,9 +2536,11 @@ async function handleProductionFiles(files) {
 function clearProduction() {
   if (!STATE.production.loaded) return;
   if (!confirm('Clear all loaded production tracking data?')) return;
+
   STATE.production = {
     records: [], batches: new Map(), header: null, loaded: false,
-    period: { from: '', to: '' },
+    period:        { from: '', to: '' },
+    pendingPeriod: { from: '', to: '' },
     batchView: { search: '', filter: 'all' },
     vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
   };
@@ -2547,11 +2552,14 @@ function clearProduction() {
   const toEl   = $('#prodPeriodTo');   if (toEl)   toEl.value   = '';
   $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
 
+  const applyBtn = $('#prodPeriodApply');
+  if (applyBtn) { applyBtn.disabled = true; applyBtn.classList.remove('pending'); }
+
   $('#prodProgressWrap').classList.add('hidden');
   renderAllProductionViews();
   updateProductionPeriodHint();
+  updateApplyButtonState();
 }
-
 /* =========================================================
    MONITORING PERIOD
    ========================================================= */
@@ -2667,28 +2675,58 @@ function getFilteredProductionRecords() {
   if (!p.from && !p.to) return STATE.production.records;
   return STATE.production.records.filter(recordInPeriod);
 }
+/* Stage a period in the UI (no rendering). */
+function stageProductionPeriod(from, to) {
+  STATE.production.pendingPeriod = { from: from || '', to: to || '' };
+  updateApplyButtonState();
+}
 
+/* True when pending differs from applied. */
+function isProductionPeriodDirty() {
+  const a = STATE.production.period        || { from: '', to: '' };
+  const p = STATE.production.pendingPeriod || { from: '', to: '' };
+  return (a.from || '') !== (p.from || '') ||
+         (a.to   || '') !== (p.to   || '');
+}
+
+/* Enable / colour the Apply button depending on dirty state. */
+function updateApplyButtonState() {
+  const btn = $('#prodPeriodApply');
+  if (!btn) return;
+  if (!STATE.production.loaded) {
+    btn.disabled = true;
+    btn.classList.remove('pending');
+    return;
+  }
+  const dirty = isProductionPeriodDirty();
+  btn.disabled = !dirty;
+  btn.classList.toggle('pending', dirty);
+}
+
+/* Commit the pending period, render, and refresh the Apply button. */
+function applyProductionPeriod() {
+  if (!STATE.production.loaded) return;
+  STATE.production.period = { ...STATE.production.pendingPeriod };
+  renderAllProductionViews();
+  updateProductionPeriodHint();
+  updateApplyButtonState();
+}
+
+/* Set both applied + pending — used when a file is first loaded. */
 function setProductionPeriod(from, to) {
-  STATE.production.period = { from: from || '', to: to || '' };
+  STATE.production.period        = { from: from || '', to: to || '' };
+  STATE.production.pendingPeriod = { from: from || '', to: to || '' };
   const fromEl = $('#prodPeriodFrom');
   const toEl   = $('#prodPeriodTo');
   if (fromEl) fromEl.value = from || '';
   if (toEl)   toEl.value   = to   || '';
   renderAllProductionViews();
   updateProductionPeriodHint();
+  updateApplyButtonState();
 }
 
-/* Manual edits to the date inputs */
-function applyProductionPeriodFromInputs() {
-  const fromEl = $('#prodPeriodFrom');
-  const toEl   = $('#prodPeriodTo');
-  STATE.production.period = {
-    from: fromEl ? (fromEl.value || '') : '',
-    to:   toEl   ? (toEl.value   || '') : ''
-  };
-  renderAllProductionViews();
-  updateProductionPeriodHint();
-}
+
+
 
 function renderAllProductionViews() {
   renderProductionStats();
@@ -2717,7 +2755,14 @@ function updateProductionPeriodHint() {
     ? ` · File range: <span style="color:var(--muted)">${min.split('-').reverse().join('/')} → ${max.split('-').reverse().join('/')}</span>`
     : '';
 
-  el.innerHTML = `Period: <b>${rangeStr}</b> · Showing <b>${fmt(filtered)}</b> of ${fmt(total)} VINs${fileRangeStr}`;
+  let pendingStr = '';
+  if (isProductionPeriodDirty()) {
+    const pp = STATE.production.pendingPeriod || {};
+    const fmtD = s => s ? s.split('-').reverse().join('/') : '…';
+    pendingStr = ` · <b style="color:#d97706">Pending: ${fmtD(pp.from)} → ${fmtD(pp.to)} — click Apply</b>`;
+  }
+
+  el.innerHTML = `Period: <b>${rangeStr}</b> · Showing <b>${fmt(filtered)}</b> of ${fmt(total)} VINs${fileRangeStr}${pendingStr}`;
 }
 
 /* =========================================================
@@ -3410,18 +3455,7 @@ function bindProduction() {
   $('#prodChartGranularity').addEventListener('change', renderProductionChart);
   $('#prodChartStage').addEventListener('change',       renderProductionChart);
 
-  /* --- Monitoring period: manual date edits --- */
-  $('#prodPeriodFrom').addEventListener('change', () => {
-    $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
-    applyProductionPeriodFromInputs();
-  });
-  $('#prodPeriodTo').addEventListener('change', () => {
-    $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
-    applyProductionPeriodFromInputs();
-  });
-
-
-  /* --- Monitoring period: quick-range buttons (event delegation) --- */
+  /* --- Monitoring period: quick-range buttons (stage only, event delegation) --- */
   const periodCtrl = $('#prodPeriodControls');
   if (periodCtrl) {
     periodCtrl.addEventListener('click', e => {
@@ -3431,14 +3465,40 @@ function bindProduction() {
       const range = btn.dataset.range;
       const { from, to } = getPeriodRange(range);
 
-      // Highlight the active button
+      /* Snap the date inputs and stage the pending period */
+      const fromEl = $('#prodPeriodFrom');
+      const toEl   = $('#prodPeriodTo');
+      if (fromEl) fromEl.value = from || '';
+      if (toEl)   toEl.value   = to   || '';
+      STATE.production.pendingPeriod = { from: from || '', to: to || '' };
+
+      /* Highlight the active quick-range button */
       periodCtrl.querySelectorAll('button[data-range]').forEach(b =>
         b.classList.remove('primary'));
       btn.classList.add('primary');
 
-      setProductionPeriod(from, to);
+      /* No re-render — just reflect the pending state on the Apply button */
+      updateApplyButtonState();
     });
   }
+
+  /* --- Manual date edits: stage only --- */
+  const stageFromInputs = () => {
+    const fromEl = $('#prodPeriodFrom');
+    const toEl   = $('#prodPeriodTo');
+    STATE.production.pendingPeriod = {
+      from: fromEl ? (fromEl.value || '') : '',
+      to:   toEl   ? (toEl.value   || '') : ''
+    };
+    /* Manual edit = custom range → drop quick-range highlights */
+    $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
+    updateApplyButtonState();
+  };
+  $('#prodPeriodFrom').addEventListener('change', stageFromInputs);
+  $('#prodPeriodTo').addEventListener('change', stageFromInputs);
+
+  /* --- Apply button: commit pending period --- */
+  $('#prodPeriodApply').addEventListener('click', applyProductionPeriod);
 
   /* --- Clear button --- */
   $('#prodClear').addEventListener('click', clearProduction);
