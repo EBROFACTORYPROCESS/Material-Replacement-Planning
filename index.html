@@ -129,12 +129,34 @@
       </div>
     </div>
   
-    <div class="card">
-      <h2>2. Overall KPIs</h2>
-      <div class="stats" id="prodStats">
-        <div class="hint" style="margin:0">No production data loaded yet.</div>
-      </div>
-    </div>
+<div class="card">
+  <h2>2. Overall KPIs</h2>
+  <div class="stats prod-stats-compact" id="prodStats">
+    <div class="hint" style="margin:0">No production data loaded yet.</div>
+  </div>
+
+  <div class="prod-chart-controls">
+    <span class="prod-chart-label">Capacity trend:</span>
+    <select id="prodChartGranularity">
+      <option value="day">Daily</option>
+      <option value="week">Weekly</option>
+      <option value="month" selected>Monthly</option>
+    </select>
+    <select id="prodChartStage">
+      <option value="devanning">005 De-vanning</option>
+      <option value="trimIn">020 Trim-in</option>
+      <option value="offLine" selected>030 Off-line OK</option>
+      <option value="buyOff">Buy-off OK</option>
+      <option value="compoundIn">Compound Gate-in</option>
+      <option value="compoundOut">Compound Gate-out OK</option>
+    </select>
+  </div>
+
+  <div class="prod-chart-wrap">
+    <canvas id="prodChart" height="180"></canvas>
+    <div class="prod-chart-empty" id="prodChartEmpty">No data to plot.</div>
+  </div>
+</div>
   
     <div class="card">
       <h2>3. Batch summary</h2>
@@ -147,6 +169,8 @@
           <option value="completed">Completed (gate-out)</option>
         </select>
         <button class="btn" id="prodBatchExport">⤓ Export Excel</button>
+        <button class="btn ghost" id="prodBatchExpandAll">▾ Expand all</button>
+        <button class="btn ghost" id="prodBatchCollapseAll">▸ Collapse all</button>
       </div>
       <div id="prodBatchTable" class="prod-batch-tree"></div>
     </div>
