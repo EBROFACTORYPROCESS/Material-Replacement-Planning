@@ -775,6 +775,95 @@ details.prod-color-group:not([open]) > .prod-color-header::before { transform: r
 .prod-batch-inner-table td.num,
 .prod-batch-inner-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* =========================================================
+   Production — compact KPI strip + capacity chart
+   ========================================================= */
+.prod-stats-compact {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.kpi-compact {
+  display: flex;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 50px;
+}
+.kpi-bar { width: 4px; flex: 0 0 4px; }
+.kpi-body {
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 1;
+  min-width: 0;
+}
+.kpi-label {
+  font-size: 10.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kpi-value {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.kpi-value .kpi-sub {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+  margin-left: 6px;
+}
+
+.prod-chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.prod-chart-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.prod-chart-controls select {
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.prod-chart-wrap {
+  position: relative;
+  background: #fafbff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  min-height: 200px;
+}
+.prod-chart-wrap canvas { display: block; }
+.prod-chart-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+/* =========================================================
    Responsive
    ========================================================= */
 @media (max-width:900px){
