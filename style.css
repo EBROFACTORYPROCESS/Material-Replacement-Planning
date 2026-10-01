@@ -863,6 +863,23 @@ details.prod-color-group:not([open]) > .prod-color-header::before { transform: r
   color: var(--muted);
   font-size: 13px;
 }
+.prod-chart-date {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  font-family: inherit;
+}
+.prod-chart-date:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, .15);
+}
+.prod-chart-date-label {
+  margin-left: 6px;
+}
 /* =========================================================
    Responsive
    ========================================================= */
