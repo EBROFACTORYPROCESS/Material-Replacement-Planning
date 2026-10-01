@@ -122,18 +122,31 @@
       <h2>2. Monitoring Period</h2>
       <p class="hint">Set the time window — all KPIs, batches, VIN tables and the capacity chart are filtered to this range. A VIN is in scope if any of its milestones falls inside the period.</p>
     
-      <div class="prod-period-controls">
-        <button class="btn tiny" data-range="all">Full range</button>
-        <button class="btn tiny" data-range="today">Today</button>
-        <button class="btn tiny" data-range="yesterday">Yesterday</button>
-        <button class="btn tiny" data-range="lastWeek">Last Week</button>
-        <button class="btn tiny" data-range="lastMonth">Last Month</button>
-        <button class="btn tiny" data-range="lastYear">Last Year</button>
-        <span class="prod-period-sep"></span>
-        <span class="prod-chart-label">From:</span>
-        <input type="date" id="prodPeriodFrom" class="prod-chart-date" />
-        <span class="prod-chart-label">To:</span>
-        <input type="date" id="prodPeriodTo" class="prod-chart-date" />
+      <div class="prod-period-controls" id="prodPeriodControls">
+      
+        <div class="prod-period-row">
+          <button class="btn tiny prod-period-btn" data-range="today">Today</button>
+          <button class="btn tiny prod-period-btn" data-range="thisWeek">This Week</button>
+          <button class="btn tiny prod-period-btn" data-range="thisMonth">This Month</button>
+          <button class="btn tiny prod-period-btn" data-range="thisYear">This Year</button>
+          <span class="prod-period-spacer"></span>
+          <button class="btn tiny prod-period-btn prod-period-btn-all" data-range="all">Full Range</button>
+        </div>
+      
+        <div class="prod-period-row">
+          <button class="btn tiny prod-period-btn" data-range="yesterday">Yesterday</button>
+          <button class="btn tiny prod-period-btn" data-range="lastWeek">Last Week</button>
+          <button class="btn tiny prod-period-btn" data-range="lastMonth">Last Month</button>
+          <button class="btn tiny prod-period-btn" data-range="lastYear">Last Year</button>
+        </div>
+      
+        <div class="prod-period-row prod-period-dates">
+          <span class="prod-chart-label">From:</span>
+          <input type="date" id="prodPeriodFrom" class="prod-chart-date" />
+          <span class="prod-chart-label">To:</span>
+          <input type="date" id="prodPeriodTo" class="prod-chart-date" />
+        </div>
+      
       </div>
     
       <div class="hint" id="prodPeriodHint" style="margin:10px 0 0"></div>
