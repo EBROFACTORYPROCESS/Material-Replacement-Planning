@@ -2294,10 +2294,12 @@ const PROD_LINE_MAP = { A: 'A0', B: 'M1', D: 'M0' };
 /* CSV column auto-detection hints (exact → fallback contains) */
 const PROD_COL_HINTS = {
   vinId:        ['vinid', 'vin id', 'vin'],
+  code:         ['code'],                        // ← NEW (exact match only)
   sequence:     ['sequence'],
   batch:        ['batch'],
   description:  ['description'],
-  color:        ['color'],           // exact match avoids 'colorCode'
+  color:        ['color'],
+  colorCode:    ['colorcode', 'color code'],     // ← NEW
   materialCode: ['materialcode', 'material code'],
   devanning:    ['005 devanning'],
   trimIn:       ['020 trim in'],
@@ -2306,6 +2308,40 @@ const PROD_COL_HINTS = {
   compoundIn:   ['compound gate in in', 'compound gate in'],
   compoundOut:  ['compound gate out ok']
 };
+/* VIN normalisation: strip every non-alphanumeric separator */
+function cleanVin(s) {
+  if (!s) return '';
+  return String(s).replace(/[^A-Za-z0-9]/g, '');
+}
+
+/* Displayed VIN — prefers the human-readable 'code' column,
+   falls back to the raw vinId (dashes stripped). */
+function displayVin(rec) {
+  if (!rec) return '';
+  if (rec.code && String(rec.code).trim()) return cleanVin(rec.code);
+  return cleanVin(rec.vinId);
+}
+
+/* Most-frequent value of a field across a set of VIN records.
+   Used to derive a batch's dominant model / colour. */
+function dominantField(vins, field) {
+  if (!vins || !vins.length) return '';
+  const counts = {};
+  for (const v of vins) {
+    const val = v[field] || '';
+    counts[val] = (counts[val] || 0) + 1;
+  }
+  let best = '', bestN = 0;
+  for (const [k, n] of Object.entries(counts)) {
+    if (n > bestN) { best = k; bestN = n; }
+  }
+  return best;
+}
+
+/* Track which spec / colour groups the user has collapsed.
+   (Batch expansion already uses PROD_BATCH_EXPANDED.) */
+const PROD_SPEC_COLLAPSED  = new Set();
+const PROD_COLOR_COLLAPSED = new Set();
 
 function lineOfSequence(seq) {
   if (!seq) return '—';
@@ -2357,6 +2393,7 @@ async function parseProductionCSV(text, onProgress) {
     }
     if (found < 0) {
       for (const h of hints) {
+        if (h.length < 5) continue;              // ← skip short hints on fallback
         const p = headerLower.findIndex(x => x.includes(h));
         if (p >= 0) { found = p; break; }
       }
@@ -2550,130 +2587,206 @@ function renderProductionStats() {
    RENDER — Batch summary
    ========================================================= */
 function renderProductionBatchTable() {
-  const tbl = $('#prodBatchTable');
+  const tree = $('#prodBatchTable');
   if (!STATE.production.loaded) {
-    tbl.innerHTML = `<thead><tr><th>No production data loaded</th></tr></thead>`;
+    tree.innerHTML = '<div class="hint" style="margin:0">No production data loaded.</div>';
     return;
   }
-  const search = (STATE.production.batchView.search || '').toLowerCase();
+
+  const search = (STATE.production.batchView.search || '').toLowerCase().trim();
   const filter = STATE.production.batchView.filter;
 
+  /* --- 1. Filter batches --- */
   let batches = Array.from(STATE.production.batches.values());
-  if (search) batches = batches.filter(b => b.id.toLowerCase().includes(search));
+
   if (filter === 'completed')
-    batches = batches.filter(b => (b.counts.compoundOut || 0) === b.vins.length);
+    batches = batches.filter(b => b.vins.length > 0 &&
+                                 (b.counts.compoundOut || 0) === b.vins.length);
   else if (filter === 'inProgress')
     batches = batches.filter(b => (b.counts.compoundOut || 0) < b.vins.length);
 
-  batches.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
-
-  const colCount = 3 + PROD_STAGES.length;
-
-  const head = `
-    <thead><tr>
-      <th style="width:34px"></th>
-      <th>Batch</th>
-      <th class="num">VINs</th>
-      ${PROD_STAGES.map(s => `<th class="num" title="${s.label}">${s.short}</th>`).join('')}
-      <th>Status</th>
-    </tr></thead>`;
-
-  const body = batches.map(b => {
-    const total = b.vins.length;
-    const isOpen = PROD_BATCH_EXPANDED.has(b.id);
-
-    const stageCells = PROD_STAGES.map(s => {
-      const n = b.counts[s.key] || 0;
-      const pct = total ? Math.round(n / total * 100) : 0;
-      const cls = pct === 100 ? 'ok' : pct > 0 ? 'partial' : 'empty';
-      return `<td class="num"><span class="prod-pct ${cls}">${n}/${total}</span><small style="color:var(--muted)">${pct}%</small></td>`;
-    }).join('');
-
-    let status;
-    if ((b.counts.compoundOut || 0) === total && total > 0)
-      status = '<span class="pill ok">COMPLETE</span>';
-    else if ((b.counts.compoundIn || 0) === total && total > 0)
-      status = '<span class="pill" style="background:#dbeafe;color:#1e40af">IN COMPOUND</span>';
-    else
-      status = '<span class="pill warn">IN PROGRESS</span>';
-
-    const mainRow = `<tr class="prod-batch-row ${isOpen ? 'row-open' : ''}" data-batch="${escapeHtml(b.id)}">
-      <td class="prod-batch-toggle-cell">
-        <button class="btn tiny prod-batch-toggle"
-                data-batch="${escapeHtml(b.id)}"
-                title="${isOpen ? 'Hide VIN details' : 'Show VIN details'}">
-          ${isOpen ? '▾' : '▸'}
-        </button>
-      </td>
-      <td><b class="mono">${escapeHtml(b.id)}</b></td>
-      <td class="num">${total}</td>
-      ${stageCells}
-      <td>${status}</td>
-    </tr>`;
-
-    if (!isOpen) return mainRow;
-
-    /* --- Detail panel: VIN list for this batch --- */
-    const vins = b.vins.slice().sort((x, y) => {
-      const c = String(x.sequence || '').localeCompare(String(y.sequence || ''), undefined, { numeric: true });
-      return c || String(x.vinId).localeCompare(String(y.vinId));
+  if (search) {
+    batches = batches.filter(b => {
+      if (b.id.toLowerCase().includes(search)) return true;
+      const rep = b.vins[0] || {};
+      return `${rep.description || ''} ${rep.color || ''}`.toLowerCase().includes(search);
     });
+  }
 
-    const vinHead = `
-      <thead>
-        <tr>
-          <th>Seq</th>
-          <th>VIN</th>
-          <th>Line</th>
-          <th>Color</th>
-          ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
-          <th>Timeline</th>
-        </tr>
-      </thead>`;
+  if (!batches.length) {
+    tree.innerHTML = '<div class="hint" style="margin:16px 0 0">No batches match the current filters.</div>';
+    return;
+  }
 
-    const vinBody = vins.map(r => {
-      const line = lineOfSequence(r.sequence);
-      const dots = PROD_STAGES.map(s =>
-        r[s.key]
-          ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
-          : `<span class="prod-dot empty" title="${s.label}: —"></span>`
-      ).join('');
+  /* --- 2. Enrich each batch with its dominant model / colour --- */
+  for (const b of batches) {
+    b._model     = dominantField(b.vins, 'description') || '(no model)';
+    b._color     = dominantField(b.vins, 'color')       || '(no colour)';
+    b._colorCode = dominantField(b.vins, 'colorCode')   || '';
+  }
 
-      return `<tr>
-        <td class="mono">${escapeHtml(r.sequence || '—')}</td>
-        <td class="mono">${escapeHtml(r.vinId)}</td>
-        <td>${escapeHtml(line)}</td>
-        <td>${escapeHtml(r.color || '—')}</td>
-        ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
-        <td><div class="prod-timeline">${dots}</div></td>
-      </tr>`;
-    }).join('');
+  /* --- 3. Group: model → colour → batches --- */
+  const specMap = new Map();
+  for (const b of batches) {
+    if (!specMap.has(b._model)) specMap.set(b._model, new Map());
+    const colorMap = specMap.get(b._model);
+    const ckey = b._color + '||' + b._colorCode;
+    if (!colorMap.has(ckey)) colorMap.set(ckey, { color: b._color, colorCode: b._colorCode, batches: [] });
+    colorMap.get(ckey).batches.push(b);
+  }
 
-    const detailRow = `<tr class="prod-batch-detail-row">
-      <td colspan="${colCount}">
-        <div class="prod-batch-detail">
-          <div class="prod-batch-detail-title">
-            VINs in <b>${escapeHtml(b.id)}</b> — ${vins.length} vehicle${vins.length === 1 ? '' : 's'}
-          </div>
-          <div class="table-wrap prod-batch-detail-scroll">
-            <table class="prod-batch-detail-table">
-              ${vinHead}
-              <tbody>${vinBody}</tbody>
-            </table>
-          </div>
-        </div>
-      </td>
-    </tr>`;
+  const sortedSpecs = Array.from(specMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-    return mainRow + detailRow;
-  }).join('');
+  /* --- 4. Render tree --- */
+  let html = '';
+  for (const [model, colorMap] of sortedSpecs) {
+    const allBatches = Array.from(colorMap.values()).flatMap(c => c.batches);
+    const specVinTotal  = allBatches.reduce((s, b) => s + b.vins.length, 0);
+    const specComplete  = allBatches.reduce((s, b) => s + (b.counts.compoundOut || 0), 0);
+    const specBatchCnt  = allBatches.length;
+    const specColorCnt  = colorMap.size;
+    const specOpen      = !PROD_SPEC_COLLAPSED.has(model);
 
-  tbl.innerHTML = head + `<tbody>${
-    body || `<tr><td colspan="${colCount}" style="text-align:center;color:#6b7280;padding:16px">No batches match the current filters</td></tr>`
-  }</tbody>`;
+    html += `<details class="prod-spec-group" data-spec="${escapeHtml(model)}" ${specOpen ? 'open' : ''}>
+      <summary class="prod-spec-header">
+        <span class="spec-name">${escapeHtml(model)}</span>
+        <span class="spec-count">
+          ${specBatchCnt} batch${specBatchCnt === 1 ? '' : 'es'} ·
+          ${specColorCnt} colour${specColorCnt === 1 ? '' : 's'} ·
+          ${fmt(specVinTotal)} VINs ·
+          <b>${fmt(specComplete)}</b> complete
+        </span>
+      </summary>
+      <div class="prod-color-list">`;
 
-  /* Wire the expand/collapse toggle buttons */
-  tbl.querySelectorAll('.prod-batch-toggle').forEach(btn => {
+    const sortedColors = Array.from(colorMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+    for (const [ckey, cg] of sortedColors) {
+      const colorVinTotal = cg.batches.reduce((s, b) => s + b.vins.length, 0);
+      const colorComplete = cg.batches.reduce((s, b) => s + (b.counts.compoundOut || 0), 0);
+      const colorOpen     = !PROD_COLOR_COLLAPSED.has(model + '||' + ckey);
+
+      html += `<details class="prod-color-group" data-spec="${escapeHtml(model)}" data-color="${escapeHtml(ckey)}" ${colorOpen ? 'open' : ''}>
+        <summary class="prod-color-header">
+          <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+          <span class="color-name">${escapeHtml(cg.color)}</span>
+          <span class="color-count">
+            ${cg.batches.length} batch${cg.batches.length === 1 ? '' : 'es'} ·
+            ${fmt(colorVinTotal)} VINs ·
+            <b>${fmt(colorComplete)}</b> complete
+          </span>
+        </summary>
+        <div class="prod-batch-list">
+          <table class="prod-batch-inner-table">
+            <thead>
+              <tr>
+                <th style="width:32px"></th>
+                <th>Batch</th>
+                <th class="num">VINs</th>
+                ${PROD_STAGES.map(s => `<th class="num" title="${s.label}">${s.short}</th>`).join('')}
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>`;
+
+      const sortedBatches = cg.batches.slice()
+        .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+      for (const b of sortedBatches) {
+        const total  = b.vins.length;
+        const isOpen = PROD_BATCH_EXPANDED.has(b.id);
+
+        const stageCells = PROD_STAGES.map(s => {
+          const n   = b.counts[s.key] || 0;
+          const pct = total ? Math.round(n / total * 100) : 0;
+          const cls = pct === 100 ? 'ok' : pct > 0 ? 'partial' : 'empty';
+          return `<td class="num"><span class="prod-pct ${cls}">${n}/${total}</span><small style="color:var(--muted);margin-left:4px">${pct}%</small></td>`;
+        }).join('');
+
+        let status;
+        if ((b.counts.compoundOut || 0) === total && total > 0)
+          status = '<span class="pill ok">COMPLETE</span>';
+        else if ((b.counts.compoundIn || 0) === total && total > 0)
+          status = '<span class="pill" style="background:#dbeafe;color:#1e40af">IN COMPOUND</span>';
+        else
+          status = '<span class="pill warn">IN PROGRESS</span>';
+
+        html += `<tr class="prod-batch-row ${isOpen ? 'row-open' : ''}" data-batch="${escapeHtml(b.id)}">
+          <td class="prod-batch-toggle-cell">
+            <button class="btn tiny prod-batch-toggle" data-batch="${escapeHtml(b.id)}"
+                    title="${isOpen ? 'Hide VIN details' : 'Show VIN details'}">
+              ${isOpen ? '▾' : '▸'}
+            </button>
+          </td>
+          <td><b class="mono">${escapeHtml(b.id)}</b></td>
+          <td class="num">${total}</td>
+          ${stageCells}
+          <td>${status}</td>
+        </tr>`;
+
+        if (isOpen) {
+          const vins = b.vins.slice().sort((x, y) => {
+            const c = String(x.sequence || '').localeCompare(String(y.sequence || ''), undefined, { numeric: true });
+            return c || displayVin(x).localeCompare(displayVin(y));
+          });
+
+          const colspan = 4 + PROD_STAGES.length;
+
+          html += `<tr class="prod-batch-detail-row">
+            <td colspan="${colspan}">
+              <div class="prod-batch-detail">
+                <div class="prod-batch-detail-title">
+                  VINs in <b>${escapeHtml(b.id)}</b> — ${vins.length} vehicle${vins.length === 1 ? '' : 's'}
+                </div>
+                <div class="table-wrap prod-batch-detail-scroll">
+                  <table class="prod-batch-detail-table">
+                    <thead>
+                      <tr>
+                        <th>Seq</th>
+                        <th>VIN</th>
+                        <th>Line</th>
+                        <th>Colour</th>
+                        ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
+                        <th>Timeline</th>
+                      </tr>
+                    </thead>
+                    <tbody>`;
+
+          for (const r of vins) {
+            const line = lineOfSequence(r.sequence);
+            const dots = PROD_STAGES.map(s =>
+              r[s.key]
+                ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
+                : `<span class="prod-dot empty" title="${s.label}: —"></span>`
+            ).join('');
+            html += `<tr>
+              <td class="mono">${escapeHtml(r.sequence || '—')}</td>
+              <td class="mono">${escapeHtml(displayVin(r))}</td>
+              <td>${escapeHtml(line)}</td>
+              <td>${escapeHtml(r.color || '—')}</td>
+              ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
+              <td><div class="prod-timeline">${dots}</div></td>
+            </tr>`;
+          }
+
+          html += `</tbody></table></div></div></td></tr>`;
+        }
+      }
+
+      html += `</tbody></table></div></details>`;
+    }
+
+    html += `</div></details>`;
+  }
+
+  tree.innerHTML = html;
+
+  /* --- 5. Wire up interactions --- */
+
+  // Batch expand/collapse (button + row click)
+  tree.querySelectorAll('.prod-batch-toggle').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       const id = btn.dataset.batch;
@@ -2682,7 +2795,7 @@ function renderProductionBatchTable() {
       renderProductionBatchTable();
     });
   });
-  tbl.querySelectorAll('.prod-batch-row').forEach(row => {
+  tree.querySelectorAll('.prod-batch-row').forEach(row => {
     row.addEventListener('click', e => {
       if (e.target.closest('button')) return;
       const id = row.dataset.batch;
@@ -2690,9 +2803,24 @@ function renderProductionBatchTable() {
       else                             PROD_BATCH_EXPANDED.add(id);
       renderProductionBatchTable();
     });
-  }); 
-}
+  });
 
+  // Remember spec / colour collapse state (persists across re-renders)
+  tree.querySelectorAll('details.prod-spec-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.spec;
+      if (d.open) PROD_SPEC_COLLAPSED.delete(key);
+      else        PROD_SPEC_COLLAPSED.add(key);
+    });
+  });
+  tree.querySelectorAll('details.prod-color-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.spec + '||' + d.dataset.color;
+      if (d.open) PROD_COLOR_COLLAPSED.delete(key);
+      else        PROD_COLOR_COLLAPSED.add(key);
+    });
+  });
+}
 /* =========================================================
    RENDER — VIN detail (paginated)
    ========================================================= */
