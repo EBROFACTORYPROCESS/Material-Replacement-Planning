@@ -17,9 +17,10 @@ const STATE = {
     batches: new Map(),
     header: null,
     loaded: false,
+    period: { from: '', to: '' },      // ← ADD
     batchView: { search: '', filter: 'all' },
     vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
-  }   
+  }
 };
 
 const $  = (s, r=document) => r.querySelector(s);
@@ -2521,46 +2522,174 @@ function clearProduction() {
   if (!confirm('Clear all loaded production tracking data?')) return;
   STATE.production = {
     records: [], batches: new Map(), header: null, loaded: false,
+    period: { from: '', to: '' },
     batchView: { search: '', filter: 'all' },
     vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
   };
-  $('#prodProgressWrap').classList.add('hidden');
-  renderProductionStats();
-  renderProductionBatchTable();
-  renderProductionVinTable();
-  resetProductionChartDateRange();     // ← add this line
-  renderProductionChart();
+  PROD_BATCH_EXPANDED.clear();
   PROD_SPEC_COLLAPSED.clear();
   PROD_COLOR_COLLAPSED.clear();
-  PROD_BATCH_EXPANDED.clear(); 
+
+  const fromEl = $('#prodPeriodFrom'); if (fromEl) fromEl.value = '';
+  const toEl   = $('#prodPeriodTo');   if (toEl)   toEl.value   = '';
+  $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
+
+  $('#prodProgressWrap').classList.add('hidden');
+  renderAllProductionViews();
+  updateProductionPeriodHint();
 }
-/* Find the min/max YYYY-MM-DD present for a given stage across all records. */
-function productionDateBounds(stageKey) {
+
+/* =========================================================
+   MONITORING PERIOD
+   ========================================================= */
+function ymdLocal(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+}
+
+/* Min/max date present in the loaded file across ALL stages. */
+function getFileDateBounds() {
   let min = null, max = null;
   for (const r of STATE.production.records) {
-    const t = r[stageKey];
-    if (!t) continue;
-    const m = String(t).match(/^(\d{4}-\d{2}-\d{2})/);
-    if (!m) continue;
-    const d = m[1];
-    if (min === null || d < min) min = d;
-    if (max === null || d > max) max = d;
+    for (const s of PROD_STAGES) {
+      const t = r[s.key];
+      if (!t) continue;
+      const m = String(t).match(/^(\d{4}-\d{2}-\d{2})/);
+      if (!m) continue;
+      const d = m[1];
+      if (min === null || d < min) min = d;
+      if (max === null || d > max) max = d;
+    }
   }
   return { min, max };
 }
 
-/* Snap the two date inputs to the full range of the currently-selected stage. */
-function resetProductionChartDateRange() {
-  const fromEl = $('#prodChartFrom');
-  const toEl   = $('#prodChartTo');
-  if (!fromEl || !toEl) return;
-
-  if (!STATE.production.loaded) {
-    fromEl.value = ''; toEl.value = '';
-    fromEl.min = fromEl.max = '';
-    toEl.min   = toEl.max   = '';
-    return;
+/* Compute { from, to } for a named quick-range, using the system clock. */
+function getPeriodRange(kind) {
+  const t = new Date(); t.setHours(0,0,0,0);
+  switch (kind) {
+    case 'all': {
+      const { min, max } = getFileDateBounds();
+      return { from: min || '', to: max || '' };
+    }
+    case 'today': {
+      const s = ymdLocal(t);
+      return { from: s, to: s };
+    }
+    case 'yesterday': {
+      const y = new Date(t); y.setDate(y.getDate()-1);
+      const s = ymdLocal(y);
+      return { from: s, to: s };
+    }
+    case 'lastWeek': {
+      // Previous Monday → Sunday
+      const day = t.getDay() || 7;
+      const thisMon = new Date(t); thisMon.setDate(t.getDate() - (day - 1));
+      const lastMon = new Date(thisMon); lastMon.setDate(thisMon.getDate() - 7);
+      const lastSun = new Date(lastMon); lastSun.setDate(lastMon.getDate() + 6);
+      return { from: ymdLocal(lastMon), to: ymdLocal(lastSun) };
+    }
+    case 'lastMonth': {
+      const y  = t.getFullYear();
+      const m  = t.getMonth();
+      const pm = m === 0 ? 11 : m - 1;
+      const py = m === 0 ? y - 1 : y;
+      const first = new Date(py, pm, 1);
+      const last  = new Date(py, pm + 1, 0);
+      return { from: ymdLocal(first), to: ymdLocal(last) };
+    }
+    case 'lastYear': {
+      const y = t.getFullYear() - 1;
+      return { from: `${y}-01-01`, to: `${y}-12-31` };
+    }
+    default:
+      return { from: '', to: '' };
   }
+}
+
+/* True if the given timestamp falls inside the current monitoring period. */
+function stageInPeriod(ts) {
+  const p = STATE.production.period || {};
+  const from = p.from || '', to = p.to || '';
+  if (!from && !to) return true;
+  if (!ts) return false;
+  const d = String(ts).slice(0, 10);
+  if (from && d < from) return false;
+  if (to   && d > to)   return false;
+  return true;
+}
+
+/* True if ANY of the VIN's milestones fall inside the period. */
+function recordInPeriod(rec) {
+  const p = STATE.production.period || {};
+  if (!p.from && !p.to) return true;
+  for (const s of PROD_STAGES) {
+    if (rec[s.key] && stageInPeriod(rec[s.key])) return true;
+  }
+  return false;
+}
+
+function getFilteredProductionRecords() {
+  if (!STATE.production.loaded) return [];
+  const p = STATE.production.period || {};
+  if (!p.from && !p.to) return STATE.production.records;
+  return STATE.production.records.filter(recordInPeriod);
+}
+
+function setProductionPeriod(from, to) {
+  STATE.production.period = { from: from || '', to: to || '' };
+  const fromEl = $('#prodPeriodFrom');
+  const toEl   = $('#prodPeriodTo');
+  if (fromEl) fromEl.value = from || '';
+  if (toEl)   toEl.value   = to   || '';
+  renderAllProductionViews();
+  updateProductionPeriodHint();
+}
+
+/* Manual edits to the date inputs */
+function applyProductionPeriodFromInputs() {
+  const fromEl = $('#prodPeriodFrom');
+  const toEl   = $('#prodPeriodTo');
+  STATE.production.period = {
+    from: fromEl ? (fromEl.value || '') : '',
+    to:   toEl   ? (toEl.value   || '') : ''
+  };
+  renderAllProductionViews();
+  updateProductionPeriodHint();
+}
+
+function renderAllProductionViews() {
+  renderProductionStats();
+  renderProductionBatchTable();
+  renderProductionVinTable();
+  renderProductionChart();
+}
+
+function updateProductionPeriodHint() {
+  const el = $('#prodPeriodHint');
+  if (!el) return;
+  if (!STATE.production.loaded) { el.textContent = ''; return; }
+
+  const total    = STATE.production.records.length;
+  const filtered = getFilteredProductionRecords().length;
+
+  const p = STATE.production.period || {};
+  let rangeStr = 'full data';
+  if (p.from || p.to) {
+    const fmtD = s => s ? s.split('-').reverse().join('/') : '…';
+    rangeStr = `${fmtD(p.from)} → ${fmtD(p.to)}`;
+  }
+
+  const { min, max } = getFileDateBounds();
+  const fileRangeStr = (min && max)
+    ? ` · File range: <span style="color:var(--muted)">${min.split('-').reverse().join('/')} → ${max.split('-').reverse().join('/')}</span>`
+    : '';
+
+  el.innerHTML = `Period: <b>${rangeStr}</b> · Showing <b>${fmt(filtered)}</b> of ${fmt(total)} VINs${fileRangeStr}`;
+}
+
 
   const stageKey = $('#prodChartStage').value;
   const { min, max } = productionDateBounds(stageKey);
@@ -2586,21 +2715,25 @@ function renderProductionStats() {
     wrap.innerHTML = '<div class="hint" style="margin:0">No production data loaded yet.</div>';
     return;
   }
-  const records = STATE.production.records;
-  const total   = records.length;
-  const batches = STATE.production.batches;
+  const filtered = getFilteredProductionRecords();
+  const total    = filtered.length;
 
+  const batchSet = new Set();
+  for (const r of filtered) batchSet.add(r.batch || '(no batch)');
+
+  // Per-stage count = VINs whose stage timestamp falls inside the period
   const counts = {};
-  for (const s of PROD_STAGES) counts[s.key] = 0;
-  for (const r of records)
-    for (const s of PROD_STAGES) if (r[s.key]) counts[s.key]++;
-
+  for (const s of PROD_STAGES) {
+    let n = 0;
+    for (const r of filtered) if (stageInPeriod(r[s.key])) n++;
+    counts[s.key] = n;
+  }
   const complete = counts.compoundOut;
 
   const kpis = [
-    { label: 'Total VINs', value: fmt(total),
-      sub: `${fmt(batches.size)} batches`, color: '#2563eb' },
-    { label: 'Complete',   value: fmt(complete),
+    { label: 'VINs in period', value: fmt(total),
+      sub: `${fmt(batchSet.size)} batches`, color: '#2563eb' },
+    { label: 'Complete', value: fmt(complete),
       sub: `${total ? (complete / total * 100).toFixed(1) : 0}%`, color: '#059669' },
     ...PROD_STAGES.map(s => {
       const n = counts[s.key];
@@ -2688,9 +2821,7 @@ function renderProductionChart() {
   for (const r of STATE.production.records) {
     const t = r[stageKey];
     if (!t) continue;
-    const dayKey = String(t).slice(0, 10);   // 'YYYY-MM-DD'
-    if (fromVal && dayKey < fromVal) continue;
-    if (toVal   && dayKey > toVal)   continue;
+    if (!stageInPeriod(t)) continue;                // ← period filter
     const key = bucketKeyFor(t, granularity);
     if (!key) continue;
     buckets.set(key, (buckets.get(key) || 0) + 1);
@@ -2799,9 +2930,58 @@ function renderProductionBatchTable() {
   const search = (STATE.production.batchView.search || '').toLowerCase().trim();
   const filter = STATE.production.batchView.filter;
 
-  /* --- 1. Filter batches --- */
-  let batches = Array.from(STATE.production.batches.values());
 
+  /* --- 1. Keep only batches with at least one VIN inside the period --- */
+  let batches = Array.from(STATE.production.batches.values())
+    .filter(b => b.vins.some(recordInPeriod));
+
+  /* --- 2. Enrich with period counts + dominant model/colour --- */
+  const enriched = [];
+  for (const b of batches) {
+    const periodVins = b.vins.filter(recordInPeriod);
+    if (!periodVins.length) continue;
+    enriched.push({
+      id:           b.id,
+      allVins:      b.vins,
+      periodVins,
+      periodCounts: batchCountsInPeriod(b),
+      fullCounts:   b.counts,                    // counts across the entire file
+      model:     dominantField(b.vins, 'description') || '(no model)',
+      color:     dominantField(b.vins, 'color')       || '(no colour)',
+      colorCode: dominantField(b.vins, 'colorCode')   || ''
+    });
+  }
+  batches = enriched;
+
+  /* --- 3. Status filter (uses FULL-batch completion, not period) --- */
+  if (filter === 'completed')
+    batches = batches.filter(b => b.allVins.length > 0 &&
+                                 (b.fullCounts.compoundOut || 0) === b.allVins.length);
+  else if (filter === 'inProgress')
+    batches = batches.filter(b => (b.fullCounts.compoundOut || 0) < b.allVins.length);
+
+  /* --- 4. Text search --- */
+  if (search) {
+    batches = batches.filter(b => {
+      if (b.id.toLowerCase().includes(search)) return true;
+      return `${b.model} ${b.color}`.toLowerCase().includes(search);
+    });
+  }
+
+  if (!batches.length) {
+    tree.innerHTML = '<div class="hint" style="margin:16px 0 0">No batches match the current filters.</div>';
+    return;
+  }
+
+  /* --- 5. Group: model → colour → batches --- */
+  const specMap = new Map();
+  for (const b of batches) {
+    if (!specMap.has(b.model)) specMap.set(b.model, new Map());
+    const colorMap = specMap.get(b.model);
+    const ckey = b.color + '||' + b.colorCode;
+    if (!colorMap.has(ckey)) colorMap.set(ckey, { color: b.color, colorCode: b.colorCode, batches: [] });
+    colorMap.get(ckey).batches.push(b);
+  }
   if (filter === 'completed')
     batches = batches.filter(b => b.vins.length > 0 &&
                                  (b.counts.compoundOut || 0) === b.vins.length);
@@ -3030,7 +3210,7 @@ function renderProductionBatchTable() {
 function getFilteredProductionVins() {
   const v = STATE.production.vinView;
   const search = (v.search || '').toLowerCase();
-  let rows = STATE.production.records;
+  let rows = getFilteredProductionRecords();      // ← was STATE.production.records
 
   if (search) {
     rows = rows.filter(r =>
@@ -3183,7 +3363,16 @@ function exportProductionVins() {
   XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'VIN Tracking');
   downloadWorkbook(wb, `Production_VINs_${dateStamp()}.xlsx`);
 }
-
+function batchCountsInPeriod(batch) {
+  const counts = {};
+  for (const s of PROD_STAGES) counts[s.key] = 0;
+  for (const r of batch.vins) {
+    for (const s of PROD_STAGES) {
+      if (stageInPeriod(r[s.key])) counts[s.key]++;
+    }
+  }
+  return counts;
+}
 /* =========================================================
    BIND — Production tab UI
    ========================================================= */
