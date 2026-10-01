@@ -353,15 +353,23 @@ async function processBomFolder() {
   const files = _bomFolderFiles;
   if (!files.length) return;
 
+  // Deterministic order — first file becomes BOM 1
   files.sort((a, b) => a.path.localeCompare(b.path));
 
-  const wrap  = $('#bomProgressWrap');
-  const fill  = $('#bomProgressFill');
-  const label = $('#bomProgressLabel');
-  const list  = $('#bomProgressList');
+  const wrap   = $('#bomProgressWrap');
+  const fill   = $('#bomProgressFill');
+  const label  = $('#bomProgressLabel');
+  const list   = $('#bomProgressList');
+  const toggle = $('#bomProgressToggle');
 
+  /* Show the panel; reset the summary + hide the file list & toggle */
   wrap.classList.remove('hidden');
   fill.style.width = '0%';
+  label.textContent = 'Preparing…';
+  list.classList.add('hidden');
+  toggle.classList.add('hidden');
+  toggle.textContent = '▸ Display batch list';
+
   list.innerHTML = files.map((f, i) => `
     <div class="progress-file" data-i="${i}">
       <span class="pf-status pending">◌</span>
@@ -380,6 +388,7 @@ async function processBomFolder() {
     st.className = 'pf-status working';
     st.textContent = '◐';
     nt.textContent = 'parsing…';
+    row.classList.remove('fail-row');
     label.textContent = `Parsing ${i+1} / ${files.length} — ${path}`;
     await yieldToUI();
 
@@ -406,6 +415,7 @@ async function processBomFolder() {
       st.className = 'pf-status fail';
       st.textContent = '✕';
       nt.textContent = e.message || 'failed';
+      row.classList.add('fail-row');
       fail++;
     }
 
@@ -413,14 +423,16 @@ async function processBomFolder() {
     await yieldToUI();
   }
 
+  /* Final summary — one line, with the toggle button */
   label.textContent = `Done — ${ok} succeeded, ${fail} failed`;
+  toggle.classList.remove('hidden');
+  if (fail > 0) toggle.classList.add('has-errors');
 
   rebuildPartIndex();
   renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
   renderBatchTable(); renderBatchStats();
   computeInventory(); renderInventoryTable(); renderPlanning();
 }
-
 function bindFolderFallback() {
   const inp = $('#bomFolderFallback');
   if (!inp) return;
@@ -1761,7 +1773,12 @@ function bindButtons() {
   $('#bomFolderProcess').addEventListener('click', processBomFolder);
   bindFolderFallback();
   bindBomListSearch();
-
+  $('#bomProgressToggle').addEventListener('click', () => {
+    const list = $('#bomProgressList');
+    const btn  = $('#bomProgressToggle');
+    const nowHidden = list.classList.toggle('hidden');
+    btn.textContent = nowHidden ? '▸ Display batch list' : '▾ Hide batch list';
+  });
   $('#bomSearch').addEventListener('input', renderBomTable);
   $('#bomFilter').addEventListener('change', renderBomTable);
   $('#invSearch').addEventListener('input', renderInventoryTable);
@@ -1827,6 +1844,9 @@ function bindButtons() {
     $('#bomListSearch').value = '';
     $('#bomListSearchResult').classList.add('hidden');
     $('#bomListSearchResult').innerHTML = '';
+    $('#bomProgressToggle').classList.add('hidden');
+    $('#bomProgressToggle').classList.remove('has-errors');
+    $('#bomProgressList').classList.add('hidden');
     renderBomList(); renderBomTable(); renderBatchTable(); renderBatchStats();
     renderInventoryTable(); renderPlanList(); renderPlanning();
     renderScrapList(); renderConversionTable();
