@@ -2317,11 +2317,9 @@ function cleanVin(s) {
 /* Displayed VIN — prefers the human-readable 'code' column,
    falls back to the raw vinId (dashes stripped). */
 function displayVin(rec) {
-  if (!rec) return '';
-  if (rec.code && String(rec.code).trim()) return cleanVin(rec.code);
-  return cleanVin(rec.vinId);
+  if (!rec || !rec.code) return '';
+  return cleanVin(rec.code);
 }
-
 /* Most-frequent value of a field across a set of VIN records.
    Used to derive a batch's dominant model / colour. */
 function dominantField(vins, field) {
@@ -2834,7 +2832,7 @@ function getFilteredProductionVins() {
 
   if (search) {
     rows = rows.filter(r =>
-      `${r.vinId} ${r.code || ''} ${displayVin(r)} ${r.batch} ${r.sequence} ${r.description} ${r.color} ${r.materialCode}`
+      `${r.code} ${r.batch} ${r.sequence} ${r.description} ${r.color} ${r.materialCode}`
         .toLowerCase().includes(search));
   }
   switch (v.stage) {
