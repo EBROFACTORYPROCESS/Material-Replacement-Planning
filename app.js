@@ -2295,17 +2295,17 @@ const PROD_LINE_MAP = { A: 'A0', B: 'M1', D: 'M0' };
 
 /* CSV column auto-detection hints (exact → fallback contains) */
 const PROD_COL_HINTS = {
-  vinId:        ['vinid', 'vin id', 'vin'],
-  code:         ['code'],                        // ← NEW (exact match only)
+  code:         ['code'],
   sequence:     ['sequence'],
   batch:        ['batch'],
   description:  ['description'],
   color:        ['color'],
-  colorCode:    ['colorcode', 'color code'],     // ← NEW
+  colorCode:    ['colorcode', 'color code'],
   materialCode: ['materialcode', 'material code'],
   devanning:    ['005 devanning'],
   trimIn:       ['020 trim in'],
   offLine:      ['030 off line ok'],
+  diverted:     ['025 diverted'],                          // ← NEW
   buyOff:       ['buy off ok'],
   compoundIn:   ['compound gate in in', 'compound gate in'],
   compoundOut:  ['compound gate out ok']
@@ -2355,7 +2355,23 @@ function formatProdTime(s) {
   const [, y, mo, d, h, mi] = m;
   return `<span title="${escapeHtml(s)}">${d}/${mo}/${y} ${h}:${mi}</span>`;
 }
-
+/* Merge "030 OFF LINE OK" and "025 DIVERTED".
+   Reads the first 10 characters of each value as YYYY-MM-DD and returns
+   the full original string of whichever date is earlier. If neither cell
+   contains a usable date, returns ''. */
+function mergeOffLineDates(offLineVal, divertedVal) {
+  const a = String(offLineVal || '').trim();
+  const b = String(divertedVal || '').trim();
+  const da = a.slice(0, 10);
+  const db = b.slice(0, 10);
+  const hasA = /^\d{4}-\d{2}-\d{2}$/.test(da);
+  const hasB = /^\d{4}-\d{2}-\d{2}$/.test(db);
+  if (!hasA && !hasB) return '';
+  if (!hasA) return b;
+  if (!hasB) return a;
+  /* YYYY-MM-DD sorts lexically, so a simple string compare works */
+  return da <= db ? a : b;
+}
 /* ---- Streaming CSV parser (chunked, yields to UI) ---- */
 async function parseProductionCSV(text, onProgress) {
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
@@ -2411,13 +2427,18 @@ async function parseProductionCSV(text, onProgress) {
   const finalizeRow = () => {
     row.push(field); field = '';
     if (row.length > maxIdx) {
-      const vinId = String(row[idx.vinId] ?? '').trim();
-      if (vinId) {
-        const rec = { vinId };
+      const code = String(row[idx.code] ?? '').trim();
+      if (code) {
+        const rec = { code };
         for (const [key, ci] of Object.entries(idx)) {
-          if (key === 'vinId' || ci < 0) continue;
+          if (key === 'code' || ci < 0) continue;
           rec[key] = String(row[ci] ?? '').trim();
         }
+
+        /* Off-line OK = earlier of 030 OFF LINE OK and 025 DIVERTED */
+        rec.offLine = mergeOffLineDates(rec.offLine, rec.diverted);
+        delete rec.diverted;
+
         records.push(rec);
       }
     }
