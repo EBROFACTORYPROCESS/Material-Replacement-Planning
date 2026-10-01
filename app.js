@@ -3097,7 +3097,7 @@ function renderProductionBatchTable() {
       html += `<details class="prod-color-group" data-spec="${escapeHtml(model)}" data-color="${escapeHtml(ckey)}" ${colorOpen ? 'open' : ''}>
         <summary class="prod-color-header">
           <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
-          <span class="color-name">${escapeHtml(cg.color)}</span>
+          <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
           <span class="color-count">
             ${cg.batches.length} batch${cg.batches.length === 1 ? '' : 'es'} ·
             ${fmt(colorVinTotal)} VINs ·
