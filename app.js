@@ -2550,40 +2550,191 @@ function renderProductionStats() {
     for (const s of PROD_STAGES) if (r[s.key]) counts[s.key]++;
 
   const complete = counts.compoundOut;
-  const inProg   = total - complete;
 
-  const stageCards = PROD_STAGES.map(s => {
-    const n = counts[s.key];
-    const pct = total ? (n / total * 100) : 0;
-    return `
-      <div class="stat prod-stat">
-        <div class="label"><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></div>
-        <div class="value">${fmt(n)}<span class="unit">/ ${fmt(total)}</span></div>
-        <div class="prod-bar"><div class="prod-bar-fill" style="width:${pct.toFixed(1)}%;background:${s.color}"></div></div>
-        <div class="sub"><b>${pct.toFixed(1)}%</b> of VINs</div>
-      </div>`;
-  }).join('');
+  const kpis = [
+    { label: 'Total VINs', value: fmt(total),
+      sub: `${fmt(batches.size)} batches`, color: '#2563eb' },
+    { label: 'Complete',   value: fmt(complete),
+      sub: `${total ? (complete / total * 100).toFixed(1) : 0}%`, color: '#059669' },
+    ...PROD_STAGES.map(s => {
+      const n = counts[s.key];
+      const pct = total ? (n / total * 100) : 0;
+      return { label: s.label, value: fmt(n), sub: `${pct.toFixed(1)}%`, color: s.color };
+    })
+  ];
 
-  wrap.innerHTML = `
-    <div class="stat prod-stat">
-      <div class="label">Total VINs</div>
-      <div class="value">${fmt(total)}</div>
-      <div class="sub"><b>${fmt(batches.size)}</b> batches</div>
-    </div>
-    <div class="stat prod-stat">
-      <div class="label">Complete (Gate-out OK)</div>
-      <div class="value">${fmt(complete)}</div>
-      <div class="sub"><b>${total ? (complete / total * 100).toFixed(1) : 0}%</b> shipped</div>
-    </div>
-    <div class="stat prod-stat">
-      <div class="label">In progress</div>
-      <div class="value">${fmt(inProg)}</div>
-      <div class="sub"><b>${total ? (inProg / total * 100).toFixed(1) : 0}%</b> active</div>
-    </div>
-    ${stageCards}
-  `;
+  wrap.innerHTML = kpis.map(k => `
+    <div class="kpi-compact" title="${escapeHtml(k.label)}">
+      <div class="kpi-bar" style="background:${k.color}"></div>
+      <div class="kpi-body">
+        <div class="kpi-label">${escapeHtml(k.label)}</div>
+        <div class="kpi-value">${k.value}<span class="kpi-sub">${k.sub}</span></div>
+      </div>
+    </div>`).join('');
+}
+function prodBatchExpandAll() {
+  PROD_SPEC_COLLAPSED.clear();
+  PROD_COLOR_COLLAPSED.clear();
+  if (STATE.production.loaded) renderProductionBatchTable();
 }
 
+function prodBatchCollapseAll() {
+  if (!STATE.production.loaded) return;
+  for (const b of STATE.production.batches.values()) {
+    const model = dominantField(b.vins, 'description') || '(no model)';
+    const color = dominantField(b.vins, 'color')       || '(no colour)';
+    const ccode = dominantField(b.vins, 'colorCode')   || '';
+    PROD_SPEC_COLLAPSED.add(model);
+    PROD_COLOR_COLLAPSED.add(model + '||' + color + '||' + ccode);
+  }
+  renderProductionBatchTable();
+}
+/* ---- Capacity trend chart ---- */
+function bucketKeyFor(dateStr, granularity) {
+  const m = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const [, y, mo, d] = m;
+  if (granularity === 'day')   return `${y}-${mo}-${d}`;
+  if (granularity === 'month') return `${y}-${mo}`;
+  if (granularity === 'week') {
+    const dt = new Date(Date.UTC(+y, +mo - 1, +d));
+    const day = dt.getUTCDay() || 7;
+    dt.setUTCDate(dt.getUTCDate() + 4 - day);
+    const yStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
+    const week = Math.ceil((((dt - yStart) / 86400000) + 1) / 7);
+    return `${dt.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+  }
+  return null;
+}
+
+function shortBucketLabel(key, granularity) {
+  if (granularity === 'day')   return key.slice(5);        // MM-DD
+  if (granularity === 'month') return key;                 // YYYY-MM
+  return key.replace('-W', ' W');                          // YYYY Wnn
+}
+
+function niceCeil(n) {
+  if (n <= 10) return 10;
+  const mag = Math.pow(10, Math.floor(Math.log10(n)));
+  const r = n / mag;
+  const step = r <= 1 ? 1 : r <= 2 ? 2 : r <= 5 ? 5 : 10;
+  return step * mag;
+}
+
+function renderProductionChart() {
+  const canvas = $('#prodChart');
+  const empty  = $('#prodChartEmpty');
+  if (!canvas) return;
+
+  if (!STATE.production.loaded || !STATE.production.records.length) {
+    canvas.style.display = 'none';
+    empty.style.display = '';
+    empty.textContent = 'No data to plot.';
+    return;
+  }
+
+  const granularity = $('#prodChartGranularity').value;
+  const stageKey    = $('#prodChartStage').value;
+
+  const buckets = new Map();
+  for (const r of STATE.production.records) {
+    const t = r[stageKey];
+    if (!t) continue;
+    const key = bucketKeyFor(t, granularity);
+    if (!key) continue;
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  }
+
+  if (!buckets.size) {
+    canvas.style.display = 'none';
+    empty.style.display = '';
+    empty.textContent = 'No timestamps for this stage.';
+    return;
+  }
+
+  canvas.style.display = '';
+  empty.style.display = 'none';
+
+  const entries = Array.from(buckets.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+
+  const dpr  = window.devicePixelRatio || 1;
+  const cssW = Math.max(320, canvas.parentElement.clientWidth - 16);
+  const cssH = 180;
+  canvas.width  = cssW * dpr;
+  canvas.height = cssH * dpr;
+  canvas.style.width  = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const padLeft = 48, padRight = 14, padTop = 14, padBottom = 52;
+  const plotW = cssW - padLeft - padRight;
+  const plotH = cssH - padTop - padBottom;
+
+  const maxVal  = Math.max(...entries.map(e => e[1]));
+  const niceMax = niceCeil(maxVal);
+  const slot    = plotW / entries.length;
+  const gap     = entries.length > 60 ? 1 : entries.length > 30 ? 2 : 4;
+  const barW    = Math.max(1.5, slot - gap);
+
+  /* grid + y-axis labels */
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const gridN = 4;
+  for (let i = 0; i <= gridN; i++) {
+    const v = (niceMax / gridN) * i;
+    const y = padTop + plotH - (v / niceMax) * plotH;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, y + 0.5);
+    ctx.lineTo(padLeft + plotW, y + 0.5);
+    ctx.stroke();
+    ctx.fillText(fmt(Math.round(v)), padLeft - 6, y);
+  }
+
+  /* bars */
+  entries.forEach(([, v], i) => {
+    const x = padLeft + i * slot + (slot - barW) / 2;
+    const h = (v / niceMax) * plotH;
+    const y = padTop + plotH - h;
+    const grad = ctx.createLinearGradient(0, y, 0, y + h);
+    grad.addColorStop(0, '#3b82f6');
+    grad.addColorStop(1, '#1d4ed8');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, y, barW, h);
+  });
+
+  /* x-axis labels (rotated, sparse) */
+  ctx.fillStyle = '#64748b';
+  const maxLabels = Math.min(entries.length, 14);
+  const labelEvery = Math.max(1, Math.ceil(entries.length / maxLabels));
+  entries.forEach(([k], i) => {
+    if (i % labelEvery !== 0 && i !== entries.length - 1) return;
+    const cx = padLeft + i * slot + slot / 2;
+    ctx.save();
+    ctx.translate(cx, padTop + plotH + 8);
+    ctx.rotate(-Math.PI / 4);
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(shortBucketLabel(k, granularity), 0, 0);
+    ctx.restore();
+  });
+
+  /* hover tooltip */
+  canvas.onmousemove = ev => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const idx = Math.floor((mx - padLeft) / slot);
+    if (idx < 0 || idx >= entries.length) { canvas.title = ''; return; }
+    const [k, v] = entries[idx];
+    canvas.title = `${shortBucketLabel(k, granularity)} — ${fmt(v)} VINs`;
+  };
+  canvas.onmouseleave = () => { canvas.title = ''; };
+}
 /* =========================================================
    RENDER — Batch summary
    ========================================================= */
@@ -3024,6 +3175,13 @@ function bindProduction() {
   });
   $('#prodBatchExport').addEventListener('click', exportProductionBatches);
   $('#prodVinExport').addEventListener('click', exportProductionVins);
+  $('#prodBatchExpandAll').addEventListener('click', prodBatchExpandAll);
+  $('#prodBatchCollapseAll').addEventListener('click', prodBatchCollapseAll);   
   $('#prodClear').addEventListener('click', clearProduction);
+  $('#prodChartGranularity').addEventListener('change', renderProductionChart);
+  $('#prodChartStage').addEventListener('change', renderProductionChart);
+  window.addEventListener('resize', () => {
+    if (STATE.production.loaded) renderProductionChart();
+  });
 }
 window.MRP = STATE;
