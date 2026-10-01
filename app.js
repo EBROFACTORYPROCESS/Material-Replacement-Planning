@@ -2587,6 +2587,23 @@ function getPeriodRange(kind) {
       const { min, max } = getFileDateBounds();
       return { from: min || '', to: max || '' };
     }
+        case 'thisWeek': {
+      // Monday → Sunday of the current week
+      const day = t.getDay() || 7;                       // Sunday=7
+      const mon = new Date(t); mon.setDate(t.getDate() - (day - 1));
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+      return { from: ymdLocal(mon), to: ymdLocal(sun) };
+    }
+    case 'thisMonth': {
+      const y = t.getFullYear(), m = t.getMonth();
+      const first = new Date(y, m, 1);
+      const last  = new Date(y, m + 1, 0);
+      return { from: ymdLocal(first), to: ymdLocal(last) };
+    }
+    case 'thisYear': {
+      const y = t.getFullYear();
+      return { from: `${y}-01-01`, to: `${y}-12-31` };
+    }    
     case 'today': {
       const s = ymdLocal(t);
       return { from: s, to: s };
@@ -3403,16 +3420,25 @@ function bindProduction() {
     applyProductionPeriodFromInputs();
   });
 
-  /* --- Monitoring period: quick-range buttons --- */
-  $$('.prod-period-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+
+  /* --- Monitoring period: quick-range buttons (event delegation) --- */
+  const periodCtrl = $('#prodPeriodControls');
+  if (periodCtrl) {
+    periodCtrl.addEventListener('click', e => {
+      const btn = e.target.closest('button[data-range]');
+      if (!btn || !periodCtrl.contains(btn)) return;
+
       const range = btn.dataset.range;
       const { from, to } = getPeriodRange(range);
-      $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
+
+      // Highlight the active button
+      periodCtrl.querySelectorAll('button[data-range]').forEach(b =>
+        b.classList.remove('primary'));
       btn.classList.add('primary');
+
       setProductionPeriod(from, to);
     });
-  });
+  }
 
   /* --- Clear button --- */
   $('#prodClear').addEventListener('click', clearProduction);
