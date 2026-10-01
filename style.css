@@ -882,10 +882,74 @@ details.prod-color-group:not([open]) > .prod-color-header::before { transform: r
 }
 .prod-period-controls {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.prod-period-row {
+  display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
 }
+
+.prod-period-row.prod-period-dates {
+  padding-top: 4px;
+  border-top: 1px dashed #e5e7eb;
+  margin-top: 2px;
+}
+
+.prod-period-spacer {
+  flex: 1 1 auto;
+  min-width: 12px;
+}
+
+.prod-period-controls .btn.tiny {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.prod-period-controls .btn.tiny.primary {
+  background: var(--brand);
+  color: #fff;
+  border-color: var(--brand);
+}
+.prod-period-controls .btn.tiny.primary:hover {
+  background: var(--brand-2);
+}
+
+.prod-period-btn-all {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+.prod-period-btn-all.primary {
+  background: var(--brand);
+  color: #fff;
+  border-color: var(--brand);
+}
+
+/* Date input styling (reused from chart) */
+.prod-chart-date {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  font-family: inherit;
+}
+.prod-chart-date:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, .15);
+}
+.prod-chart-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
 .prod-period-controls .btn.tiny {
   padding: 5px 11px;
   font-size: 12px;
@@ -899,12 +963,7 @@ details.prod-color-group:not([open]) > .prod-color-header::before { transform: r
 .prod-period-controls .btn.tiny.primary:hover {
   background: var(--brand-2);
 }
-.prod-period-sep {
-  width: 1px;
-  height: 22px;
-  background: var(--border);
-  margin: 0 6px;
-}
+
 /* =========================================================
    Responsive
    ========================================================= */
