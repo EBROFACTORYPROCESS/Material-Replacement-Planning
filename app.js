@@ -130,7 +130,8 @@ function assignBomId(bom) {
 
 /* Material List rows with their Where Used panel expanded */
 const WHERE_USED_OPEN = new Set();
-
+/* Production batches with their VIN detail panel expanded */
+const PROD_BATCH_EXPANDED = new Set();
 /* Batch table column definitions */
 const BATCH_COLS = [
   { id:'batch',      label:'Batch' },
@@ -2566,8 +2567,11 @@ function renderProductionBatchTable() {
 
   batches.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
 
+  const colCount = 3 + PROD_STAGES.length;
+
   const head = `
     <thead><tr>
+      <th style="width:34px"></th>
       <th>Batch</th>
       <th class="num">VINs</th>
       ${PROD_STAGES.map(s => `<th class="num" title="${s.label}">${s.short}</th>`).join('')}
@@ -2576,6 +2580,8 @@ function renderProductionBatchTable() {
 
   const body = batches.map(b => {
     const total = b.vins.length;
+    const isOpen = PROD_BATCH_EXPANDED.has(b.id);
+
     const stageCells = PROD_STAGES.map(s => {
       const n = b.counts[s.key] || 0;
       const pct = total ? Math.round(n / total * 100) : 0;
@@ -2591,17 +2597,100 @@ function renderProductionBatchTable() {
     else
       status = '<span class="pill warn">IN PROGRESS</span>';
 
-    return `<tr>
+    const mainRow = `<tr class="prod-batch-row ${isOpen ? 'row-open' : ''}" data-batch="${escapeHtml(b.id)}">
+      <td class="prod-batch-toggle-cell">
+        <button class="btn tiny prod-batch-toggle"
+                data-batch="${escapeHtml(b.id)}"
+                title="${isOpen ? 'Hide VIN details' : 'Show VIN details'}">
+          ${isOpen ? '▾' : '▸'}
+        </button>
+      </td>
       <td><b class="mono">${escapeHtml(b.id)}</b></td>
       <td class="num">${total}</td>
       ${stageCells}
       <td>${status}</td>
     </tr>`;
+
+    if (!isOpen) return mainRow;
+
+    /* --- Detail panel: VIN list for this batch --- */
+    const vins = b.vins.slice().sort((x, y) => {
+      const c = String(x.sequence || '').localeCompare(String(y.sequence || ''), undefined, { numeric: true });
+      return c || String(x.vinId).localeCompare(String(y.vinId));
+    });
+
+    const vinHead = `
+      <thead>
+        <tr>
+          <th>Seq</th>
+          <th>VIN</th>
+          <th>Line</th>
+          <th>Color</th>
+          ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
+          <th>Timeline</th>
+        </tr>
+      </thead>`;
+
+    const vinBody = vins.map(r => {
+      const line = lineOfSequence(r.sequence);
+      const dots = PROD_STAGES.map(s =>
+        r[s.key]
+          ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
+          : `<span class="prod-dot empty" title="${s.label}: —"></span>`
+      ).join('');
+
+      return `<tr>
+        <td class="mono">${escapeHtml(r.sequence || '—')}</td>
+        <td class="mono">${escapeHtml(r.vinId)}</td>
+        <td>${escapeHtml(line)}</td>
+        <td>${escapeHtml(r.color || '—')}</td>
+        ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
+        <td><div class="prod-timeline">${dots}</div></td>
+      </tr>`;
+    }).join('');
+
+    const detailRow = `<tr class="prod-batch-detail-row">
+      <td colspan="${colCount}">
+        <div class="prod-batch-detail">
+          <div class="prod-batch-detail-title">
+            VINs in <b>${escapeHtml(b.id)}</b> — ${vins.length} vehicle${vins.length === 1 ? '' : 's'}
+          </div>
+          <div class="table-wrap prod-batch-detail-scroll">
+            <table class="prod-batch-detail-table">
+              ${vinHead}
+              <tbody>${vinBody}</tbody>
+            </table>
+          </div>
+        </div>
+      </td>
+    </tr>`;
+
+    return mainRow + detailRow;
   }).join('');
 
   tbl.innerHTML = head + `<tbody>${
-    body || `<tr><td colspan="${3 + PROD_STAGES.length}" style="text-align:center;color:#6b7280;padding:16px">No batches match the current filters</td></tr>`
+    body || `<tr><td colspan="${colCount}" style="text-align:center;color:#6b7280;padding:16px">No batches match the current filters</td></tr>`
   }</tbody>`;
+
+  /* Wire the expand/collapse toggle buttons */
+  tbl.querySelectorAll('.prod-batch-toggle').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const id = btn.dataset.batch;
+      if (PROD_BATCH_EXPANDED.has(id)) PROD_BATCH_EXPANDED.delete(id);
+      else                             PROD_BATCH_EXPANDED.add(id);
+      renderProductionBatchTable();
+    });
+  });
+  tbl.querySelectorAll('.prod-batch-row').forEach(row => {
+    row.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      const id = row.dataset.batch;
+      if (PROD_BATCH_EXPANDED.has(id)) PROD_BATCH_EXPANDED.delete(id);
+      else                             PROD_BATCH_EXPANDED.add(id);
+      renderProductionBatchTable();
+    });
+  }); 
 }
 
 /* =========================================================
