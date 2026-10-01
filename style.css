@@ -880,6 +880,31 @@ details.prod-color-group:not([open]) > .prod-color-header::before { transform: r
 .prod-chart-date-label {
   margin-left: 6px;
 }
+.prod-period-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.prod-period-controls .btn.tiny {
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.prod-period-controls .btn.tiny.primary {
+  background: var(--brand);
+  color: #fff;
+  border-color: var(--brand);
+}
+.prod-period-controls .btn.tiny.primary:hover {
+  background: var(--brand-2);
+}
+.prod-period-sep {
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+  margin: 0 6px;
+}
 /* =========================================================
    Responsive
    ========================================================= */
