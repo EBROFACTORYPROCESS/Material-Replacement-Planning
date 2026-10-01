@@ -44,8 +44,12 @@
 
         <div class="progress-wrap hidden" id="bomProgressWrap">
           <div class="progress-bar"><div class="progress-fill" id="bomProgressFill"></div></div>
-          <div class="progress-label" id="bomProgressLabel">Preparing…</div>
-          <div class="progress-file-list" id="bomProgressList"></div>
+        
+          <div class="progress-header">
+            <span class="progress-label" id="bomProgressLabel">Preparing…</span>
+            <button class="btn tiny hidden" id="bomProgressToggle">▸ Display batch list</button>
+          </div>
+          <div class="progress-file-list hidden" id="bomProgressList"></div>
         </div>
       </div>
 
