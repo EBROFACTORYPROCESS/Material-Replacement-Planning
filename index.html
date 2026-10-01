@@ -138,9 +138,9 @@
   
     <div class="card">
       <h2>3. Batch summary</h2>
-      <p class="hint">Per-batch progress. Each column counts VINs that reached that milestone.</p>
+      <p class="hint">Batches grouped by <b>Model → Colour</b>. Expand a colour to see its batches; expand a batch to see the VINs inside it.</p>
       <div class="toolbar">
-        <input id="prodBatchSearch" type="search" placeholder="Search batch…" />
+       <input id="prodBatchSearch" type="search" placeholder="Search batch / model / colour / VIN…" />
         <select id="prodBatchFilter">
           <option value="all">All batches</option>
           <option value="inProgress">In progress</option>
@@ -148,7 +148,7 @@
         </select>
         <button class="btn" id="prodBatchExport">⤓ Export Excel</button>
       </div>
-      <div class="table-wrap"><table id="prodBatchTable"></table></div>
+      <div id="prodBatchTable" class="prod-batch-tree"></div>
     </div>
   
     <div class="card">
