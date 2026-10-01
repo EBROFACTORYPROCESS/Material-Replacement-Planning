@@ -11,7 +11,7 @@ const STATE = {
   plan: [],
   batchView: { sorts: {}, filters: {} },
   bomRegistry: new Map(),   // "specKey||color||signature" → "BOM N"
-  bomCounter:  new Map()    // "specKey||color"            → N
+  bomCounter:  new Map(),    // "specKey||color"            → N
   production: {
     records: [],
     batches: new Map(),
