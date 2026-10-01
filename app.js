@@ -2528,6 +2528,9 @@ function clearProduction() {
   renderProductionStats();
   renderProductionBatchTable();
   renderProductionVinTable();
+  PROD_SPEC_COLLAPSED.clear();
+  PROD_COLOR_COLLAPSED.clear();
+  PROD_BATCH_EXPANDED.clear(); 
 }
 
 /* =========================================================
@@ -2831,7 +2834,7 @@ function getFilteredProductionVins() {
 
   if (search) {
     rows = rows.filter(r =>
-      `${r.vinId} ${r.batch} ${r.sequence} ${r.description} ${r.color} ${r.materialCode}`
+      `${r.vinId} ${r.code || ''} ${displayVin(r)} ${r.batch} ${r.sequence} ${r.description} ${r.color} ${r.materialCode}`
         .toLowerCase().includes(search));
   }
   switch (v.stage) {
@@ -2966,12 +2969,12 @@ function exportProductionVins() {
   if (!STATE.production.loaded) return;
   const rows = getFilteredProductionVins();
   const aoa = [[
-    'VIN', 'Sequence', 'Line', 'Batch', 'Description', 'Color', 'Material Code',
+    'VIN', 'VIN ID (raw)', 'Sequence', 'Line', 'Batch', 'Description', 'Color', 'Material Code',
     ...PROD_STAGES.map(s => s.label)
   ]];
   for (const r of rows) {
     aoa.push([
-      r.vinId, r.sequence, lineOfSequence(r.sequence), r.batch,
+      displayVin(r), r.vinId, r.sequence, lineOfSequence(r.sequence), r.batch,
       r.description, r.color, r.materialCode,
       ...PROD_STAGES.map(s => r[s.key] || '')
     ]);
