@@ -409,7 +409,7 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
 .mat-main-row:hover > td{background:#fafbff}
 
 /* =========================================================
-   Where Used panel — hierarchical vertical view
+   Where Used panel — BOM List layout variant
    ========================================================= */
 .where-used-row > td{
   padding:0 !important;background:#fbfcfe;
@@ -417,62 +417,30 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
 .where-used-panel{
   padding:12px 16px 14px;
   border-top:1px dashed #e2e8f0}
+.where-used-panel > .bom-spec-group:last-child{margin-bottom:0}
+
 .wu-title{
   font-size:12px;color:var(--muted);margin-bottom:8px;
   text-transform:uppercase;letter-spacing:.05em;font-weight:600}
 .wu-title b{color:var(--text)}
 
-.wu-table{
-  width:100%;border-collapse:collapse;
-  background:#fff;border:1px solid var(--border);border-radius:8px;
-  overflow:hidden;table-layout:fixed}
-.wu-table thead th{
-  padding:8px 14px;text-align:left;
-  background:#f8fafc;font-weight:600;color:var(--muted);
-  font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;
-  border-bottom:1px solid var(--border)}
-.wu-th-hier{width:auto}
-.wu-th-qty {width:140px;text-align:right !important}
-.wu-th-uom {width:90px; text-align:right !important}
-
-.wu-table tbody td{
-  padding:7px 14px;border-bottom:1px solid #f1f5f9;
-  vertical-align:middle;font-size:12.5px}
-.wu-table tbody tr:last-child td{border-bottom:0}
-
-/* Hierarchy column */
-.wu-hier-cell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.wu-indent-1{display:inline-block;width:22px}
-.wu-indent-2{display:inline-block;width:44px}
-.wu-indent-3{display:inline-block;width:66px}
-
-/* Spec row */
-.wu-spec-row > td{background:#eef2f7}
-.wu-spec-row .wu-hier-cell{font-weight:700;color:var(--text);font-size:13px}
-.wu-spec-row .wu-qty-cell,
-.wu-spec-row .wu-uom-cell{color:#cbd5e1;text-align:right}
-
-/* Color row */
-.wu-color-row > td{background:#fafbfd}
-.wu-color-row .wu-hier-cell{font-weight:500;color:var(--text)}
-.wu-color-row .wu-color-name{color:#475569;font-weight:500;margin-left:6px}
-.wu-color-row .wu-qty-cell,
-.wu-color-row .wu-uom-cell{color:#cbd5e1;text-align:right}
-
-/* BOM ID row */
-.wu-bomid-row > td{background:#f8fafc}
-.wu-bomid-row .wu-hier-cell{font-weight:600;color:var(--text)}
-.wu-bomid-row .wu-qty-cell,
-.wu-bomid-row .wu-uom-cell{color:#cbd5e1;text-align:right}
-
-/* Batch row */
-.wu-batch-row > td{background:#fff}
-.wu-batch-row .wu-qty-cell{
-  text-align:right;font-variant-numeric:tabular-nums;
-  color:var(--text);font-size:13px}
-.wu-batch-row .wu-uom-cell{
-  text-align:right;color:var(--muted);font-size:11.5px}
-.wu-batch-id{font-size:12px;color:var(--text)}
+/* Chip variant that carries qty + uom */
+.bom-batch-chip.wu-chip{
+  display:inline-flex;
+  align-items:baseline;
+  gap:6px}
+.wu-chip-qty{
+  font-weight:700;
+  color:var(--text);
+  font-size:11.5px;
+  font-variant-numeric:tabular-nums}
+.wu-chip-uom{
+  font-size:10.5px;
+  color:var(--muted);
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  font-weight:500}
+.bom-batch-chip.wu-chip:hover .wu-chip-qty{color:var(--brand)}
 
 /* =========================================================
    Display BOM modal
@@ -521,6 +489,7 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
   display:inline-block;
   font-size:12px;color:var(--muted);
   margin-right:8px}
+
 /* =========================================================
    BOM List — search bar & result card
    ========================================================= */
@@ -585,6 +554,7 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
   border-color:#fcd34d;
   color:#78350f;
   font-weight:600}
+
 /* =========================================================
    Responsive
    ========================================================= */
@@ -594,6 +564,4 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
   .file-item.bom-item{grid-template-columns:1fr;}
   .scrap-item{grid-template-columns:1fr 1fr;}
   .folder-path-row input{min-width:0;}
-  .wu-th-qty{width:100px;}
-  .wu-th-uom{width:64px;}
 }
