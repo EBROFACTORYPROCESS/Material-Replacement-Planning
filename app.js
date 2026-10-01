@@ -2860,7 +2860,7 @@ function renderProductionVinTable() {
 
   const filtered = getFilteredProductionVins().slice().sort((a, b) => {
     const c = (a.batch || '').localeCompare(b.batch || '', undefined, { numeric: true });
-    return c || a.vinId.localeCompare(b.vinId);
+    return c || (a.code || '').localeCompare(b.code || '');
   });
 
   const total = filtered.length;
@@ -2967,12 +2967,12 @@ function exportProductionVins() {
   if (!STATE.production.loaded) return;
   const rows = getFilteredProductionVins();
   const aoa = [[
-    'VIN', 'VIN ID (raw)', 'Sequence', 'Line', 'Batch', 'Description', 'Color', 'Material Code',
+    'VIN', 'Sequence', 'Line', 'Batch', 'Description', 'Color', 'Material Code',
     ...PROD_STAGES.map(s => s.label)
   ]];
   for (const r of rows) {
     aoa.push([
-      displayVin(r), r.vinId, r.sequence, lineOfSequence(r.sequence), r.batch,
+      displayVin(r), r.sequence, lineOfSequence(r.sequence), r.batch,
       r.description, r.color, r.materialCode,
       ...PROD_STAGES.map(s => r[s.key] || '')
     ]);
