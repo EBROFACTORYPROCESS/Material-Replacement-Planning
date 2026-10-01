@@ -118,6 +118,26 @@
           <span>or click to browse</span>
         </div>
       </div>
+      <div class="card">
+      <h2>2. Monitoring Period</h2>
+      <p class="hint">Set the time window — all KPIs, batches, VIN tables and the capacity chart are filtered to this range. A VIN is in scope if any of its milestones falls inside the period.</p>
+    
+      <div class="prod-period-controls">
+        <button class="btn tiny" data-range="all">Full range</button>
+        <button class="btn tiny" data-range="today">Today</button>
+        <button class="btn tiny" data-range="yesterday">Yesterday</button>
+        <button class="btn tiny" data-range="lastWeek">Last Week</button>
+        <button class="btn tiny" data-range="lastMonth">Last Month</button>
+        <button class="btn tiny" data-range="lastYear">Last Year</button>
+        <span class="prod-period-sep"></span>
+        <span class="prod-chart-label">From:</span>
+        <input type="date" id="prodPeriodFrom" class="prod-chart-date" />
+        <span class="prod-chart-label">To:</span>
+        <input type="date" id="prodPeriodTo" class="prod-chart-date" />
+      </div>
+    
+      <div class="hint" id="prodPeriodHint" style="margin:10px 0 0"></div>
+    </div>
       <div class="progress-wrap hidden" id="prodProgressWrap">
         <div class="progress-bar"><div class="progress-fill" id="prodProgressFill"></div></div>
         <div class="progress-header">
@@ -135,7 +155,7 @@
     <div class="hint" style="margin:0">No production data loaded yet.</div>
   </div>
 
- <div class="prod-chart-controls">
+<div class="prod-chart-controls">
   <span class="prod-chart-label">Capacity trend:</span>
   <select id="prodChartGranularity">
     <option value="day">Daily</option>
@@ -150,11 +170,6 @@
     <option value="compoundIn">Compound Gate-in</option>
     <option value="compoundOut">Compound Gate-out OK</option>
   </select>
-  <span class="prod-chart-label prod-chart-date-label">From:</span>
-  <input type="date" id="prodChartFrom" class="prod-chart-date" />
-  <span class="prod-chart-label prod-chart-date-label">To:</span>
-  <input type="date" id="prodChartTo" class="prod-chart-date" />
-  <button class="btn tiny" id="prodChartReset" title="Reset to the full range of the current stage">↺ Full range</button>
 </div>
 
   <div class="prod-chart-wrap">
