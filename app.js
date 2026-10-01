@@ -2505,7 +2505,8 @@ async function handleProductionFiles(files) {
     renderProductionStats();
     renderProductionBatchTable();
     renderProductionVinTable();
-
+    renderProductionChart();
+     
     setTimeout(() => wrap.classList.add('hidden'), 3000);
   } catch (e) {
     console.error(e);
