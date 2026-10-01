@@ -2488,6 +2488,7 @@ async function handleProductionFiles(files) {
 
     if (!records.length) throw new Error('No valid VIN rows found');
 
+    /* --- Reset state --- */
     STATE.production.records = records;
     STATE.production.batches = computeProductionBatches(records);
     STATE.production.header  = header;
@@ -2500,15 +2501,27 @@ async function handleProductionFiles(files) {
     $('#prodVinSearch').value = '';
     $('#prodVinStage').value = 'all';
 
+    PROD_BATCH_EXPANDED.clear();
+    PROD_SPEC_COLLAPSED.clear();
+    PROD_COLOR_COLLAPSED.clear();
+
+    /* --- Default monitoring period = entire file --- */
+    const { min, max } = getFileDateBounds();
+    STATE.production.period = { from: min || '', to: max || '' };
+    $('#prodPeriodFrom').value = min || '';
+    $('#prodPeriodTo').value   = max || '';
+
+    /* Highlight the "Full range" quick-range button */
+    $$('.prod-period-btn').forEach(b =>
+      b.classList.toggle('primary', b.dataset.range === 'all'));
+
+    /* --- Render --- */
     fill.style.width = '100%';
     label.textContent = `Done — ${fmt(records.length)} VINs · ${fmt(STATE.production.batches.size)} batches`;
 
-    renderProductionStats();
-    renderProductionBatchTable();
-    renderProductionVinTable();
-    resetProductionChartDateRange();  
-    renderProductionChart();
-     
+    renderAllProductionViews();
+    updateProductionPeriodHint();
+
     setTimeout(() => wrap.classList.add('hidden'), 3000);
   } catch (e) {
     console.error(e);
@@ -2930,7 +2943,6 @@ function renderProductionBatchTable() {
   const search = (STATE.production.batchView.search || '').toLowerCase().trim();
   const filter = STATE.production.batchView.filter;
 
-
   /* --- 1. Keep only batches with at least one VIN inside the period --- */
   let batches = Array.from(STATE.production.batches.values())
     .filter(b => b.vins.some(recordInPeriod));
@@ -2945,7 +2957,7 @@ function renderProductionBatchTable() {
       allVins:      b.vins,
       periodVins,
       periodCounts: batchCountsInPeriod(b),
-      fullCounts:   b.counts,                    // counts across the entire file
+      fullCounts:   b.counts,
       model:     dominantField(b.vins, 'description') || '(no model)',
       color:     dominantField(b.vins, 'color')       || '(no colour)',
       colorCode: dominantField(b.vins, 'colorCode')   || ''
@@ -2982,54 +2994,19 @@ function renderProductionBatchTable() {
     if (!colorMap.has(ckey)) colorMap.set(ckey, { color: b.color, colorCode: b.colorCode, batches: [] });
     colorMap.get(ckey).batches.push(b);
   }
-  if (filter === 'completed')
-    batches = batches.filter(b => b.vins.length > 0 &&
-                                 (b.counts.compoundOut || 0) === b.vins.length);
-  else if (filter === 'inProgress')
-    batches = batches.filter(b => (b.counts.compoundOut || 0) < b.vins.length);
-
-  if (search) {
-    batches = batches.filter(b => {
-      if (b.id.toLowerCase().includes(search)) return true;
-      const rep = b.vins[0] || {};
-      return `${rep.description || ''} ${rep.color || ''}`.toLowerCase().includes(search);
-    });
-  }
-
-  if (!batches.length) {
-    tree.innerHTML = '<div class="hint" style="margin:16px 0 0">No batches match the current filters.</div>';
-    return;
-  }
-
-  /* --- 2. Enrich each batch with its dominant model / colour --- */
-  for (const b of batches) {
-    b._model     = dominantField(b.vins, 'description') || '(no model)';
-    b._color     = dominantField(b.vins, 'color')       || '(no colour)';
-    b._colorCode = dominantField(b.vins, 'colorCode')   || '';
-  }
-
-  /* --- 3. Group: model → colour → batches --- */
-  const specMap = new Map();
-  for (const b of batches) {
-    if (!specMap.has(b._model)) specMap.set(b._model, new Map());
-    const colorMap = specMap.get(b._model);
-    const ckey = b._color + '||' + b._colorCode;
-    if (!colorMap.has(ckey)) colorMap.set(ckey, { color: b._color, colorCode: b._colorCode, batches: [] });
-    colorMap.get(ckey).batches.push(b);
-  }
 
   const sortedSpecs = Array.from(specMap.entries())
     .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-  /* --- 4. Render tree --- */
+  /* --- 6. Render tree --- */
   let html = '';
   for (const [model, colorMap] of sortedSpecs) {
     const allBatches = Array.from(colorMap.values()).flatMap(c => c.batches);
-    const specVinTotal  = allBatches.reduce((s, b) => s + b.vins.length, 0);
-    const specComplete  = allBatches.reduce((s, b) => s + (b.counts.compoundOut || 0), 0);
-    const specBatchCnt  = allBatches.length;
-    const specColorCnt  = colorMap.size;
-    const specOpen      = !PROD_SPEC_COLLAPSED.has(model);
+    const specVinTotal = allBatches.reduce((s, b) => s + b.periodVins.length, 0);
+    const specComplete = allBatches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
+    const specBatchCnt = allBatches.length;
+    const specColorCnt = colorMap.size;
+    const specOpen     = !PROD_SPEC_COLLAPSED.has(model);
 
     html += `<details class="prod-spec-group" data-spec="${escapeHtml(model)}" ${specOpen ? 'open' : ''}>
       <summary class="prod-spec-header">
@@ -3047,8 +3024,8 @@ function renderProductionBatchTable() {
       .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
     for (const [ckey, cg] of sortedColors) {
-      const colorVinTotal = cg.batches.reduce((s, b) => s + b.vins.length, 0);
-      const colorComplete = cg.batches.reduce((s, b) => s + (b.counts.compoundOut || 0), 0);
+      const colorVinTotal = cg.batches.reduce((s, b) => s + b.periodVins.length, 0);
+      const colorComplete = cg.batches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
       const colorOpen     = !PROD_COLOR_COLLAPSED.has(model + '||' + ckey);
 
       html += `<details class="prod-color-group" data-spec="${escapeHtml(model)}" data-color="${escapeHtml(ckey)}" ${colorOpen ? 'open' : ''}>
@@ -3078,20 +3055,25 @@ function renderProductionBatchTable() {
         .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
 
       for (const b of sortedBatches) {
-        const total  = b.vins.length;
-        const isOpen = PROD_BATCH_EXPANDED.has(b.id);
+        const allTotal    = b.allVins.length;
+        const periodTotal = b.periodVins.length;
+        const isOpen      = PROD_BATCH_EXPANDED.has(b.id);
+
+        const vinsCell = (periodTotal === allTotal)
+          ? `${periodTotal}`
+          : `${periodTotal}<small style="color:var(--muted)">/${allTotal}</small>`;
 
         const stageCells = PROD_STAGES.map(s => {
-          const n   = b.counts[s.key] || 0;
-          const pct = total ? Math.round(n / total * 100) : 0;
+          const n   = b.periodCounts[s.key] || 0;
+          const pct = periodTotal ? Math.round(n / periodTotal * 100) : 0;
           const cls = pct === 100 ? 'ok' : pct > 0 ? 'partial' : 'empty';
-          return `<td class="num"><span class="prod-pct ${cls}">${n}/${total}</span><small style="color:var(--muted);margin-left:4px">${pct}%</small></td>`;
+          return `<td class="num"><span class="prod-pct ${cls}">${n}/${periodTotal}</span><small style="color:var(--muted);margin-left:4px">${pct}%</small></td>`;
         }).join('');
 
         let status;
-        if ((b.counts.compoundOut || 0) === total && total > 0)
+        if ((b.fullCounts.compoundOut || 0) === allTotal && allTotal > 0)
           status = '<span class="pill ok">COMPLETE</span>';
-        else if ((b.counts.compoundIn || 0) === total && total > 0)
+        else if ((b.fullCounts.compoundIn || 0) === allTotal && allTotal > 0)
           status = '<span class="pill" style="background:#dbeafe;color:#1e40af">IN COMPOUND</span>';
         else
           status = '<span class="pill warn">IN PROGRESS</span>';
@@ -3104,13 +3086,13 @@ function renderProductionBatchTable() {
             </button>
           </td>
           <td><b class="mono">${escapeHtml(b.id)}</b></td>
-          <td class="num">${total}</td>
+          <td class="num">${vinsCell}</td>
           ${stageCells}
           <td>${status}</td>
         </tr>`;
 
         if (isOpen) {
-          const vins = b.vins.slice().sort((x, y) => {
+          const vins = b.periodVins.slice().sort((x, y) => {
             const c = String(x.sequence || '').localeCompare(String(y.sequence || ''), undefined, { numeric: true });
             return c || displayVin(x).localeCompare(displayVin(y));
           });
@@ -3121,7 +3103,7 @@ function renderProductionBatchTable() {
             <td colspan="${colspan}">
               <div class="prod-batch-detail">
                 <div class="prod-batch-detail-title">
-                  VINs in <b>${escapeHtml(b.id)}</b> — ${vins.length} vehicle${vins.length === 1 ? '' : 's'}
+                  VINs in <b>${escapeHtml(b.id)}</b> — ${vins.length} vehicle${vins.length === 1 ? '' : 's'} in period
                 </div>
                 <div class="table-wrap prod-batch-detail-scroll">
                   <table class="prod-batch-detail-table">
@@ -3166,9 +3148,8 @@ function renderProductionBatchTable() {
 
   tree.innerHTML = html;
 
-  /* --- 5. Wire up interactions --- */
+  /* --- 7. Wire up interactions --- */
 
-  // Batch expand/collapse (button + row click)
   tree.querySelectorAll('.prod-batch-toggle').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -3178,6 +3159,7 @@ function renderProductionBatchTable() {
       renderProductionBatchTable();
     });
   });
+
   tree.querySelectorAll('.prod-batch-row').forEach(row => {
     row.addEventListener('click', e => {
       if (e.target.closest('button')) return;
@@ -3188,7 +3170,6 @@ function renderProductionBatchTable() {
     });
   });
 
-  // Remember spec / colour collapse state (persists across re-renders)
   tree.querySelectorAll('details.prod-spec-group').forEach(d => {
     d.addEventListener('toggle', () => {
       const key = d.dataset.spec;
@@ -3196,6 +3177,7 @@ function renderProductionBatchTable() {
       else        PROD_SPEC_COLLAPSED.add(key);
     });
   });
+
   tree.querySelectorAll('details.prod-color-group').forEach(d => {
     d.addEventListener('toggle', () => {
       const key = d.dataset.spec + '||' + d.dataset.color;
@@ -3381,6 +3363,7 @@ function bindProduction() {
   const input = $('#prodInput');
   if (!dz || !input) return;
 
+  /* --- File input --- */
   input.addEventListener('change', e => {
     handleProductionFiles(Array.from(e.target.files || []));
     e.target.value = '';
@@ -3395,6 +3378,7 @@ function bindProduction() {
     handleProductionFiles(Array.from(e.dataTransfer.files || []));
   });
 
+  /* --- Batch summary controls --- */
   $('#prodBatchSearch').addEventListener('input', e => {
     STATE.production.batchView.search = e.target.value;
     renderProductionBatchTable();
@@ -3403,6 +3387,10 @@ function bindProduction() {
     STATE.production.batchView.filter = e.target.value;
     renderProductionBatchTable();
   });
+  $('#prodBatchExpandAll').addEventListener('click', prodBatchExpandAll);
+  $('#prodBatchCollapseAll').addEventListener('click', prodBatchCollapseAll);
+
+  /* --- VIN detail controls --- */
   $('#prodVinSearch').addEventListener('input', e => {
     STATE.production.vinView.search = e.target.value;
     STATE.production.vinView.page = 1;
@@ -3413,28 +3401,43 @@ function bindProduction() {
     STATE.production.vinView.page = 1;
     renderProductionVinTable();
   });
+
+  /* --- Exports --- */
   $('#prodBatchExport').addEventListener('click', exportProductionBatches);
   $('#prodVinExport').addEventListener('click', exportProductionVins);
-  $('#prodBatchExpandAll').addEventListener('click', prodBatchExpandAll);
-  $('#prodBatchCollapseAll').addEventListener('click', prodBatchCollapseAll);   
-  $('#prodClear').addEventListener('click', clearProduction);
+
+  /* --- Capacity chart selectors --- */
   $('#prodChartGranularity').addEventListener('change', renderProductionChart);
+  $('#prodChartStage').addEventListener('change',       renderProductionChart);
 
-  // On stage change, snap the date range to that stage's full range, then redraw
-  $('#prodChartStage').addEventListener('change', () => {
-    resetProductionChartDateRange();
-    renderProductionChart();
+  /* --- Monitoring period: manual date edits --- */
+  $('#prodPeriodFrom').addEventListener('change', () => {
+    $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
+    applyProductionPeriodFromInputs();
+  });
+  $('#prodPeriodTo').addEventListener('change', () => {
+    $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
+    applyProductionPeriodFromInputs();
   });
 
-  $('#prodChartFrom').addEventListener('change', renderProductionChart);
-  $('#prodChartTo').addEventListener('change',   renderProductionChart);
-  $('#prodChartReset').addEventListener('click', () => {
-    resetProductionChartDateRange();
-    renderProductionChart();
+  /* --- Monitoring period: quick-range buttons --- */
+  $$('.prod-period-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const range = btn.dataset.range;
+      const { from, to } = getPeriodRange(range);
+      $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
+      btn.classList.add('primary');
+      setProductionPeriod(from, to);
+    });
   });
 
+  /* --- Clear button --- */
+  $('#prodClear').addEventListener('click', clearProduction);
+
+  /* --- Redraw chart on resize --- */
   window.addEventListener('resize', () => {
     if (STATE.production.loaded) renderProductionChart();
   });
 }
+
 window.MRP = STATE;
