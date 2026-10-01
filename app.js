@@ -12,6 +12,14 @@ const STATE = {
   batchView: { sorts: {}, filters: {} },
   bomRegistry: new Map(),   // "specKey||color||signature" → "BOM N"
   bomCounter:  new Map()    // "specKey||color"            → N
+  production: {
+    records: [],
+    batches: new Map(),
+    header: null,
+    loaded: false,
+    batchView: { search: '', filter: 'all' },
+    vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
+  }   
 };
 
 const $  = (s, r=document) => r.querySelector(s);
@@ -149,6 +157,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindTabs();
   bindUploads();
   bindButtons();
+  bindProduction();
   bindBomDisplayModal();
   bindFilterPopupGlobal();
   renderConversionTable();
@@ -2266,5 +2275,537 @@ function dateStamp() {
   return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
 }
 function round3(n) { return Math.round(n * 1000) / 1000; }
+/* =========================================================
+   PRODUCTION MONITORING
+   ========================================================= */
+const PROD_STAGES = [
+  { key: 'devanning',   label: '005 De-vanning',       short: 'DEV', color: '#94a3b8' },
+  { key: 'trimIn',      label: '020 Trim-in',          short: 'TRM', color: '#3b82f6' },
+  { key: 'offLine',     label: '030 Off-line OK',      short: 'OFF', color: '#8b5cf6' },
+  { key: 'buyOff',      label: 'Buy-off OK',           short: 'BUY', color: '#f59e0b' },
+  { key: 'compoundIn',  label: 'Compound Gate-in',     short: 'CIN', color: '#10b981' },
+  { key: 'compoundOut', label: 'Compound Gate-out OK', short: 'COT', color: '#059669' }
+];
 
+/* Sequence first letter → production line */
+const PROD_LINE_MAP = { A: 'A0', B: 'M1', D: 'M0' };
+
+/* CSV column auto-detection hints (exact → fallback contains) */
+const PROD_COL_HINTS = {
+  vinId:        ['vinid', 'vin id', 'vin'],
+  sequence:     ['sequence'],
+  batch:        ['batch'],
+  description:  ['description'],
+  color:        ['color'],           // exact match avoids 'colorCode'
+  materialCode: ['materialcode', 'material code'],
+  devanning:    ['005 devanning'],
+  trimIn:       ['020 trim in'],
+  offLine:      ['030 off line ok'],
+  buyOff:       ['buy off ok'],
+  compoundIn:   ['compound gate in in', 'compound gate in'],
+  compoundOut:  ['compound gate out ok']
+};
+
+function lineOfSequence(seq) {
+  if (!seq) return '—';
+  return PROD_LINE_MAP[seq.charAt(0).toUpperCase()] || '—';
+}
+
+function formatProdTime(s) {
+  if (!s) return '<span class="prod-empty">—</span>';
+  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return escapeHtml(s);
+  const [, , mo, d, h, mi] = m;
+  return `<span title="${escapeHtml(s)}">${d}/${mo} ${h}:${mi}</span>`;
+}
+
+/* ---- Streaming CSV parser (chunked, yields to UI) ---- */
+async function parseProductionCSV(text, onProgress) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const len = text.length;
+  let i = 0, field = '', row = [], inQ = false;
+  let lastYield = performance.now();
+
+  /* -- 1. Parse header row -- */
+  const header = [];
+  let headerDone = false;
+  while (i < len && !headerDone) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQ = false;
+      } else field += c;
+    } else {
+      if (c === '"') inQ = true;
+      else if (c === ',') { header.push(field); field = ''; }
+      else if (c === '\n') { header.push(field); field = ''; headerDone = true; }
+      else if (c !== '\r') field += c;
+    }
+    i++;
+  }
+
+  /* -- 2. Map header names → column indices -- */
+  const headerLower = header.map(h => String(h).trim().toLowerCase());
+  const idx = {};
+  for (const [key, hints] of Object.entries(PROD_COL_HINTS)) {
+    let found = -1;
+    for (const h of hints) {
+      const p = headerLower.indexOf(h);
+      if (p >= 0) { found = p; break; }
+    }
+    if (found < 0) {
+      for (const h of hints) {
+        const p = headerLower.findIndex(x => x.includes(h));
+        if (p >= 0) { found = p; break; }
+      }
+    }
+    idx[key] = found;
+  }
+  if (idx.vinId < 0) throw new Error('Required column "vinId" not found in CSV header');
+
+  const maxIdx = Math.max(...Object.values(idx).filter(x => x >= 0));
+  const records = [];
+
+  /* -- 3. Parse data rows directly into lean objects -- */
+  field = ''; row = []; inQ = false;
+
+  const finalizeRow = () => {
+    row.push(field); field = '';
+    if (row.length > maxIdx) {
+      const vinId = String(row[idx.vinId] ?? '').trim();
+      if (vinId) {
+        const rec = { vinId };
+        for (const [key, ci] of Object.entries(idx)) {
+          if (key === 'vinId' || ci < 0) continue;
+          rec[key] = String(row[ci] ?? '').trim();
+        }
+        records.push(rec);
+      }
+    }
+    row = [];
+  };
+
+  while (i < len) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQ = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"') { inQ = true; i++; continue; }
+    if (c === ',') { row.push(field); field = ''; i++; continue; }
+    if (c === '\n') { finalizeRow(); i++; continue; }
+    if (c === '\r') { i++; continue; }
+    field += c; i++;
+
+    if (performance.now() - lastYield > 50) {
+      lastYield = performance.now();
+      onProgress && onProgress(i / len, records.length);
+      await yieldToUI();
+    }
+  }
+  if (field.length || row.length) finalizeRow();
+
+  return { records, header };
+}
+
+function computeProductionBatches(records) {
+  const map = new Map();
+  for (const r of records) {
+    const id = r.batch || '(no batch)';
+    let b = map.get(id);
+    if (!b) { b = { id, vins: [], counts: {} }; map.set(id, b); }
+    b.vins.push(r);
+    for (const s of PROD_STAGES) {
+      if (r[s.key]) b.counts[s.key] = (b.counts[s.key] || 0) + 1;
+    }
+  }
+  return map;
+}
+
+/* ---- File ingestion ---- */
+async function handleProductionFiles(files) {
+  const f = files[0];
+  if (!f) return;
+
+  const wrap  = $('#prodProgressWrap');
+  const fill  = $('#prodProgressFill');
+  const label = $('#prodProgressLabel');
+  wrap.classList.remove('hidden');
+  fill.style.width = '0%';
+  label.textContent = `Reading ${f.name} (${fmt(f.size / 1048576)} MB)…`;
+  await yieldToUI();
+
+  try {
+    const text = await readFileAsText(f);
+    label.textContent = `Parsing ${fmt(text.length)} characters…`;
+    await yieldToUI();
+
+    const { records, header } = await parseProductionCSV(text, (p, n) => {
+      fill.style.width = (p * 100).toFixed(1) + '%';
+      label.textContent = `Parsing… ${(p * 100).toFixed(0)}% · ${fmt(n)} VINs extracted`;
+    });
+
+    if (!records.length) throw new Error('No valid VIN rows found');
+
+    STATE.production.records = records;
+    STATE.production.batches = computeProductionBatches(records);
+    STATE.production.header  = header;
+    STATE.production.loaded  = true;
+    STATE.production.vinView.page = 1;
+    STATE.production.batchView.search = '';
+    STATE.production.vinView.search = '';
+    STATE.production.vinView.stage = 'all';
+    $('#prodBatchSearch').value = '';
+    $('#prodVinSearch').value = '';
+    $('#prodVinStage').value = 'all';
+
+    fill.style.width = '100%';
+    label.textContent = `Done — ${fmt(records.length)} VINs · ${fmt(STATE.production.batches.size)} batches`;
+
+    renderProductionStats();
+    renderProductionBatchTable();
+    renderProductionVinTable();
+
+    setTimeout(() => wrap.classList.add('hidden'), 3000);
+  } catch (e) {
+    console.error(e);
+    label.textContent = `Failed: ${e.message}`;
+    alert(`Failed to parse production file: ${e.message}`);
+  }
+}
+
+function clearProduction() {
+  if (!STATE.production.loaded) return;
+  if (!confirm('Clear all loaded production tracking data?')) return;
+  STATE.production = {
+    records: [], batches: new Map(), header: null, loaded: false,
+    batchView: { search: '', filter: 'all' },
+    vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
+  };
+  $('#prodProgressWrap').classList.add('hidden');
+  renderProductionStats();
+  renderProductionBatchTable();
+  renderProductionVinTable();
+}
+
+/* =========================================================
+   RENDER — Overall KPIs
+   ========================================================= */
+function renderProductionStats() {
+  const wrap = $('#prodStats');
+  if (!STATE.production.loaded) {
+    wrap.innerHTML = '<div class="hint" style="margin:0">No production data loaded yet.</div>';
+    return;
+  }
+  const records = STATE.production.records;
+  const total   = records.length;
+  const batches = STATE.production.batches;
+
+  const counts = {};
+  for (const s of PROD_STAGES) counts[s.key] = 0;
+  for (const r of records)
+    for (const s of PROD_STAGES) if (r[s.key]) counts[s.key]++;
+
+  const complete = counts.compoundOut;
+  const inProg   = total - complete;
+
+  const stageCards = PROD_STAGES.map(s => {
+    const n = counts[s.key];
+    const pct = total ? (n / total * 100) : 0;
+    return `
+      <div class="stat prod-stat">
+        <div class="label"><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></div>
+        <div class="value">${fmt(n)}<span class="unit">/ ${fmt(total)}</span></div>
+        <div class="prod-bar"><div class="prod-bar-fill" style="width:${pct.toFixed(1)}%;background:${s.color}"></div></div>
+        <div class="sub"><b>${pct.toFixed(1)}%</b> of VINs</div>
+      </div>`;
+  }).join('');
+
+  wrap.innerHTML = `
+    <div class="stat prod-stat">
+      <div class="label">Total VINs</div>
+      <div class="value">${fmt(total)}</div>
+      <div class="sub"><b>${fmt(batches.size)}</b> batches</div>
+    </div>
+    <div class="stat prod-stat">
+      <div class="label">Complete (Gate-out OK)</div>
+      <div class="value">${fmt(complete)}</div>
+      <div class="sub"><b>${total ? (complete / total * 100).toFixed(1) : 0}%</b> shipped</div>
+    </div>
+    <div class="stat prod-stat">
+      <div class="label">In progress</div>
+      <div class="value">${fmt(inProg)}</div>
+      <div class="sub"><b>${total ? (inProg / total * 100).toFixed(1) : 0}%</b> active</div>
+    </div>
+    ${stageCards}
+  `;
+}
+
+/* =========================================================
+   RENDER — Batch summary
+   ========================================================= */
+function renderProductionBatchTable() {
+  const tbl = $('#prodBatchTable');
+  if (!STATE.production.loaded) {
+    tbl.innerHTML = `<thead><tr><th>No production data loaded</th></tr></thead>`;
+    return;
+  }
+  const search = (STATE.production.batchView.search || '').toLowerCase();
+  const filter = STATE.production.batchView.filter;
+
+  let batches = Array.from(STATE.production.batches.values());
+  if (search) batches = batches.filter(b => b.id.toLowerCase().includes(search));
+  if (filter === 'completed')
+    batches = batches.filter(b => (b.counts.compoundOut || 0) === b.vins.length);
+  else if (filter === 'inProgress')
+    batches = batches.filter(b => (b.counts.compoundOut || 0) < b.vins.length);
+
+  batches.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+  const head = `
+    <thead><tr>
+      <th>Batch</th>
+      <th class="num">VINs</th>
+      ${PROD_STAGES.map(s => `<th class="num" title="${s.label}">${s.short}</th>`).join('')}
+      <th>Status</th>
+    </tr></thead>`;
+
+  const body = batches.map(b => {
+    const total = b.vins.length;
+    const stageCells = PROD_STAGES.map(s => {
+      const n = b.counts[s.key] || 0;
+      const pct = total ? Math.round(n / total * 100) : 0;
+      const cls = pct === 100 ? 'ok' : pct > 0 ? 'partial' : 'empty';
+      return `<td class="num"><span class="prod-pct ${cls}">${n}/${total}</span><small style="color:var(--muted)">${pct}%</small></td>`;
+    }).join('');
+
+    let status;
+    if ((b.counts.compoundOut || 0) === total && total > 0)
+      status = '<span class="pill ok">COMPLETE</span>';
+    else if ((b.counts.compoundIn || 0) === total && total > 0)
+      status = '<span class="pill" style="background:#dbeafe;color:#1e40af">IN COMPOUND</span>';
+    else
+      status = '<span class="pill warn">IN PROGRESS</span>';
+
+    return `<tr>
+      <td><b class="mono">${escapeHtml(b.id)}</b></td>
+      <td class="num">${total}</td>
+      ${stageCells}
+      <td>${status}</td>
+    </tr>`;
+  }).join('');
+
+  tbl.innerHTML = head + `<tbody>${
+    body || `<tr><td colspan="${3 + PROD_STAGES.length}" style="text-align:center;color:#6b7280;padding:16px">No batches match the current filters</td></tr>`
+  }</tbody>`;
+}
+
+/* =========================================================
+   RENDER — VIN detail (paginated)
+   ========================================================= */
+function getFilteredProductionVins() {
+  const v = STATE.production.vinView;
+  const search = (v.search || '').toLowerCase();
+  let rows = STATE.production.records;
+
+  if (search) {
+    rows = rows.filter(r =>
+      `${r.vinId} ${r.batch} ${r.sequence} ${r.description} ${r.color} ${r.materialCode}`
+        .toLowerCase().includes(search));
+  }
+  switch (v.stage) {
+    case 'complete':       rows = rows.filter(r => r.compoundOut); break;
+    case 'notDev':         rows = rows.filter(r => !r.devanning); break;
+    case 'notTrim':        rows = rows.filter(r => !r.trimIn); break;
+    case 'notOff':         rows = rows.filter(r => !r.offLine); break;
+    case 'notBuyOff':      rows = rows.filter(r => !r.buyOff); break;
+    case 'notCompoundIn':  rows = rows.filter(r => !r.compoundIn); break;
+    case 'notCompoundOut': rows = rows.filter(r => !r.compoundOut); break;
+  }
+  return rows;
+}
+
+function renderProductionVinTable() {
+  const tbl = $('#prodVinTable');
+  const pg  = $('#prodVinPagination');
+  if (!STATE.production.loaded) {
+    tbl.innerHTML = `<thead><tr><th>No production data loaded</th></tr></thead>`;
+    pg.innerHTML = '';
+    $('#prodVinCount').textContent = '';
+    return;
+  }
+  const v = STATE.production.vinView;
+
+  const filtered = getFilteredProductionVins().slice().sort((a, b) => {
+    const c = (a.batch || '').localeCompare(b.batch || '', undefined, { numeric: true });
+    return c || a.vinId.localeCompare(b.vinId);
+  });
+
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / v.pageSize));
+  if (v.page > totalPages) v.page = totalPages;
+  const start = (v.page - 1) * v.pageSize;
+  const pageRows = filtered.slice(start, start + v.pageSize);
+
+  $('#prodVinCount').innerHTML =
+    `<b>${fmt(total)}</b> VIN${total === 1 ? '' : 's'} match · showing ${fmt(start + 1)}–${fmt(Math.min(start + v.pageSize, total))}`;
+
+  const head = `
+    <thead><tr>
+      <th>VIN</th>
+      <th>Seq</th>
+      <th>Line</th>
+      <th>Batch</th>
+      <th>Model / Color</th>
+      ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
+      <th>Timeline</th>
+    </tr></thead>`;
+
+  const body = pageRows.map(r => {
+    const line = lineOfSequence(r.sequence);
+    const timeline = PROD_STAGES.map(s =>
+      r[s.key]
+        ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
+        : `<span class="prod-dot empty" title="${s.label}: —"></span>`
+    ).join('');
+    return `<tr>
+      <td class="mono">${escapeHtml(r.vinId)}</td>
+      <td class="mono">${escapeHtml(r.sequence || '—')}</td>
+      <td>${escapeHtml(line)}</td>
+      <td class="mono">${escapeHtml(r.batch || '—')}</td>
+      <td>${escapeHtml(r.description || '')}${r.color ? ` — <span style="color:var(--muted)">${escapeHtml(r.color)}</span>` : ''}</td>
+      ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
+      <td><div class="prod-timeline">${timeline}</div></td>
+    </tr>`;
+  }).join('');
+
+  tbl.innerHTML = head + `<tbody>${
+    body || `<tr><td colspan="${6 + PROD_STAGES.length}" style="text-align:center;color:#6b7280;padding:16px">No VINs match the current filters</td></tr>`
+  }</tbody>`;
+
+  renderPagination(pg, v.page, totalPages, p => {
+    v.page = p;
+    renderProductionVinTable();
+    tbl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+function renderPagination(container, page, total, onChange) {
+  if (total <= 1) { container.innerHTML = ''; return; }
+  const btns = [];
+  const win = 5;
+  let start = Math.max(1, page - 2);
+  let end = Math.min(total, start + win - 1);
+  if (end - start < win - 1) start = Math.max(1, end - win + 1);
+
+  btns.push(`<button class="btn tiny" data-p="${page - 1}" ${page <= 1 ? 'disabled' : ''}>‹ Prev</button>`);
+  if (start > 1) {
+    btns.push(`<button class="btn tiny" data-p="1">1</button>`);
+    if (start > 2) btns.push(`<span class="pg-dots">…</span>`);
+  }
+  for (let i = start; i <= end; i++) {
+    btns.push(`<button class="btn tiny ${i === page ? 'primary' : ''}" data-p="${i}">${i}</button>`);
+  }
+  if (end < total) {
+    if (end < total - 1) btns.push(`<span class="pg-dots">…</span>`);
+    btns.push(`<button class="btn tiny" data-p="${total}">${total}</button>`);
+  }
+  btns.push(`<button class="btn tiny" data-p="${page + 1}" ${page >= total ? 'disabled' : ''}>Next ›</button>`);
+
+  container.innerHTML = btns.join('');
+  container.querySelectorAll('button[data-p]').forEach(b => {
+    b.addEventListener('click', () => {
+      const p = parseInt(b.dataset.p, 10);
+      if (p >= 1 && p <= total && p !== page) onChange(p);
+    });
+  });
+}
+
+/* =========================================================
+   EXPORTS
+   ========================================================= */
+function exportProductionBatches() {
+  if (!STATE.production.loaded) return;
+  const aoa = [['Batch', 'VINs', ...PROD_STAGES.map(s => s.label), 'Status']];
+  const batches = Array.from(STATE.production.batches.values())
+    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+  for (const b of batches) {
+    const total = b.vins.length;
+    const row = [b.id, total];
+    for (const s of PROD_STAGES) row.push(b.counts[s.key] || 0);
+    row.push((b.counts.compoundOut || 0) === total && total > 0 ? 'COMPLETE' : 'IN PROGRESS');
+    aoa.push(row);
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Batch Progress');
+  downloadWorkbook(wb, `Production_Batches_${dateStamp()}.xlsx`);
+}
+
+function exportProductionVins() {
+  if (!STATE.production.loaded) return;
+  const rows = getFilteredProductionVins();
+  const aoa = [[
+    'VIN', 'Sequence', 'Line', 'Batch', 'Description', 'Color', 'Material Code',
+    ...PROD_STAGES.map(s => s.label)
+  ]];
+  for (const r of rows) {
+    aoa.push([
+      r.vinId, r.sequence, lineOfSequence(r.sequence), r.batch,
+      r.description, r.color, r.materialCode,
+      ...PROD_STAGES.map(s => r[s.key] || '')
+    ]);
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'VIN Tracking');
+  downloadWorkbook(wb, `Production_VINs_${dateStamp()}.xlsx`);
+}
+
+/* =========================================================
+   BIND — Production tab UI
+   ========================================================= */
+function bindProduction() {
+  const dz    = $('#prodDrop');
+  const input = $('#prodInput');
+  if (!dz || !input) return;
+
+  input.addEventListener('change', e => {
+    handleProductionFiles(Array.from(e.target.files || []));
+    e.target.value = '';
+  });
+  ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.add('drag');
+  }));
+  ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.remove('drag');
+  }));
+  dz.addEventListener('drop', e => {
+    handleProductionFiles(Array.from(e.dataTransfer.files || []));
+  });
+
+  $('#prodBatchSearch').addEventListener('input', e => {
+    STATE.production.batchView.search = e.target.value;
+    renderProductionBatchTable();
+  });
+  $('#prodBatchFilter').addEventListener('change', e => {
+    STATE.production.batchView.filter = e.target.value;
+    renderProductionBatchTable();
+  });
+  $('#prodVinSearch').addEventListener('input', e => {
+    STATE.production.vinView.search = e.target.value;
+    STATE.production.vinView.page = 1;
+    renderProductionVinTable();
+  });
+  $('#prodVinStage').addEventListener('change', e => {
+    STATE.production.vinView.stage = e.target.value;
+    STATE.production.vinView.page = 1;
+    renderProductionVinTable();
+  });
+  $('#prodBatchExport').addEventListener('click', exportProductionBatches);
+  $('#prodVinExport').addEventListener('click', exportProductionVins);
+  $('#prodClear').addEventListener('click', clearProduction);
+}
 window.MRP = STATE;
