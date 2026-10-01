@@ -135,22 +135,27 @@
     <div class="hint" style="margin:0">No production data loaded yet.</div>
   </div>
 
-  <div class="prod-chart-controls">
-    <span class="prod-chart-label">Capacity trend:</span>
-    <select id="prodChartGranularity">
-      <option value="day">Daily</option>
-      <option value="week">Weekly</option>
-      <option value="month" selected>Monthly</option>
-    </select>
-    <select id="prodChartStage">
-      <option value="devanning">005 De-vanning</option>
-      <option value="trimIn">020 Trim-in</option>
-      <option value="offLine" selected>030 Off-line OK</option>
-      <option value="buyOff">Buy-off OK</option>
-      <option value="compoundIn">Compound Gate-in</option>
-      <option value="compoundOut">Compound Gate-out OK</option>
-    </select>
-  </div>
+ <div class="prod-chart-controls">
+  <span class="prod-chart-label">Capacity trend:</span>
+  <select id="prodChartGranularity">
+    <option value="day">Daily</option>
+    <option value="week">Weekly</option>
+    <option value="month" selected>Monthly</option>
+  </select>
+  <select id="prodChartStage">
+    <option value="devanning">005 De-vanning</option>
+    <option value="trimIn">020 Trim-in</option>
+    <option value="offLine" selected>030 Off-line OK</option>
+    <option value="buyOff">Buy-off OK</option>
+    <option value="compoundIn">Compound Gate-in</option>
+    <option value="compoundOut">Compound Gate-out OK</option>
+  </select>
+  <span class="prod-chart-label prod-chart-date-label">From:</span>
+  <input type="date" id="prodChartFrom" class="prod-chart-date" />
+  <span class="prod-chart-label prod-chart-date-label">To:</span>
+  <input type="date" id="prodChartTo" class="prod-chart-date" />
+  <button class="btn tiny" id="prodChartReset" title="Reset to the full range of the current stage">↺ Full range</button>
+</div>
 
   <div class="prod-chart-wrap">
     <canvas id="prodChart" height="180"></canvas>
