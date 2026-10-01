@@ -842,14 +842,15 @@ function renderBomTable() {
 
     if (!isOpen) return mainRow;
 
+    /* ---- Build spec → colour → BOM ID → batches ---- */
     const bomsForPart = Array.from(p.bomKeys)
       .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
       .filter(Boolean);
 
     const specMap = new Map();
     for (const bom of bomsForPart) {
-      const sk = specKeyOf(bom.vehicleMatNo);
-      const cc = colorCodeOf(bom.vehicleMatNo);
+      const sk  = specKeyOf(bom.vehicleMatNo);
+      const cc  = colorCodeOf(bom.vehicleMatNo);
       const bid = bom.bomId || '(unassigned)';
       if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, colors: new Map(), boms: [] });
       const sg = specMap.get(sk);
@@ -862,35 +863,22 @@ function renderBomTable() {
     }
     for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
 
-    const hierRows = [];
+    /* ---- Render using the BOM List hierarchy classes ---- */
     const specList = Array.from(specMap.values())
       .sort((a, b) => a.specName.localeCompare(b.specName, undefined, { numeric: true }));
 
-    for (const sg of specList) {
-      hierRows.push(`
-        <tr class="wu-spec-row">
-          <td class="wu-hier-cell wu-spec">
-            <span class="wu-spec-name">${escapeHtml(sg.specName)}</span>
-          </td>
-          <td class="wu-qty-cell">—</td>
-          <td class="wu-uom-cell">—</td>
-        </tr>`);
+    const specHtml = specList.map(sg => {
+      const specBomIds     = new Set(sg.boms.map(b => b.bomId));
+      const specBomCount   = specBomIds.size;
+      const specBatchCount = sg.boms.length;
 
       const colorList = Array.from(sg.colors.entries())
         .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
 
-      for (const [cc, cg] of colorList) {
-        const colorName = deriveColorName(cg.boms, sg.specName);
-        hierRows.push(`
-          <tr class="wu-color-row">
-            <td class="wu-hier-cell wu-color">
-              <span class="wu-indent-1"></span>
-              <span class="color-code" style="${colorBadgeStyle(cc)}">${escapeHtml(cc || '??')}</span>
-              <span class="wu-color-name">${escapeHtml(colorName || '')}</span>
-            </td>
-            <td class="wu-qty-cell">—</td>
-            <td class="wu-uom-cell">—</td>
-          </tr>`);
+      const colorHtml = colorList.map(([cc, cg]) => {
+        const colorName       = deriveColorName(cg.boms, sg.specName);
+        const colorBomCount   = cg.bomIds.size;
+        const colorBatchCount = cg.boms.length;
 
         const bomIdList = Array.from(cg.bomIds.entries())
           .sort((a, b) => {
@@ -899,36 +887,71 @@ function renderBomTable() {
             return na - nb;
           });
 
-        for (const [bomId, boms] of bomIdList) {
-          hierRows.push(`
-            <tr class="wu-bomid-row">
-              <td class="wu-hier-cell wu-bomid">
-                <span class="wu-indent-2"></span>
-                <span class="bom-id-badge">${escapeHtml(bomId)}</span>
-              </td>
-              <td class="wu-qty-cell">—</td>
-              <td class="wu-uom-cell">—</td>
-            </tr>`);
+        const bomHtml = bomIdList.map(([bomId, boms]) => {
+          const rep = boms[0];
+          const partCount = rep.parts.length;
 
           const batchList = boms.slice().sort((a, b) =>
             (a.batchId || '').localeCompare(b.batchId || '', undefined, { numeric: true }));
 
-          for (const bom of batchList) {
+          const batchChips = batchList.map(bom => {
             const key = bomKeyOf(bom);
             const qty = p.perBomQty[key] || 0;
-            hierRows.push(`
-              <tr class="wu-batch-row">
-                <td class="wu-hier-cell wu-batch">
-                  <span class="wu-indent-3"></span>
-                  <span class="wu-batch-id mono">${escapeHtml(bom.batchId || '—')}</span>
-                </td>
-                <td class="wu-qty-cell"><b>${fmt(qty)}</b></td>
-                <td class="wu-uom-cell">${escapeHtml(p.uom || '—')}</td>
-              </tr>`);
-          }
-        }
-      }
-    }
+            const uom = p.uom || '';
+            return `
+              <span class="bom-batch-chip wu-chip" title="${escapeHtml(bom.batchId || '')}">
+                ${escapeHtml(bom.batchId || '—')}
+                <b class="wu-chip-qty">${fmt(qty)}</b>
+                ${uom ? `<small class="wu-chip-uom">${escapeHtml(uom)}</small>` : ''}
+              </span>`;
+          }).join('');
+
+          return `
+            <div class="bom-id-group" data-bomid="${escapeHtml(bomId)}">
+              <div class="bom-id-header">
+                <span class="bom-id-badge">${escapeHtml(bomId)}</span>
+                <span class="bom-id-stats">
+                  ${boms.length} batch${boms.length === 1 ? '' : 'es'} · ${partCount} parts
+                </span>
+                <button class="btn tiny" data-role="wu-bom-display" data-bomid="${escapeHtml(bomId)}">
+                  Display BOM
+                </button>
+              </div>
+              <details class="bom-batch-toggle">
+                <summary class="bom-batch-toggle-summary">
+                  Show ${boms.length} batch${boms.length === 1 ? '' : 'es'}
+                </summary>
+                <div class="bom-batch-list">${batchChips}</div>
+              </details>
+            </div>`;
+        }).join('');
+
+        return `
+          <details class="bom-color-group" open>
+            <summary class="bom-color-header">
+              <span class="color-code" style="${colorBadgeStyle(cc)}">${escapeHtml(cc || '??')}</span>
+              ${colorName ? `<span class="color-name">${escapeHtml(colorName)}</span>` : ''}
+              <span class="color-count">
+                ${colorBomCount} BOM${colorBomCount === 1 ? '' : 's'} ·
+                ${colorBatchCount} batch${colorBatchCount === 1 ? '' : 'es'}
+              </span>
+            </summary>
+            <div class="bom-id-list">${bomHtml}</div>
+          </details>`;
+      }).join('');
+
+      return `
+        <details class="bom-spec-group" open>
+          <summary class="bom-spec-header">
+            <span class="spec-name">${escapeHtml(sg.specName)}</span>
+            <span class="spec-count">
+              ${specBomCount} BOM${specBomCount === 1 ? '' : 's'} ·
+              ${specBatchCount} batch${specBatchCount === 1 ? '' : 'es'}
+            </span>
+          </summary>
+          <div class="bom-color-list">${colorHtml}</div>
+        </details>`;
+    }).join('');
 
     return mainRow + `
       <tr class="where-used-row">
@@ -937,16 +960,7 @@ function renderBomTable() {
             <div class="wu-title">
               Used in <b>${bomsForPart.length}</b> vehicle batch${bomsForPart.length === 1 ? '' : 'es'}
             </div>
-            <table class="wu-table">
-              <thead>
-                <tr>
-                  <th class="wu-th-hier">Model / Color / BOM / Batch</th>
-                  <th class="wu-th-qty">Qty per car</th>
-                  <th class="wu-th-uom">UoM</th>
-                </tr>
-              </thead>
-              <tbody>${hierRows.join('')}</tbody>
-            </table>
+            ${specHtml}
           </div>
         </td>
       </tr>`;
@@ -954,6 +968,7 @@ function renderBomTable() {
 
   tbl.innerHTML = head + `<tbody>${body}</tbody>`;
 
+  /* Wire the Where Used expand/collapse button */
   tbl.querySelectorAll('.where-used-btn').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -961,6 +976,15 @@ function renderBomTable() {
       if (WHERE_USED_OPEN.has(pn)) WHERE_USED_OPEN.delete(pn);
       else                          WHERE_USED_OPEN.add(pn);
       renderBomTable();
+    });
+  });
+
+  /* Wire the Display BOM button inside the Where Used panel */
+  tbl.querySelectorAll('button[data-role=wu-bom-display]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      openBomDisplay(btn.dataset.bomid);
     });
   });
 }
