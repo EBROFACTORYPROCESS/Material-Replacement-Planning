@@ -2352,8 +2352,8 @@ function formatProdTime(s) {
   if (!s) return '<span class="prod-empty">—</span>';
   const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
   if (!m) return escapeHtml(s);
-  const [, , mo, d, h, mi] = m;
-  return `<span title="${escapeHtml(s)}">${d}/${mo} ${h}:${mi}</span>`;
+  const [, y, mo, d, h, mi] = m;
+  return `<span title="${escapeHtml(s)}">${d}/${mo}/${y} ${h}:${mi}</span>`;
 }
 
 /* ---- Streaming CSV parser (chunked, yields to UI) ---- */
