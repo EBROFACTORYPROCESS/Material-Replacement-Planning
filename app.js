@@ -2703,22 +2703,6 @@ function updateProductionPeriodHint() {
   el.innerHTML = `Period: <b>${rangeStr}</b> · Showing <b>${fmt(filtered)}</b> of ${fmt(total)} VINs${fileRangeStr}`;
 }
 
-
-  const stageKey = $('#prodChartStage').value;
-  const { min, max } = productionDateBounds(stageKey);
-
-  if (!min || !max) {
-    fromEl.value = ''; toEl.value = '';
-    fromEl.min = fromEl.max = '';
-    toEl.min   = toEl.max   = '';
-    return;
-  }
-
-  fromEl.min = toEl.min = min;
-  fromEl.max = toEl.max = max;
-  fromEl.value = min;
-  toEl.value   = max;
-}
 /* =========================================================
    RENDER — Overall KPIs
    ========================================================= */
