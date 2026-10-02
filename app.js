@@ -3090,10 +3090,11 @@ function renderProductionChart() {
 
   const buckets = new Map();
   for (const r of STATE.production.records) {
+    if (!recordMatchesLineModel(r)) continue;
+    if (!recordInPeriod(r)) continue;              // ← scope filter (line+stage+dates)
     const t = r[stageKey];
     if (!t) continue;
-    if (!stageInPeriod(t)) continue;
-    if (!recordMatchesLineModel(r)) continue;      // ← ADD
+    if (!stageInPeriod(t)) continue;               // ← keep: chart bar must fall in the date range
     const key = bucketKeyFor(t, granularity);
     if (!key) continue;
     buckets.set(key, (buckets.get(key) || 0) + 1);
