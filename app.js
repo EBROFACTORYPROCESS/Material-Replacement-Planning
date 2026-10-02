@@ -2472,7 +2472,7 @@ async function parseProductionCSV(text, onProgress) {
     }
     idx[key] = found;
   }
-  if (idx.vinId < 0) throw new Error('Required column "vinId" not found in CSV header');
+  if (idx.code < 0) throw new Error('Required column "code" not found in CSV header');
 
   const maxIdx = Math.max(...Object.values(idx).filter(x => x >= 0));
   const records = [];
@@ -3517,7 +3517,7 @@ function renderProductionVinTable() {
         : `<span class="prod-dot empty" title="${s.label}: —"></span>`
     ).join('');
     return `<tr>
-      <td class="mono">${escapeHtml(r.vinId)}</td>
+      <td class="mono">${escapeHtml(displayVin(r))}</td>
       <td class="mono">${escapeHtml(r.sequence || '—')}</td>
       <td>${escapeHtml(line)}</td>
       <td class="mono">${escapeHtml(r.batch || '—')}</td>
@@ -3695,6 +3695,7 @@ function bindProduction() {
       updateApplyButtonState();
     });
   }
+
   /* --- Manual date edits: stage only --- */
   const stageFromInputs = () => {
     const fromEl = $('#prodPeriodFrom');
@@ -3716,7 +3717,7 @@ function bindProduction() {
   ['#prodLineMS', '#prodModelMS'].forEach(sel => {
     const root = $(sel);
     if (!root) return;
-    const btn = root.querySelector('.prod-ms-btn');
+    const btn   = root.querySelector('.prod-ms-btn');
     const panel = root.querySelector('.prod-ms-panel');
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -3727,6 +3728,7 @@ function bindProduction() {
     panel.addEventListener('click', e => e.stopPropagation());
   });
   document.addEventListener('click', closeAllMS);
+
   /* Checkbox changes → update pending sets, no re-render */
   const onChangeMS = () => {
     const lineChecks  = $$('#prodLineValues input[type=checkbox]');
@@ -3741,20 +3743,13 @@ function bindProduction() {
     syncMultiselectUI();
     updateApplyButtonState();
   };
-  $('#prodLineValues') ?.addEventListener('change', e => {
+  $('#prodLineValues')?.addEventListener('change', e => {
     if (e.target.matches('input[type=checkbox]')) onChangeMS();
   });
   $('#prodModelValues')?.addEventListener('change', e => {
     if (e.target.matches('input[type=checkbox]')) onChangeMS();
   });
-  /* --- Manual date edits: stage only --- */
-  const stageFromInputs = () => {
-    const fromEl = $('#prodPeriodFrom');
-    const toEl   = $('#prodPeriodTo');
-    STATE.production.pendingPeriod = {
-      from: fromEl ? (fromEl.value || '') : '',
-      to:   toEl   ? (toEl.value   || '') : ''
-    };
+
   /* All / None quick buttons inside each panel */
   $$('.prod-ms-header').forEach(header => {
     header.addEventListener('click', e => {
@@ -3768,6 +3763,7 @@ function bindProduction() {
       onChangeMS();
     });
   });
+
   /* Model search input */
   const modelSearch = $('#prodModelMS .prod-ms-search input');
   if (modelSearch) {
@@ -3785,6 +3781,7 @@ function bindProduction() {
     applyProductionPeriod();
     closeAllMS();
   });
+
   /* --- Clear button --- */
   $('#prodClear').addEventListener('click', clearProduction);
 
