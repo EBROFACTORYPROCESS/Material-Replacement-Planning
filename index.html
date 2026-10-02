@@ -176,7 +176,18 @@
   </div>
 
   <div class="prod-period-row prod-period-dates">
-    <span class="prod-chart-label">From:</span>
+    <span class="prod-chart-label">Apply on:</span>
+    <select id="prodPeriodStage" class="prod-period-select">
+      <option value="">Any milestone</option>
+      <option value="devanning">005 De-vanning</option>
+      <option value="trimIn">020 Trim-in</option>
+      <option value="offLine">030 Off-line OK</option>
+      <option value="buyOff">Buy-off OK</option>
+      <option value="compoundIn">Compound Gate-in</option>
+      <option value="compoundOut">Compound Gate-out OK</option>
+    </select>
+  
+    <span class="prod-chart-label" style="margin-left:14px">From:</span>
     <input type="date" id="prodPeriodFrom" class="prod-chart-date" />
     <span class="prod-chart-label">To:</span>
     <input type="date" id="prodPeriodTo" class="prod-chart-date" />
