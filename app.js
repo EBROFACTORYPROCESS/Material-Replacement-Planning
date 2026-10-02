@@ -2759,7 +2759,22 @@ function stageInPeriod(ts) {
   if (to   && d > to)   return false;
   return true;
 }
-
+/* As-of semantics: does this timestamp fall on or before period.to?
+   Used for STAGE COUNTING (KPIs + batch columns).
+   VIN SELECTION still uses the range-based stageInPeriod().
+   - period.to set         → ts ≤ period.to
+   - period.to empty, from → fall back to range (ts ≥ from)
+   - both empty            → true */
+function stageReachedByPeriod(ts) {
+  if (!ts) return false;
+  const d = String(ts).slice(0, 10);
+  const p = STATE.production.period || {};
+  if (!p.to) {
+    if (!p.from) return true;
+    return d >= p.from;
+  }
+  return d <= p.to;
+}
 /* True if the record is inside the current monitoring period,
    evaluated against the selected milestone (or any milestone if none chosen). */
 function recordInPeriod(rec) {
@@ -2993,7 +3008,7 @@ function renderProductionStats() {
   const counts = {};
   for (const s of PROD_STAGES) {
     let n = 0;
-    for (const r of filtered) if (stageInPeriod(r[s.key])) n++;
+    for (const r of filtered) if (stageReachedByPeriod(r[s.key])) n++;
     counts[s.key] = n;
   }
   const complete = counts.compoundOut;
@@ -3217,7 +3232,7 @@ function renderProductionBatchTable() {
       id:           b.id,
       allVins:      b.vins,
       periodVins,
-      periodCounts: batchCountsInPeriod(b),
+      periodCounts: batchCountsAsOfPeriod(periodVins),
       fullCounts:   b.counts,
       line:      dominantLine(b),
       model:     dominantField(b.vins, 'description') || '(no model)',
@@ -3335,7 +3350,7 @@ function renderProductionBatchTable() {
                   <th style="width:32px"></th>
                   <th>Batch</th>
                   <th class="num">VINs</th>
-                  ${PROD_STAGES.map(s => `<th class="num" title="${s.label}">${s.short}</th>`).join('')}
+                  ${PROD_STAGES.map(s => `<th class="num" title="${s.label} — VINs that reached this stage as of period end">${s.short}</th>`).join('')}
                   <th>Status</th>
                 </tr>
               </thead>
@@ -3646,13 +3661,16 @@ function exportProductionVins() {
   XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'VIN Tracking');
   downloadWorkbook(wb, `Production_VINs_${dateStamp()}.xlsx`);
 }
-function batchCountsInPeriod(batch) {
+/* Count of period-selected VINs that had reached each stage as of period.to.
+   Numerator and denominator share the same scope (periodVins), so percentages
+   are always 0–100%. */
+function batchCountsAsOfPeriod(periodVins) {
   const counts = {};
   for (const s of PROD_STAGES) counts[s.key] = 0;
-  for (const r of batch.vins) {
-    if (!recordMatchesLineModel(r)) continue;
+  if (!periodVins || !periodVins.length) return counts;
+  for (const r of periodVins) {
     for (const s of PROD_STAGES) {
-      if (stageInPeriod(r[s.key])) counts[s.key]++;
+      if (stageReachedByPeriod(r[s.key])) counts[s.key]++;
     }
   }
   return counts;
