@@ -1176,6 +1176,81 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   box-shadow: 0 0 0 2px rgba(37, 99, 235, .15);
 }
 /* =========================================================
+   Production — XML export
+   ========================================================= */
+.prod-xml-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+.prod-folder-path {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.prod-folder-path:not([value=""]) { color: var(--text); }
+
+.xml-error-log {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  font-size: 12.5px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.xml-error-log.hidden { display: none; }
+
+.xml-err-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  color: var(--danger);
+  margin-bottom: 8px;
+  position: sticky;
+  top: -10px;
+  background: #fef2f2;
+  padding: 4px 0;
+}
+.xml-err-title button {
+  background: transparent;
+  border: 0;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.xml-err-title button:hover { background: #fee2e2; }
+
+.xml-err-rows { display: flex; flex-direction: column; }
+.xml-err-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid #fee2e2;
+  color: #7f1d1d;
+  align-items: baseline;
+}
+.xml-err-row:first-child { border-top: 0; }
+.xml-err-vin   { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.xml-err-batch { color: #991b1b; font-weight: 500; font-size: 12px; }
+/* =========================================================
    Responsive
    ========================================================= */
 @media (max-width:900px){
