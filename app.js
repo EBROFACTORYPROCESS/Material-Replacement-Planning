@@ -3924,6 +3924,20 @@ async function exportProductionXml() {
 
   setTimeout(() => wrap.classList.add('hidden'), 3000);
 }
+
+function exportXmlErrors() {
+  if (!_lastXmlErrors || !_lastXmlErrors.length) {
+    alert('No errors to export.');
+    return;
+  }
+  const aoa = [['#', 'VIN', 'Batch', 'Reason']];
+  _lastXmlErrors.forEach((er, i) => {
+    aoa.push([i + 1, er.vin, er.batch, er.reason]);
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'XML Export Errors');
+  downloadWorkbook(wb, `XML_Export_Errors_${dateStamp()}.xlsx`);
+}
 /* =========================================================
    BIND — Production tab UI
    ========================================================= */
