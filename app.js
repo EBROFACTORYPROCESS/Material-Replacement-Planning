@@ -17,8 +17,12 @@ const STATE = {
     batches: new Map(),
     header: null,
     loaded: false,
-    period:        { from: '', to: '' },   // applied  (used by all renders)
-    pendingPeriod: { from: '', to: '' },   // staged   (set by UI controls)
+    period:        { from: '', to: '' },
+    pendingPeriod: { from: '', to: '' },
+    lines:         null,   // Set of selected lines, or null = all
+    pendingLines:  null,
+    models:        null,   // Set of selected models, or null = all
+    pendingModels: null,
     batchView: { search: '', filter: 'all' },
     vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
   }
@@ -2351,6 +2355,44 @@ function dominantLine(batch) {
   }
   return best;
 }
+/* Distinct production lines present in the loaded file. */
+function getAvailableLines() {
+  const s = new Set();
+  for (const r of STATE.production.records) s.add(lineOfSequence(r.sequence));
+  return Array.from(s).sort();
+}
+
+/* Distinct model descriptions present in the loaded file. */
+function getAvailableModels() {
+  const s = new Set();
+  for (const r of STATE.production.records) {
+    if (r.description) s.add(r.description);
+  }
+  return Array.from(s).sort();
+}
+
+/* True if the record matches the currently applied line / model filters. */
+function recordMatchesLineModel(rec) {
+  const line = lineOfSequence(rec.sequence);
+  if (STATE.production.lines  && !STATE.production.lines.has(line))            return false;
+  const model = rec.description || '';
+  if (STATE.production.models && !STATE.production.models.has(model))          return false;
+  return true;
+}
+
+/* Combined: period + line + model. */
+function recordMatchesFilters(rec) {
+  return recordInPeriod(rec) && recordMatchesLineModel(rec);
+}
+
+/* Set equality that treats null/undefined as "all". */
+function setsEqual(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
+}
 /* Track which spec / colour groups the user has collapsed.
    (Batch expansion already uses PROD_BATCH_EXPANDED.) */
 const PROD_SPEC_COLLAPSED  = new Set();
@@ -2546,7 +2588,12 @@ async function handleProductionFiles(files) {
     const { min, max } = getFileDateBounds();
     STATE.production.period        = { from: min || '', to: max || '' };
     STATE.production.pendingPeriod = { from: min || '', to: max || '' };
-    $('#prodPeriodFrom').value = min || '';
+    STATE.production.lines         = null;
+    STATE.production.pendingLines  = null;
+    STATE.production.models        = null;
+    STATE.production.pendingModels = null;
+    
+     $('#prodPeriodFrom').value = min || '';
     $('#prodPeriodTo').value   = max || '';
 
     /* Highlight the "Full Range" button */
@@ -2554,6 +2601,7 @@ async function handleProductionFiles(files) {
       b.classList.toggle('primary', b.dataset.range === 'all'));
 
     /* --- Render --- */
+    renderLineModelOptions();
     fill.style.width = '100%';
     label.textContent = `Done — ${fmt(records.length)} VINs · ${fmt(STATE.production.batches.size)} batches`;
 
@@ -2577,10 +2625,13 @@ function clearProduction() {
     records: [], batches: new Map(), header: null, loaded: false,
     period:        { from: '', to: '' },
     pendingPeriod: { from: '', to: '' },
+    lines:         null, pendingLines:  null,
+    models:        null, pendingModels: null,
     batchView: { search: '', filter: 'all' },
     vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
   };
   PROD_BATCH_EXPANDED.clear();
+  PROD_LINE_COLLAPSED.clear();
   PROD_SPEC_COLLAPSED.clear();
   PROD_COLOR_COLLAPSED.clear();
 
@@ -2590,6 +2641,10 @@ function clearProduction() {
 
   const applyBtn = $('#prodPeriodApply');
   if (applyBtn) { applyBtn.disabled = true; applyBtn.classList.remove('pending'); }
+
+  const lineValues  = $('#prodLineValues');  if (lineValues)  lineValues.innerHTML = '';
+  const modelValues = $('#prodModelValues'); if (modelValues) modelValues.innerHTML = '';
+  syncMultiselectUI();
 
   $('#prodProgressWrap').classList.add('hidden');
   renderAllProductionViews();
@@ -2708,24 +2763,23 @@ function recordInPeriod(rec) {
 function getFilteredProductionRecords() {
   if (!STATE.production.loaded) return [];
   const p = STATE.production.period || {};
-  if (!p.from && !p.to) return STATE.production.records;
-  return STATE.production.records.filter(recordInPeriod);
+  const noPeriodFilter = !p.from && !p.to;
+  const noLineFilter   = !STATE.production.lines;
+  const noModelFilter  = !STATE.production.models;
+  if (noPeriodFilter && noLineFilter && noModelFilter) return STATE.production.records;
+  return STATE.production.records.filter(recordMatchesFilters);
 }
-/* Stage a period in the UI (no rendering). */
-function stageProductionPeriod(from, to) {
-  STATE.production.pendingPeriod = { from: from || '', to: to || '' };
-  updateApplyButtonState();
-}
-
-/* True when pending differs from applied. */
+/* ---- Pending-state staging ---- */
 function isProductionPeriodDirty() {
   const a = STATE.production.period        || { from: '', to: '' };
   const p = STATE.production.pendingPeriod || { from: '', to: '' };
-  return (a.from || '') !== (p.from || '') ||
-         (a.to   || '') !== (p.to   || '');
+  const datesDirty = (a.from || '') !== (p.from || '') ||
+                     (a.to   || '') !== (p.to   || '');
+  const linesDirty  = !setsEqual(STATE.production.lines,  STATE.production.pendingLines);
+  const modelsDirty = !setsEqual(STATE.production.models, STATE.production.pendingModels);
+  return datesDirty || linesDirty || modelsDirty;
 }
 
-/* Enable / colour the Apply button depending on dirty state. */
 function updateApplyButtonState() {
   const btn = $('#prodPeriodApply');
   if (!btn) return;
@@ -2739,28 +2793,37 @@ function updateApplyButtonState() {
   btn.classList.toggle('pending', dirty);
 }
 
-/* Commit the pending period, render, and refresh the Apply button. */
+/* Commit pending → applied, re-render once. */
 function applyProductionPeriod() {
   if (!STATE.production.loaded) return;
   STATE.production.period = { ...STATE.production.pendingPeriod };
+  STATE.production.lines  = STATE.production.pendingLines
+    ? new Set(STATE.production.pendingLines) : null;
+  STATE.production.models = STATE.production.pendingModels
+    ? new Set(STATE.production.pendingModels) : null;
   renderAllProductionViews();
   updateProductionPeriodHint();
   updateApplyButtonState();
 }
 
-/* Set both applied + pending — used when a file is first loaded. */
-function setProductionPeriod(from, to) {
+/* Set both applied + pending (used on file load / reset). */
+function setProductionPeriod(from, to, lines = null, models = null) {
   STATE.production.period        = { from: from || '', to: to || '' };
   STATE.production.pendingPeriod = { from: from || '', to: to || '' };
+  STATE.production.lines         = lines  ? new Set(lines)  : null;
+  STATE.production.pendingLines  = lines  ? new Set(lines)  : null;
+  STATE.production.models        = models ? new Set(models) : null;
+  STATE.production.pendingModels = models ? new Set(models) : null;
+
   const fromEl = $('#prodPeriodFrom');
   const toEl   = $('#prodPeriodTo');
   if (fromEl) fromEl.value = from || '';
   if (toEl)   toEl.value   = to   || '';
+  syncMultiselectUI();
   renderAllProductionViews();
   updateProductionPeriodHint();
   updateApplyButtonState();
 }
-
 
 
 
@@ -2786,6 +2849,16 @@ function updateProductionPeriodHint() {
     rangeStr = `${fmtD(p.from)} → ${fmtD(p.to)}`;
   }
 
+  const lineStr = !STATE.production.lines
+    ? 'all lines'
+    : STATE.production.lines.size === 0 ? 'no lines'
+    : `${STATE.production.lines.size} line${STATE.production.lines.size === 1 ? '' : 's'}`;
+
+  const modelStr = !STATE.production.models
+    ? 'all models'
+    : STATE.production.models.size === 0 ? 'no models'
+    : `${STATE.production.models.size} model${STATE.production.models.size === 1 ? '' : 's'}`;
+
   const { min, max } = getFileDateBounds();
   const fileRangeStr = (min && max)
     ? ` · File range: <span style="color:var(--muted)">${min.split('-').reverse().join('/')} → ${max.split('-').reverse().join('/')}</span>`
@@ -2795,12 +2868,74 @@ function updateProductionPeriodHint() {
   if (isProductionPeriodDirty()) {
     const pp = STATE.production.pendingPeriod || {};
     const fmtD = s => s ? s.split('-').reverse().join('/') : '…';
-    pendingStr = ` · <b style="color:#d97706">Pending: ${fmtD(pp.from)} → ${fmtD(pp.to)} — click Apply</b>`;
+    pendingStr = ` · <b style="color:#d97706">Pending changes — click Apply</b>`;
   }
 
-  el.innerHTML = `Period: <b>${rangeStr}</b> · Showing <b>${fmt(filtered)}</b> of ${fmt(total)} VINs${fileRangeStr}${pendingStr}`;
+  el.innerHTML = `Period: <b>${rangeStr}</b> · <b>${lineStr}</b> · <b>${modelStr}</b> · Showing <b>${fmt(filtered)}</b> of ${fmt(total)} VINs${fileRangeStr}${pendingStr}`;
 }
 
+/* Rebuild the checkbox lists for Line and Model dropdowns. */
+function renderLineModelOptions() {
+  const lines  = getAvailableLines();
+  const models = getAvailableModels();
+
+  const linesEl  = $('#prodLineValues');
+  const modelsEl = $('#prodModelValues');
+
+  if (linesEl) {
+    linesEl.innerHTML = lines.map(l => `
+      <label class="prod-ms-value">
+        <input type="checkbox" data-kind="line" value="${escapeHtml(l)}" checked />
+        <span>${escapeHtml(l || '—')}</span>
+      </label>`).join('');
+  }
+  if (modelsEl) {
+    modelsEl.innerHTML = models.map(m => `
+      <label class="prod-ms-value" data-model-label="${escapeHtml(m.toLowerCase())}">
+        <input type="checkbox" data-kind="model" value="${escapeHtml(m)}" checked />
+        <span>${escapeHtml(m)}</span>
+      </label>`).join('');
+  }
+  syncMultiselectUI();
+}
+
+/* Reflect current *pending* sets on the checkboxes + button labels. */
+function syncMultiselectUI() {
+  const pl = STATE.production.pendingLines;
+  const pm = STATE.production.pendingModels;
+
+  // Lines
+  const lineChecks = $$('#prodLineValues input[type=checkbox]');
+  lineChecks.forEach(cb => {
+    cb.checked = !pl || pl.has(cb.value);
+  });
+  const lineLabel = $('#prodLineMS .prod-ms-label');
+  if (lineLabel) {
+    const avail = lineChecks.length;
+    const n = pl ? pl.size : avail;
+    lineLabel.textContent =
+      n === 0        ? 'No Lines'
+      : (!pl || n === avail) ? 'All Lines'
+      : n === 1      ? Array.from(pl)[0]
+      : `${n} Lines`;
+  }
+
+  // Models
+  const modelChecks = $$('#prodModelValues input[type=checkbox]');
+  modelChecks.forEach(cb => {
+    cb.checked = !pm || pm.has(cb.value);
+  });
+  const modelLabel = $('#prodModelMS .prod-ms-label');
+  if (modelLabel) {
+    const avail = modelChecks.length;
+    const n = pm ? pm.size : avail;
+    modelLabel.textContent =
+      n === 0        ? 'No Models'
+      : (!pm || n === avail) ? 'All Models'
+      : n === 1      ? Array.from(pm)[0]
+      : `${n} Models`;
+  }
+}
 /* =========================================================
    RENDER — Overall KPIs
    ========================================================= */
@@ -2919,7 +3054,8 @@ function renderProductionChart() {
   for (const r of STATE.production.records) {
     const t = r[stageKey];
     if (!t) continue;
-    if (!stageInPeriod(t)) continue;                // ← period filter
+    if (!stageInPeriod(t)) continue;
+    if (!recordMatchesLineModel(r)) continue;      // ← ADD
     const key = bucketKeyFor(t, granularity);
     if (!key) continue;
     buckets.set(key, (buckets.get(key) || 0) + 1);
@@ -3030,12 +3166,13 @@ function renderProductionBatchTable() {
 
   /* --- 1. Keep only batches with at least one VIN inside the period --- */
   let batches = Array.from(STATE.production.batches.values())
-    .filter(b => b.vins.some(recordInPeriod));
+     .filter(b => b.vins.some(recordMatchesFilters));   // ← was recordInPeriod
+
 
   /* --- 2. Enrich with period counts + dominant line/model/colour --- */
   const enriched = [];
   for (const b of batches) {
-    const periodVins = b.vins.filter(recordInPeriod);
+    const periodVins = b.vins.filter(recordMatchesFilters);   // ← was recordInPeriod
     if (!periodVins.length) continue;
     enriched.push({
       id:           b.id,
@@ -3474,6 +3611,7 @@ function batchCountsInPeriod(batch) {
   const counts = {};
   for (const s of PROD_STAGES) counts[s.key] = 0;
   for (const r of batch.vins) {
+    if (!recordMatchesLineModel(r)) continue;
     for (const s of PROD_STAGES) {
       if (stageInPeriod(r[s.key])) counts[s.key]++;
     }
@@ -3535,33 +3673,28 @@ function bindProduction() {
   $('#prodChartGranularity').addEventListener('change', renderProductionChart);
   $('#prodChartStage').addEventListener('change',       renderProductionChart);
 
-  /* --- Monitoring period: quick-range buttons (stage only, event delegation) --- */
+  /* --- Monitoring period: quick-range buttons (stage only) --- */
   const periodCtrl = $('#prodPeriodControls');
   if (periodCtrl) {
     periodCtrl.addEventListener('click', e => {
       const btn = e.target.closest('button[data-range]');
       if (!btn || !periodCtrl.contains(btn)) return;
 
-      const range = btn.dataset.range;
-      const { from, to } = getPeriodRange(range);
+      const { from, to } = getPeriodRange(btn.dataset.range);
 
-      /* Snap the date inputs and stage the pending period */
       const fromEl = $('#prodPeriodFrom');
       const toEl   = $('#prodPeriodTo');
       if (fromEl) fromEl.value = from || '';
       if (toEl)   toEl.value   = to   || '';
       STATE.production.pendingPeriod = { from: from || '', to: to || '' };
 
-      /* Highlight the active quick-range button */
       periodCtrl.querySelectorAll('button[data-range]').forEach(b =>
         b.classList.remove('primary'));
       btn.classList.add('primary');
 
-      /* No re-render — just reflect the pending state on the Apply button */
       updateApplyButtonState();
     });
   }
-
   /* --- Manual date edits: stage only --- */
   const stageFromInputs = () => {
     const fromEl = $('#prodPeriodFrom');
@@ -3570,16 +3703,88 @@ function bindProduction() {
       from: fromEl ? (fromEl.value || '') : '',
       to:   toEl   ? (toEl.value   || '') : ''
     };
-    /* Manual edit = custom range → drop quick-range highlights */
     $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
     updateApplyButtonState();
   };
   $('#prodPeriodFrom').addEventListener('change', stageFromInputs);
   $('#prodPeriodTo').addEventListener('change', stageFromInputs);
 
-  /* --- Apply button: commit pending period --- */
-  $('#prodPeriodApply').addEventListener('click', applyProductionPeriod);
+  /* --- Line / Model multi-select dropdowns --- */
+  const closeAllMS = () => {
+    $$('.prod-ms-panel').forEach(p => p.classList.add('hidden'));
+  };
+  ['#prodLineMS', '#prodModelMS'].forEach(sel => {
+    const root = $(sel);
+    if (!root) return;
+    const btn = root.querySelector('.prod-ms-btn');
+    const panel = root.querySelector('.prod-ms-panel');
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const wasHidden = panel.classList.contains('hidden');
+      closeAllMS();
+      if (wasHidden) panel.classList.remove('hidden');
+    });
+    panel.addEventListener('click', e => e.stopPropagation());
+  });
+  document.addEventListener('click', closeAllMS);
+  /* Checkbox changes → update pending sets, no re-render */
+  const onChangeMS = () => {
+    const lineChecks  = $$('#prodLineValues input[type=checkbox]');
+    const modelChecks = $$('#prodModelValues input[type=checkbox]');
 
+    const selectedLines  = lineChecks.filter(c => c.checked).map(c => c.value);
+    const selectedModels = modelChecks.filter(c => c.checked).map(c => c.value);
+
+    STATE.production.pendingLines  = selectedLines.length  === lineChecks.length  ? null : new Set(selectedLines);
+    STATE.production.pendingModels = selectedModels.length === modelChecks.length ? null : new Set(selectedModels);
+
+    syncMultiselectUI();
+    updateApplyButtonState();
+  };
+  $('#prodLineValues') ?.addEventListener('change', e => {
+    if (e.target.matches('input[type=checkbox]')) onChangeMS();
+  });
+  $('#prodModelValues')?.addEventListener('change', e => {
+    if (e.target.matches('input[type=checkbox]')) onChangeMS();
+  });
+  /* --- Manual date edits: stage only --- */
+  const stageFromInputs = () => {
+    const fromEl = $('#prodPeriodFrom');
+    const toEl   = $('#prodPeriodTo');
+    STATE.production.pendingPeriod = {
+      from: fromEl ? (fromEl.value || '') : '',
+      to:   toEl   ? (toEl.value   || '') : ''
+    };
+  /* All / None quick buttons inside each panel */
+  $$('.prod-ms-header').forEach(header => {
+    header.addEventListener('click', e => {
+      const btn = e.target.closest('button[data-act]');
+      if (!btn) return;
+      e.stopPropagation();
+      const root = header.closest('.prod-ms');
+      const checks = root.querySelectorAll('input[type=checkbox]');
+      const setAll = btn.dataset.act === 'all';
+      checks.forEach(cb => { cb.checked = setAll; });
+      onChangeMS();
+    });
+  });
+  /* Model search input */
+  const modelSearch = $('#prodModelMS .prod-ms-search input');
+  if (modelSearch) {
+    modelSearch.addEventListener('input', e => {
+      const q = e.target.value.toLowerCase();
+      $$('#prodModelValues .prod-ms-value').forEach(lbl => {
+        const hay = lbl.dataset.modelLabel || '';
+        lbl.style.display = hay.includes(q) ? '' : 'none';
+      });
+    });
+  }
+
+  /* --- Apply button: commit all pending filters --- */
+  $('#prodPeriodApply').addEventListener('click', () => {
+    applyProductionPeriod();
+    closeAllMS();
+  });
   /* --- Clear button --- */
   $('#prodClear').addEventListener('click', clearProduction);
 
