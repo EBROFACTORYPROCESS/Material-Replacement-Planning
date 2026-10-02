@@ -3661,6 +3661,7 @@ function batchCountsInPeriod(batch) {
    XML EXPORT — one file per VIN in the current VIN detail list
    ========================================================= */
 let _exportFolderHandle = null;
+let _lastXmlErrors = [];
 
 /* XML-safe text */
 function escapeXml(s) {
@@ -3732,7 +3733,6 @@ async function pickExportFolder() {
   }
 }
 
-/* Main export routine */
 async function exportProductionXml() {
   /* ---- Pre-flight checks ---- */
   if (!STATE.production.loaded) {
@@ -3769,67 +3769,120 @@ async function exportProductionXml() {
     return;
   }
 
-  /* ---- Progress UI ---- */
+  /* ---- Reset UI ---- */
   const wrap   = $('#xmlProgressWrap');
   const fill   = $('#xmlProgressFill');
   const label  = $('#xmlProgressLabel');
   const errBox = $('#xmlErrorLog');
+
   wrap.classList.remove('hidden');
   errBox.classList.add('hidden');
   errBox.innerHTML = '';
   fill.style.width = '0%';
   label.textContent = `Preparing 0 / ${vins.length}…`;
-  await yieldToUI();
+
+  _lastXmlErrors = [];
+
+  /* ---- Live error-log helpers (nested — closure over errBox) ---- */
+  const ensureErrorPanel = () => {
+    if (errBox.dataset.built === '1') return;
+    errBox.dataset.built = '1';
+    errBox.classList.remove('hidden');
+    errBox.innerHTML = `
+      <div class="xml-err-title">
+        <span id="xmlErrCount">⚠ 0 errors</span>
+        <span class="xml-err-actions">
+          <button type="button" id="xmlErrExport" title="Export errors to Excel">⤓ Export Errors</button>
+          <button type="button" id="xmlErrClose" title="Dismiss">✕</button>
+        </span>
+      </div>
+      <div class="xml-err-rows" id="xmlErrRows">
+        <div class="xml-err-row xml-err-header">
+          <span>VIN</span><span>Batch</span><span>Reason</span>
+        </div>
+      </div>`;
+    $('#xmlErrExport').addEventListener('click', exportXmlErrors);
+    $('#xmlErrClose').addEventListener('click', () => {
+      errBox.classList.add('hidden');
+      errBox.innerHTML = '';
+      errBox.dataset.built = '';
+    });
+  };
+
+  const appendErrorRow = (er) => {
+    ensureErrorPanel();
+    const rows = $('#xmlErrRows');
+    const row = document.createElement('div');
+    row.className = 'xml-err-row';
+    row.innerHTML = `
+      <span class="xml-err-vin">${escapeHtml(er.vin)}</span>
+      <span class="xml-err-batch">${escapeHtml(er.batch)}</span>
+      <span>${escapeHtml(er.reason)}</span>`;
+    rows.appendChild(row);
+    const countEl = $('#xmlErrCount');
+    if (countEl) {
+      const n = _lastXmlErrors.length;
+      countEl.textContent = `⚠ ${n} error${n === 1 ? '' : 's'}`;
+    }
+  };
 
   /* ---- Process every VIN ---- */
-  const errors = [];   // { vin, batch, reason }
   let successCount = 0;
   const total = vins.length;
 
   for (let i = 0; i < total; i++) {
     const rec = vins[i];
 
-    /* --- F1/F2: sequence + VIN required --- */
+    /* --- Sequence + VIN required --- */
     const seq = String(rec.sequence || '').trim();
     const vin = displayVin(rec);
     if (!seq || !vin) {
       const missing = [];
       if (!seq) missing.push('Sequence');
       if (!vin) missing.push('VIN');
-      errors.push({
+      const er = {
         vin:   vin || '(missing)',
         batch: rec.batch || '—',
         reason: `Missing ${missing.join(' and ')} field(s)`
-      });
+      };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
       continue;
     }
 
-    /* --- E1/E2: BOM lookup by batch --- */
+    /* --- BOM lookup by batch --- */
     const matches = STATE.boms.filter(b => b.batchId === rec.batch);
     if (matches.length === 0) {
-      errors.push({
+      const er = {
         vin, batch: rec.batch || '—',
         reason: `No BOM loaded for sales batch ${rec.batch || '—'}`
-      });
+      };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
       continue;
     }
     if (matches.length > 1) {
-      errors.push({
+      const er = {
         vin, batch: rec.batch || '—',
         reason: 'Multi BOM detected for the Batch, please check'
-      });
+      };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
       continue;
     }
     const bom = matches[0];
     if (!bom.parts || !bom.parts.length) {
-      errors.push({
-        vin, batch: rec.batch || '—',
-        reason: 'BOM has no parts'
-      });
+      const er = { vin, batch: rec.batch || '—', reason: 'BOM has no parts' };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
       continue;
     }
 
-    /* --- Build XML + write to disk --- */
+    /* --- Build XML + write --- */
     const xmlStr   = buildXMLForVin(rec, bom);
     const fileName = sanitizeFileName(`${seq}-${vin}`) + '.xml';
 
@@ -3841,10 +3894,13 @@ async function exportProductionXml() {
       successCount++;
     } catch (e) {
       console.error(e);
-      errors.push({
+      const er = {
         vin, batch: rec.batch || '—',
         reason: `Write failed: ${e.message || e}`
-      });
+      };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
     }
 
     /* --- Throttled progress update --- */
@@ -3858,40 +3914,12 @@ async function exportProductionXml() {
   /* ---- Wrap-up ---- */
   fill.style.width = '100%';
   label.textContent =
-    `Done — ${successCount} processed correctly, ${errors.length} with error${errors.length === 1 ? '' : 's'}.`;
+    `Done — ${successCount} processed correctly, ${_lastXmlErrors.length} with error${_lastXmlErrors.length === 1 ? '' : 's'}.`;
 
-  /* ---- Error log ---- */
-  if (errors.length) {
-    const rows = errors.map(er => `
-      <div class="xml-err-row">
-        <span class="xml-err-vin">${escapeHtml(er.vin)}</span>
-        <span class="xml-err-batch">${escapeHtml(er.batch)}</span>
-        <span>${escapeHtml(er.reason)}</span>
-      </div>`).join('');
-
-    errBox.innerHTML = `
-      <div class="xml-err-title">
-        <span>⚠ ${errors.length} error${errors.length === 1 ? '' : 's'}</span>
-        <button type="button" id="xmlErrClose" title="Dismiss">✕</button>
-      </div>
-      <div class="xml-err-rows">
-        <div class="xml-err-row" style="font-weight:600;color:#7f1d1d;">
-          <span>VIN</span><span>Batch</span><span>Reason</span>
-        </div>
-        ${rows}
-      </div>`;
-    errBox.classList.remove('hidden');
-    $('#xmlErrClose').addEventListener('click', () => {
-      errBox.classList.add('hidden');
-      errBox.innerHTML = '';
-    });
-  }
-
-  /* ---- Final alert ---- */
   alert(
     `XML export complete.\n` +
-    `${successCount} processed correctly, ${errors.length} ended with error.\n` +
-    (errors.length ? 'Please check the error log for details.' : '')
+    `${successCount} processed correctly, ${_lastXmlErrors.length} ended with error.\n` +
+    (_lastXmlErrors.length ? 'Please check the error log for details.' : '')
   );
 
   setTimeout(() => wrap.classList.add('hidden'), 3000);
