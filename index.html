@@ -122,32 +122,69 @@
       <h2>2. Monitoring Period</h2>
       <p class="hint">Set the time window — all KPIs, batches, VIN tables and the capacity chart are filtered to this range. A VIN is in scope if any of its milestones falls inside the period.</p>
     
-      <div class="prod-period-controls" id="prodPeriodControls">
-      
-        <div class="prod-period-row">
-          <button class="btn tiny prod-period-btn" data-range="today">Today</button>
-          <button class="btn tiny prod-period-btn" data-range="thisWeek">This Week</button>
-          <button class="btn tiny prod-period-btn" data-range="thisMonth">This Month</button>
-          <button class="btn tiny prod-period-btn" data-range="thisYear">This Year</button>
-          <span class="prod-period-spacer"></span>
-          <button class="btn tiny prod-period-btn prod-period-btn-all" data-range="all">Full Range</button>
+     <div class="prod-period-controls" id="prodPeriodControls">
+
+  <div class="prod-period-row">
+    <button class="btn tiny prod-period-btn" data-range="today">Today</button>
+    <button class="btn tiny prod-period-btn" data-range="thisWeek">This Week</button>
+    <button class="btn tiny prod-period-btn" data-range="thisMonth">This Month</button>
+    <button class="btn tiny prod-period-btn" data-range="thisYear">This Year</button>
+    <span class="prod-period-spacer"></span>
+    <button class="btn tiny prod-period-btn prod-period-btn-all" data-range="all">Full Range</button>
+  </div>
+
+  <div class="prod-period-row">
+    <button class="btn tiny prod-period-btn" data-range="yesterday">Yesterday</button>
+    <button class="btn tiny prod-period-btn" data-range="lastWeek">Last Week</button>
+    <button class="btn tiny prod-period-btn" data-range="lastMonth">Last Month</button>
+    <button class="btn tiny prod-period-btn" data-range="lastYear">Last Year</button>
+  </div>
+
+  <div class="prod-period-row prod-period-selects">
+    <span class="prod-chart-label">Line:</span>
+    <div class="prod-ms" id="prodLineMS">
+      <button class="prod-ms-btn" type="button">
+        <span class="prod-ms-label">All Lines</span>
+        <span class="prod-ms-caret">▾</span>
+      </button>
+      <div class="prod-ms-panel hidden">
+        <div class="prod-ms-header">
+          <button type="button" data-act="all">All</button>
+          <button type="button" data-act="none">None</button>
         </div>
-      
-        <div class="prod-period-row">
-          <button class="btn tiny prod-period-btn" data-range="yesterday">Yesterday</button>
-          <button class="btn tiny prod-period-btn" data-range="lastWeek">Last Week</button>
-          <button class="btn tiny prod-period-btn" data-range="lastMonth">Last Month</button>
-          <button class="btn tiny prod-period-btn" data-range="lastYear">Last Year</button>
-        </div>
-        <div class="prod-period-row prod-period-dates">
-          <span class="prod-chart-label">From:</span>
-          <input type="date" id="prodPeriodFrom" class="prod-chart-date" />
-          <span class="prod-chart-label">To:</span>
-          <input type="date" id="prodPeriodTo" class="prod-chart-date" />
-          <span class="prod-period-spacer"></span>
-          <button class="btn tiny primary" id="prodPeriodApply" disabled>✓ Apply</button>
-        </div>
+        <div class="prod-ms-values" id="prodLineValues"></div>
       </div>
+    </div>
+
+    <span class="prod-chart-label" style="margin-left:14px">Model:</span>
+    <div class="prod-ms" id="prodModelMS">
+      <button class="prod-ms-btn" type="button">
+        <span class="prod-ms-label">All Models</span>
+        <span class="prod-ms-caret">▾</span>
+      </button>
+      <div class="prod-ms-panel hidden">
+        <div class="prod-ms-search">
+          <input type="text" placeholder="Search model…" />
+        </div>
+        <div class="prod-ms-header">
+          <button type="button" data-act="all">All</button>
+          <button type="button" data-act="none">None</button>
+        </div>
+        <div class="prod-ms-values" id="prodModelValues"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="prod-period-row prod-period-dates">
+    <span class="prod-chart-label">From:</span>
+    <input type="date" id="prodPeriodFrom" class="prod-chart-date" />
+    <span class="prod-chart-label">To:</span>
+    <input type="date" id="prodPeriodTo" class="prod-chart-date" />
+    <span class="prod-period-spacer"></span>
+    <button class="btn tiny primary" id="prodPeriodApply" disabled>✓ Apply</button>
+  </div>
+
+</div>
     
       <div class="hint" id="prodPeriodHint" style="margin:10px 0 0"></div>
     </div>
