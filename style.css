@@ -1160,6 +1160,21 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.prod-period-select {
+  padding: 5px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  font-family: inherit;
+  min-width: 160px;
+}
+.prod-period-select:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, .15);
+}
 /* =========================================================
    Responsive
    ========================================================= */
