@@ -3658,6 +3658,245 @@ function batchCountsInPeriod(batch) {
   return counts;
 }
 /* =========================================================
+   XML EXPORT — one file per VIN in the current VIN detail list
+   ========================================================= */
+let _exportFolderHandle = null;
+
+/* XML-safe text */
+function escapeXml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[<>&'"]/g, c => ({
+    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'
+  })[c]);
+}
+
+/* 'YYYY-MM-DD…' → 'YYYYMMDD' */
+function toYmdCompact(dateStr) {
+  if (!dateStr) return '';
+  const m = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return '';
+  return `${m[1]}${m[2]}${m[3]}`;
+}
+
+/* Strip characters that are illegal in most filesystems */
+function sanitizeFileName(name) {
+  return String(name || '')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+}
+
+/* Build the XML string for one VIN, one <InventoryLine> per BOM part. */
+function buildXMLForVin(rec, bom) {
+  const zone         = lineOfSequence(rec.sequence);
+  const deliveryNote = `${rec.sequence}-${displayVin(rec)}`;
+  const order        = rec.batch || '';
+  const stockDate    = toYmdCompact(rec.offLine);
+
+  const lines = bom.parts.map(p => `    <InventoryLine>
+        <Type>CONSUME</Type>
+        <Zone>${escapeXml(zone)}</Zone>
+        <Warehouse>EBR</Warehouse>
+        <COResponsible>WH</COResponsible>
+        <COInventoryReason>JC</COInventoryReason>
+        <DeliveryNote>${escapeXml(deliveryNote)}</DeliveryNote>
+        <CONotes>NOTES</CONotes>
+        <Part>${escapeXml(p.partNo)}</Part>
+        <StockAV>${Number(p.qty) || 0}</StockAV>
+        <Order>${escapeXml(order)}</Order>
+        <StockDate>${stockDate}</StockDate>
+    </InventoryLine>`).join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Inventory>
+${lines}
+</Inventory>
+`;
+}
+
+/* Folder picker (File System Access API, write mode) */
+async function pickExportFolder() {
+  if (typeof window.showDirectoryPicker !== 'function') {
+    alert('XML folder export requires Chrome or Edge (File System Access API).');
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    _exportFolderHandle = handle;
+    $('#exportFolderPath').value = '/' + handle.name + '/';
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    console.error(e);
+    alert('Failed to select folder: ' + e.message);
+  }
+}
+
+/* Main export routine */
+async function exportProductionXml() {
+  /* ---- Pre-flight checks ---- */
+  if (!STATE.production.loaded) {
+    alert('Load production tracking data first.');
+    return;
+  }
+  if (!STATE.boms.length) {
+    alert('Please load BOM data first.');
+    return;
+  }
+  const vins = getFilteredProductionVins();
+  if (!vins.length) {
+    alert('No VINs match the current filters.');
+    return;
+  }
+
+  /* ---- Ensure a folder is selected + writable ---- */
+  if (!_exportFolderHandle) {
+    await pickExportFolder();
+    if (!_exportFolderHandle) return;
+  }
+  try {
+    let perm = await _exportFolderHandle.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') {
+      perm = await _exportFolderHandle.requestPermission({ mode: 'readwrite' });
+    }
+    if (perm !== 'granted') {
+      alert('Write permission to the folder was not granted.');
+      return;
+    }
+  } catch (e) {
+    console.error(e);
+    alert('Could not verify folder permission: ' + e.message);
+    return;
+  }
+
+  /* ---- Progress UI ---- */
+  const wrap   = $('#xmlProgressWrap');
+  const fill   = $('#xmlProgressFill');
+  const label  = $('#xmlProgressLabel');
+  const errBox = $('#xmlErrorLog');
+  wrap.classList.remove('hidden');
+  errBox.classList.add('hidden');
+  errBox.innerHTML = '';
+  fill.style.width = '0%';
+  label.textContent = `Preparing 0 / ${vins.length}…`;
+  await yieldToUI();
+
+  /* ---- Process every VIN ---- */
+  const errors = [];   // { vin, batch, reason }
+  let successCount = 0;
+  const total = vins.length;
+
+  for (let i = 0; i < total; i++) {
+    const rec = vins[i];
+
+    /* --- F1/F2: sequence + VIN required --- */
+    const seq = String(rec.sequence || '').trim();
+    const vin = displayVin(rec);
+    if (!seq || !vin) {
+      const missing = [];
+      if (!seq) missing.push('Sequence');
+      if (!vin) missing.push('VIN');
+      errors.push({
+        vin:   vin || '(missing)',
+        batch: rec.batch || '—',
+        reason: `Missing ${missing.join(' and ')} field(s)`
+      });
+      continue;
+    }
+
+    /* --- E1/E2: BOM lookup by batch --- */
+    const matches = STATE.boms.filter(b => b.batchId === rec.batch);
+    if (matches.length === 0) {
+      errors.push({
+        vin, batch: rec.batch || '—',
+        reason: `No BOM loaded for sales batch ${rec.batch || '—'}`
+      });
+      continue;
+    }
+    if (matches.length > 1) {
+      errors.push({
+        vin, batch: rec.batch || '—',
+        reason: 'Multi BOM detected for the Batch, please check'
+      });
+      continue;
+    }
+    const bom = matches[0];
+    if (!bom.parts || !bom.parts.length) {
+      errors.push({
+        vin, batch: rec.batch || '—',
+        reason: 'BOM has no parts'
+      });
+      continue;
+    }
+
+    /* --- Build XML + write to disk --- */
+    const xmlStr   = buildXMLForVin(rec, bom);
+    const fileName = sanitizeFileName(`${seq}-${vin}`) + '.xml';
+
+    try {
+      const fh = await _exportFolderHandle.getFileHandle(fileName, { create: true });
+      const w  = await fh.createWritable();
+      await w.write(xmlStr);
+      await w.close();
+      successCount++;
+    } catch (e) {
+      console.error(e);
+      errors.push({
+        vin, batch: rec.batch || '—',
+        reason: `Write failed: ${e.message || e}`
+      });
+    }
+
+    /* --- Throttled progress update --- */
+    if (i % 5 === 0 || i === total - 1) {
+      fill.style.width = (((i + 1) / total) * 100).toFixed(1) + '%';
+      label.textContent = `Exporting ${i + 1} / ${total} — ${fileName}`;
+      await yieldToUI();
+    }
+  }
+
+  /* ---- Wrap-up ---- */
+  fill.style.width = '100%';
+  label.textContent =
+    `Done — ${successCount} processed correctly, ${errors.length} with error${errors.length === 1 ? '' : 's'}.`;
+
+  /* ---- Error log ---- */
+  if (errors.length) {
+    const rows = errors.map(er => `
+      <div class="xml-err-row">
+        <span class="xml-err-vin">${escapeHtml(er.vin)}</span>
+        <span class="xml-err-batch">${escapeHtml(er.batch)}</span>
+        <span>${escapeHtml(er.reason)}</span>
+      </div>`).join('');
+
+    errBox.innerHTML = `
+      <div class="xml-err-title">
+        <span>⚠ ${errors.length} error${errors.length === 1 ? '' : 's'}</span>
+        <button type="button" id="xmlErrClose" title="Dismiss">✕</button>
+      </div>
+      <div class="xml-err-rows">
+        <div class="xml-err-row" style="font-weight:600;color:#7f1d1d;">
+          <span>VIN</span><span>Batch</span><span>Reason</span>
+        </div>
+        ${rows}
+      </div>`;
+    errBox.classList.remove('hidden');
+    $('#xmlErrClose').addEventListener('click', () => {
+      errBox.classList.add('hidden');
+      errBox.innerHTML = '';
+    });
+  }
+
+  /* ---- Final alert ---- */
+  alert(
+    `XML export complete.\n` +
+    `${successCount} processed correctly, ${errors.length} ended with error.\n` +
+    (errors.length ? 'Please check the error log for details.' : '')
+  );
+
+  setTimeout(() => wrap.classList.add('hidden'), 3000);
+}
+/* =========================================================
    BIND — Production tab UI
    ========================================================= */
 function bindProduction() {
@@ -3707,7 +3946,9 @@ function bindProduction() {
   /* --- Exports --- */
   $('#prodBatchExport').addEventListener('click', exportProductionBatches);
   $('#prodVinExport').addEventListener('click', exportProductionVins);
-
+  /* --- XML Export --- */
+  $('#exportFolderPick').addEventListener('click', pickExportFolder);
+  $('#prodXmlExport').addEventListener('click', exportProductionXml);
   /* --- Capacity chart selectors --- */
   $('#prodChartGranularity').addEventListener('change', renderProductionChart);
   $('#prodChartStage').addEventListener('change',       renderProductionChart);
