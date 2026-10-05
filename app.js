@@ -4761,5 +4761,347 @@ function bindProduction() {
     if (STATE.production.loaded) renderProductionChart();
   });
 }
+/* =========================================================
+   PLAN vs EXECUTION — Comparison
+   ========================================================= */
 
+/* Earliest ISO timestamp for a milestone across a list of VIN records. */
+function earliestMilestone(vins, key) {
+  let min = null;
+  if (!vins || !vins.length) return null;
+  for (const r of vins) {
+    const t = r[key];
+    if (!t) continue;
+    if (min === null || t < min) min = t;
+  }
+  return min;
+}
+
+/* Best-effort date parsing for both Date objects and ISO strings. */
+function toDateAny(v) {
+  if (!v) return null;
+  const d = (v instanceof Date) ? v : new Date(v);
+  return isNaN(d) ? null : d;
+}
+
+/* Build the comparison rows once; reused by render + export. */
+function buildComparisonRows() {
+  const invMap = new Map();
+  for (const b of STATE.batches) invMap.set(b.batch, b);
+
+  const prodMap = new Map();
+  for (const [id, pb] of STATE.production.batches) {
+    if (!id || id.startsWith('(no batch)')) continue;      // skip orphan VINs
+    prodMap.set(id, pb);
+  }
+
+  const ids = new Set([...invMap.keys(), ...prodMap.keys()]);
+  const rows = [];
+
+  for (const id of ids) {
+    const inv  = invMap.get(id);
+    const prod = prodMap.get(id);
+
+    /* ---- Plan (Inventory & Stock) ---- */
+    const planQty        = inv ? (inv.qty || 0) : 0;
+    const planModel      = inv?.model       || '';
+    const planColor      = inv?.color       || '';
+    const planColorCode  = inv?.colorCode   || '';
+    const planLine       = inv?._line       || '';
+    const planStage      = inv?._stage      || '';
+    const planTrimIn     = inv?.trimIn      || null;
+    const planArrival    = inv?.arrival     || null;
+    const planDecanting  = inv?.decanting   || null;
+
+    /* ---- Execution (Production Monitoring) ---- */
+    const actualVins   = prod ? prod.vins.length : 0;
+    const actualModel  = prod ? dominantField(prod.vins, 'description') : '';
+    const actualColor  = prod ? dominantField(prod.vins, 'color')       : '';
+    const actualLine   = prod ? dominantLine(prod) : '';
+
+    const actualDev      = prod ? earliestMilestone(prod.vins, 'devanning')   : null;
+    const actualTrim     = prod ? earliestMilestone(prod.vins, 'trimIn')      : null;
+    const actualOff      = prod ? earliestMilestone(prod.vins, 'offLine')     : null;
+    const actualBuyOff   = prod ? earliestMilestone(prod.vins, 'buyOff')      : null;
+    const actualCin      = prod ? earliestMilestone(prod.vins, 'compoundIn')  : null;
+    const actualCot      = prod ? earliestMilestone(prod.vins, 'compoundOut') : null;
+
+    const actualComplete = prod ? (prod.counts.compoundOut || 0) : 0;
+    const progressPct    = actualVins ? Math.round(actualComplete / actualVins * 100) : 0;
+
+    /* ---- Variance computations ---- */
+    const qtyVariance   = actualVins - planQty;
+
+    let trimDeltaDays = null;
+    const pTrim = toDateAny(planTrimIn);
+    const aTrim = toDateAny(actualTrim);
+    if (pTrim && aTrim) {
+      const ms = aTrim.getTime() - pTrim.getTime();
+      trimDeltaDays = Math.round(ms / 86400000);
+    }
+
+    /* ---- Status ---- */
+    let status, statusKey;
+    if (inv && prod) {
+      if (qtyVariance === 0) { status = 'MATCHED'; statusKey = 'matched'; }
+      else                   { status = 'QTY VARIANCE'; statusKey = 'variance'; }
+    } else if (inv) {
+      status = 'PLAN ONLY'; statusKey = 'planOnly';
+    } else {
+      status = 'EXEC ONLY'; statusKey = 'execOnly';
+    }
+
+    rows.push({
+      id, inv, prod,
+      planQty, planModel, planColor, planColorCode, planLine, planStage,
+      planTrimIn, planArrival, planDecanting,
+      actualVins, actualModel, actualColor, actualLine,
+      actualDev, actualTrim, actualOff, actualBuyOff, actualCin, actualCot,
+      progressPct, qtyVariance, trimDeltaDays,
+      status, statusKey
+    });
+  }
+
+  return rows;
+}
+
+/* Recompute the summary cards. */
+function renderCompStats(rows) {
+  const el = $('#compStats');
+  if (!el) return;
+
+  if (!STATE.batches.length && !STATE.production.batches.size) {
+    el.innerHTML = '<div class="hint" style="margin:0">Load a batch/shipment file and a production tracking file to see the comparison.</div>';
+    return;
+  }
+
+  const planBatches  = rows.filter(r => r.inv).length;
+  const execBatches  = rows.filter(r => r.prod).length;
+  const matched      = rows.filter(r => r.statusKey === 'matched').length;
+  const variance     = rows.filter(r => r.statusKey === 'variance').length;
+  const planOnly     = rows.filter(r => r.statusKey === 'planOnly').length;
+  const execOnly     = rows.filter(r => r.statusKey === 'execOnly').length;
+  const totalPlan    = rows.reduce((s, r) => s + r.planQty, 0);
+  const totalActual  = rows.reduce((s, r) => s + r.actualVins, 0);
+  const totalDelta   = totalActual - totalPlan;
+
+  const deltaClass = totalDelta === 0 ? 'comp-delta-ok'
+                   : totalDelta > 0   ? 'comp-delta-pos'
+                   : 'comp-delta-neg';
+
+  el.innerHTML = `
+    <div class="stat">
+      <div class="label">Batches in plan</div>
+      <div class="value">${fmt(planBatches)}</div>
+      <div class="sub"><b>${fmt(totalPlan)}</b> vehicles planned</div>
+    </div>
+    <div class="stat">
+      <div class="label">Batches in execution</div>
+      <div class="value">${fmt(execBatches)}</div>
+      <div class="sub"><b>${fmt(totalActual)}</b> VINs tracked</div>
+    </div>
+    <div class="stat">
+      <div class="label">Volume delta</div>
+      <div class="value ${deltaClass}">${totalDelta >= 0 ? '+' : ''}${fmt(totalDelta)}</div>
+      <div class="sub">exec − plan</div>
+    </div>
+    <div class="stat">
+      <div class="label">Matched</div>
+      <div class="value" style="color:var(--ok)">${fmt(matched)}</div>
+      <div class="sub">plan = execution</div>
+    </div>
+    <div class="stat">
+      <div class="label">Qty variance</div>
+      <div class="value" style="color:${variance ? 'var(--warn)' : 'inherit'}">${fmt(variance)}</div>
+      <div class="sub">plan ≠ execution</div>
+    </div>
+    <div class="stat">
+      <div class="label">Plan only</div>
+      <div class="value" style="color:${planOnly ? '#1e40af' : 'inherit'}">${fmt(planOnly)}</div>
+      <div class="sub">no production yet</div>
+    </div>
+    <div class="stat">
+      <div class="label">Exec only</div>
+      <div class="value" style="color:${execOnly ? '#6b21a8' : 'inherit'}">${fmt(execOnly)}</div>
+      <div class="sub">no plan on file</div>
+    </div>
+  `;
+}
+
+/* Main renderer. */
+function renderComparison() {
+  const tbl = $('#compTable');
+  if (!tbl) return;
+
+  const rows = buildComparisonRows();
+  renderCompStats(rows);
+
+  const search = ($('#compSearch')?.value || '').trim().toLowerCase();
+  const statusFilter = $('#compStatus')?.value || 'all';
+
+  let filtered = rows;
+
+  /* Status filter */
+  if (statusFilter === 'matched')     filtered = filtered.filter(r => r.statusKey === 'matched');
+  else if (statusFilter === 'qtyVariance') filtered = filtered.filter(r => r.statusKey === 'variance');
+  else if (statusFilter === 'planOnly')    filtered = filtered.filter(r => r.statusKey === 'planOnly');
+  else if (statusFilter === 'execOnly')    filtered = filtered.filter(r => r.statusKey === 'execOnly');
+  else if (statusFilter === 'issues')      filtered = filtered.filter(r => r.statusKey !== 'matched');
+
+  /* Search */
+  if (search) {
+    filtered = filtered.filter(r =>
+      `${r.id} ${r.planModel} ${r.planColor} ${r.planLine} ${r.actualModel} ${r.actualColor} ${r.actualLine}`
+        .toLowerCase().includes(search));
+  }
+
+  /* Sort by batch ID */
+  filtered.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+  if (!rows.length) {
+    tbl.innerHTML = `<thead><tr><th>Load a batch/shipment file and a production tracking file to see the comparison</th></tr></thead>`;
+    return;
+  }
+  if (!filtered.length) {
+    tbl.innerHTML = `<thead><tr><th>No batches match the current filters</th></tr></thead>`;
+    return;
+  }
+
+  const head = `
+    <thead><tr>
+      <th>Batch</th>
+      <th>Status</th>
+      <th>Line</th>
+      <th>Model</th>
+      <th>Colour</th>
+      <th class="num">Plan Qty</th>
+      <th class="num">Actual VINs</th>
+      <th class="num">Δ</th>
+      <th class="num">Progress</th>
+      <th>Plan Stage</th>
+      <th>Plan Trim-in</th>
+      <th>Actual Trim-in</th>
+      <th class="num">Trim Δ (d)</th>
+    </tr></thead>`;
+
+  const body = filtered.map(r => {
+    /* Line column: prefer Plan, flag if the two disagree */
+    const line = r.planLine || r.actualLine || '—';
+    const lineConflict = r.planLine && r.actualLine && r.planLine !== r.actualLine;
+    const lineCell = lineConflict
+      ? `<span style="color:var(--danger);font-weight:600" title="Plan sheet says ${escapeHtml(r.planLine)}, execution says ${escapeHtml(r.actualLine)}">${escapeHtml(line)} ⚠</span>`
+      : escapeHtml(line);
+
+    /* Model: plan if present, else exec */
+    const model = r.planModel || r.actualModel || '—';
+
+    /* Colour: prefer plan, badge the code */
+    const color     = r.planColor     || r.actualColor     || '—';
+    const colorCode = r.planColorCode || '';
+    const colorCell = colorCode
+      ? `<span class="color-code" style="${colorBadgeStyle(colorCode)}">${escapeHtml(colorCode)}</span> ${escapeHtml(color)}`
+      : escapeHtml(color);
+
+    /* Delta cell */
+    const dv = r.qtyVariance;
+    const deltaClass = dv === 0 ? 'comp-delta-ok'
+                     : dv > 0   ? 'comp-delta-pos'
+                     : 'comp-delta-neg';
+    const deltaCell = dv === 0 ? '<span class="comp-delta-ok">0</span>'
+                    : `<span class="${deltaClass}">${dv > 0 ? '+' : ''}${fmt(dv)}</span>`;
+
+    /* Trim-in deltas */
+    const tdv = r.trimDeltaDays;
+    const trimDeltaCell = (tdv === null)
+      ? '—'
+      : tdv === 0
+        ? '<span class="comp-delta-ok">0</span>'
+        : `<span class="${tdv > 0 ? 'comp-delta-neg' : 'comp-delta-pos'}">${tdv > 0 ? '+' : ''}${tdv}</span>`;
+
+    /* Stage label */
+    const stageLabel = r.planStage
+      ? (STATE.config.stages[r.planStage]?.label || r.planStage)
+      : '—';
+
+    const rowClass = r.statusKey === 'matched' ? '' : 'comp-row-issues';
+
+    return `
+      <tr class="${rowClass}" data-batch="${escapeHtml(r.id)}">
+        <td class="mono">${escapeHtml(r.id)}</td>
+        <td><span class="comp-status ${r.statusKey}">${escapeHtml(r.status)}</span></td>
+        <td>${lineCell}</td>
+        <td>${escapeHtml(model)}</td>
+        <td>${colorCell}</td>
+        <td class="num">${fmt(r.planQty)}</td>
+        <td class="num">${fmt(r.actualVins)}</td>
+        <td class="num">${deltaCell}</td>
+        <td class="num">${r.prod ? r.progressPct + '%' : '—'}</td>
+        <td>${escapeHtml(stageLabel)}</td>
+        <td>${r.planTrimIn ? fmtDate(r.planTrimIn) : '—'}</td>
+        <td>${r.actualTrim ? fmtDate(new Date(r.actualTrim)) : '—'}</td>
+        <td class="num">${trimDeltaCell}</td>
+      </tr>`;
+  }).join('');
+
+  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+/* Excel export of the comparison table. */
+function exportComparison() {
+  const rows = buildComparisonRows()
+    .slice()
+    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+  if (!rows.length) {
+    alert('Nothing to export.');
+    return;
+  }
+
+  const aoa = [[
+    'Batch', 'Status', 'Line', 'Model', 'Colour', 'Colour Code',
+    'Plan Qty', 'Actual VINs', 'Δ Qty', 'Progress %',
+    'Plan Stage',
+    'Plan Trim-in', 'Actual Trim-in', 'Trim Δ (days)',
+    'Plan Arrival', 'Plan Decanting',
+    'Actual 005 De-vanning', 'Actual 020 Trim-in', 'Actual 030 Off-line OK',
+    'Actual Buy-off OK', 'Actual Compound Gate-in', 'Actual Compound Gate-out OK'
+  ]];
+
+  for (const r of rows) {
+    aoa.push([
+      r.id, r.status, r.planLine || r.actualLine,
+      r.planModel || r.actualModel, r.planColor || r.actualColor, r.planColorCode,
+      r.planQty, r.actualVins, r.qtyVariance,
+      r.prod ? r.progressPct : '',
+      r.planStage,
+      r.planTrimIn ? fmtDate(r.planTrimIn) : '',
+      r.actualTrim ? fmtDate(new Date(r.actualTrim)) : '',
+      r.trimDeltaDays === null ? '' : r.trimDeltaDays,
+      r.planArrival   ? fmtDate(r.planArrival)   : '',
+      r.planDecanting ? fmtDate(r.planDecanting) : '',
+      r.actualDev    ? fmtDate(new Date(r.actualDev))    : '',
+      r.actualTrim   ? fmtDate(new Date(r.actualTrim))   : '',
+      r.actualOff    ? fmtDate(new Date(r.actualOff))    : '',
+      r.actualBuyOff ? fmtDate(new Date(r.actualBuyOff)) : '',
+      r.actualCin    ? fmtDate(new Date(r.actualCin))    : '',
+      r.actualCot    ? fmtDate(new Date(r.actualCot))    : ''
+    ]);
+  }
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Plan vs Execution');
+  downloadWorkbook(wb, `Plan_vs_Execution_${dateStamp()}.xlsx`);
+}
+
+/* Bind comparison tab UI. */
+function bindComparison() {
+  $('#compSearch')?.addEventListener('input', renderComparison);
+  $('#compStatus')?.addEventListener('change', renderComparison);
+  $('#compClear')?.addEventListener('click', () => {
+    const s = $('#compSearch'); if (s) s.value = '';
+    const st = $('#compStatus'); if (st) st.value = 'all';
+    renderComparison();
+  });
+  $('#compExport')?.addEventListener('click', exportComparison);
+}
 window.MRP = STATE;
