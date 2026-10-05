@@ -2756,6 +2756,9 @@ function setsEqual(a, b) {
 const PROD_SPEC_COLLAPSED  = new Set();
 const PROD_COLOR_COLLAPSED = new Set();
 const PROD_LINE_COLLAPSED = new Set();
+/* Inventory batch tree — collapse state (persists across re-renders) */
+const BATCH_MODEL_COLLAPSED = new Set();
+const BATCH_COLOR_COLLAPSED = new Set();
 
 function lineOfSequence(seq) {
   if (!seq) return '—';
