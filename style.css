@@ -1272,7 +1272,43 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   font-weight: 600;
   color: #7f1d1d;
 }
-
+/* =========================================================
+   Inventory — batch hierarchy (Model → Colour → Batch)
+   ========================================================= */
+.batch-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+.batch-tree .prod-batch-inner-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  border: 1px solid #eef2f7;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.batch-tree .prod-batch-inner-table th {
+  background: #f8fafc;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #334155;
+  text-align: left;
+  border-bottom: 1px solid #eef2f7;
+  white-space: nowrap;
+  position: relative;
+  padding-right: 22px;
+}
+.batch-tree .prod-batch-inner-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+.batch-tree .prod-batch-inner-table tr:last-child > td { border-bottom: 0; }
+.batch-tree .prod-batch-inner-table td.num,
+.batch-tree .prod-batch-inner-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* =========================================================
    Responsive
    ========================================================= */
