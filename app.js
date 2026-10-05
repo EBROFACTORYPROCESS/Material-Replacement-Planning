@@ -293,6 +293,81 @@ async function fileToRows(file) {
   const ws  = wb.Sheets[wb.SheetNames[0]];
   return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
 }
+/* Return every sheet of a workbook as { name, rows }.
+   CSV files yield one pseudo-sheet named '(csv)'. */
+async function fileToSheetRows(file) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.csv') || name.endsWith('.tsv')) {
+    const text = await readFileAsText(file);
+    return [{ name: '(csv)', rows: parseCSV(text) }];
+  }
+  const buf = await readFileAsArrayBuffer(file);
+  const wb  = XLSX.read(buf, { type: 'array', cellDates: true });
+  return wb.SheetNames.map(sn => ({
+    name: sn,
+    rows: XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' })
+  }));
+}
+
+/* Backwards-compat single-sheet reader (BOM folder loader + scrap file). */
+async function fileToRows(file) {
+  const sheets = await fileToSheetRows(file);
+  return sheets[0] ? sheets[0].rows : [];
+}
+
+/* Modal prompt. Resolves with an array of selected { name, rows }
+   or null if the user cancelled. */
+function promptSheetSelection(sheets, fileName) {
+  return new Promise(resolve => {
+    const modal = $('#sheetPickerModal');
+    if (!modal) { resolve(sheets); return; }          // graceful fallback
+
+    $('#sheetPickerFile').textContent = fileName;
+    const list = $('#sheetPickerList');
+    list.innerHTML = sheets.map((s, i) => `
+      <label class="sheet-pick-item">
+        <input type="checkbox" data-i="${i}" checked />
+        <span class="sheet-name">${escapeHtml(s.name)}</span>
+        <span class="sheet-dims">${s.rows.length} row${s.rows.length === 1 ? '' : 's'}</span>
+      </label>`).join('');
+
+    const cleanup = () => {
+      modal.classList.add('hidden');
+      document.body.style.overflow = '';
+      $('#sheetPickerConfirm').onclick = null;
+      $('#sheetPickerClose').onclick   = null;
+      $('#sheetPickerAll').onclick     = null;
+      $('#sheetPickerNone').onclick    = null;
+      modal.onclick = null;
+    };
+
+    $('#sheetPickerAll').onclick  = () => list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = true);
+    $('#sheetPickerNone').onclick = () => list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false);
+
+    $('#sheetPickerConfirm').onclick = () => {
+      const picked = [];
+      list.querySelectorAll('input[type=checkbox]:checked').forEach(cb => {
+        picked.push(sheets[+cb.dataset.i]);
+      });
+      if (!picked.length) { alert('Please select at least one sheet.'); return; }
+      cleanup();
+      resolve(picked);
+    };
+
+    $('#sheetPickerClose').onclick = () => { cleanup(); resolve(null); };
+    modal.onclick = e => { if (e.target === modal) { cleanup(); resolve(null); } };
+
+    document.addEventListener('keydown', function esc(ev) {
+      if (ev.key === 'Escape') {
+        document.removeEventListener('keydown', esc);
+        cleanup(); resolve(null);
+      }
+    });
+
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  });
+}
 function parseCSV(text) {
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
   const rows = []; let row = [], field = '', inQ = false;
@@ -477,15 +552,31 @@ function bindFolderFallback() {
 async function handleBomFiles(files) {
   for (const f of files) {
     try {
-      const rows = await fileToRows(f);
-      const parsedList = parseBOM(rows, f.name);
-      if (!parsedList.length) { alert(`No parts found in ${f.name}`); continue; }
-      for (const parsed of parsedList) {
-        const key = bomKeyOf(parsed);
-        const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
-        if (existing >= 0) STATE.boms.splice(existing, 1);
-        assignBomId(parsed);
-        STATE.boms.push(parsed);
+      const sheets = await fileToSheetRows(f);
+
+      let sheetsToProcess;
+      if (sheets.length === 1) {
+        sheetsToProcess = sheets;
+      } else {
+        const picked = await promptSheetSelection(sheets, f.name);
+        if (!picked) continue;                           // user cancelled this file
+        sheetsToProcess = picked;
+      }
+
+      for (const sheet of sheetsToProcess) {
+        const label = sheets.length === 1 ? f.name : `${f.name} :: ${sheet.name}`;
+        const parsedList = parseBOM(sheet.rows, label);
+        if (!parsedList.length) {
+          alert(`No parts found in ${label}`);
+          continue;
+        }
+        for (const parsed of parsedList) {
+          const key = bomKeyOf(parsed);
+          const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
+          if (existing >= 0) STATE.boms.splice(existing, 1);
+          assignBomId(parsed);
+          STATE.boms.push(parsed);
+        }
       }
     } catch (e) {
       console.error(e);
@@ -497,7 +588,6 @@ async function handleBomFiles(files) {
   renderBatchTable(); renderBatchStats();
   computeInventory(); renderInventoryTable(); renderPlanning();
 }
-
 function parseBOM(rows, filename) {
   if (!rows || !rows.length) throw new Error('Empty file');
 
@@ -1040,8 +1130,18 @@ async function handleBatchFiles(files) {
   const f = files[0];
   if (!f) return;
   try {
-    const rows = await fileToRows(f);
-    STATE.batches = parseBatches(rows);
+    const sheets = await fileToSheetRows(f);
+
+    let combinedRows;
+    if (sheets.length === 1) {
+      combinedRows = sheets[0].rows;
+    } else {
+      const picked = await promptSheetSelection(sheets, f.name);
+      if (!picked) return;                              // user cancelled
+      combinedRows = picked.flatMap(s => s.rows);
+    }
+
+    STATE.batches = parseBatches(combinedRows);
     STATE.batchView = { sorts: {}, filters: {} };
     classifyBatches();
     renderBatchStats();
