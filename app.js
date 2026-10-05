@@ -1271,57 +1271,97 @@ async function handleBatchFiles(files) {
 
 function parseBatches(rows) {
   if (!rows.length) return [];
-    const header = rows[0].map(h =>
+
+  /* ============ LINE A — header normalisation ============ */
+  /* Was: const header = rows[0].map(h => String(h||'').trim().toLowerCase());
+     Now: strips nbsp + zero-width space before lowercasing. */
+  const header = rows[0].map(h =>
     String(h || '')
-      .replace(/\u00a0/g, ' ')   // nbsp → regular space
-      .replace(/\u200b/g, '')    // zero-width space
+      .replace(/\u00a0/g, ' ')
+      .replace(/\u200b/g, '')
       .trim()
       .toLowerCase()
   );
-  const idx = names => {
+
+  /* ============ LINE B — idx() now accepts an exclude list ============ */
+  /* Was: const idx = names => { … }
+     Now: skip already-claimed indices so 'colour code' can't be
+     mistaken for the plain 'colour' field. */
+  const idx = (names, exclude = []) => {
+    const isExcluded = i => exclude.includes(i);
     for (const n of names) {
-      const i = header.findIndex(h => h === n.toLowerCase());
+      const i = header.findIndex((h, j) => !isExcluded(j) && h === n.toLowerCase());
       if (i >= 0) return i;
     }
     for (const n of names) {
-      const i = header.findIndex(h => h.includes(n.toLowerCase()));
+      const i = header.findIndex((h, j) => !isExcluded(j) && h.includes(n.toLowerCase()));
       if (i >= 0) return i;
     }
     return -1;
   };
+
+  /* ============ LINE C — column map ============ */
+  /* 1. Resolve colorCode FIRST so we can exclude it from the color lookup.
+     2. Add 'colour code' and 'colour' as English-variant hints.
+     3. Resolve production date (some files use 'Production' as a date column;
+        others as a 'DONE' flag). We look for either a dedicated date column
+        OR reuse trimIn when Production is date-shaped. */
+  const colorCodeIdx = idx(['color code', 'colour code']);
+
   const c = {
-    batch:      idx(['batch number','batch']),
-    model:      idx(['modelo','model']),
-    color:      idx(['color']),
-    qty:        idx(['cantidad','quantity','qty']),
-    trimIn:     idx(['trim in date']),
-    ship:       idx(['name of ship','ship']),
+    batch:      idx(['batch number', 'batch']),
+    model:      idx(['modelo', 'model']),
+    color:      idx(['color', 'colour','Colour code'], colorCodeIdx >= 0 ? [colorCodeIdx] : []),
+    qty:        idx(['cantidad', 'quantity', 'qty']),
+    trimIn:     idx(['trim in date','Production Date']),
+    ship:       idx(['name of ship', 'ship']),
     week:       idx(['week']),
     decanting:  idx(['decanting date']),
-    arrival:    idx(['arrival date','arrival']),
-    production: idx(['production']),
-    colorCode:  idx(['color code']),
+    arrival:    idx(['arrival date', 'arrival']),
+    production: idx(['production']),           // still captured; may be text OR date
+    colorCode:  colorCodeIdx,
     carroceria: idx(['batch carroceria']),
     mwo:        idx(['mwo'])
   };
+
+  /* ============ LINE D — per-row build ============ */
   const out = [];
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || !r.length) continue;
+
     const model = String(r[c.model] || '').trim();
     const batch = String(r[c.batch] || '').trim();
     if (!model && !batch) continue;
-    const qty = c.qty >= 0 ? Number(String(r[c.qty]).replace(/[^0-9.\-]/g,'')) : 0;
+
+    const qtyRaw = c.qty >= 0 ? String(r[c.qty]).replace(/[^0-9.\-]/g, '') : '';
+    const qty    = Number(qtyRaw);
+
+    /* Raw values first */
+    const trimInRaw     = c.trimIn     >= 0 ? r[c.trimIn]     : '';
+    const productionRaw = c.production >= 0 ? r[c.production] : '';
+
+    /* Trim-in date: try the TRIM IN DATE column first, then fall back to
+       the Production column if it holds a date. */
+    let trimIn = parseDate(trimInRaw);
+    if (!trimIn) trimIn = parseDate(productionRaw);   // Production date = Trim-in date
+
+    /* Production text flag: keep whatever non-date value was in the cell
+       (e.g. "DONE"). If it was a date, blank it so the UI doesn't show a
+       duplicate date in the "Production" column. */
+    let productionText = String(productionRaw || '').trim();
+    if (parseDate(productionText)) productionText = 'DONE';   // date-shaped → treat as done
+
     out.push({
       batch, model,
       color:      String(r[c.color] || '').trim(),
       qty:        isNaN(qty) ? 0 : qty,
-      trimIn:     parseDate(r[c.trimIn]),
+      trimIn,
       ship:       String(r[c.ship] || '').trim(),
       week:       r[c.week],
       decanting:  parseDate(r[c.decanting]),
       arrival:    parseDate(r[c.arrival]),
-      production: String(r[c.production] || '').trim(),
+      production: productionText,
       colorCode:  String(r[c.colorCode] || '').trim(),
       carroceria: String(r[c.carroceria] || '').trim(),
       mwo:        String(r[c.mwo] || '').trim(),
@@ -1331,7 +1371,6 @@ function parseBatches(rows) {
   }
   return out;
 }
-
 function parseDate(v) {
   if (v == null || v === '') return null;
   if (v instanceof Date) return isNaN(v) ? null : v;
