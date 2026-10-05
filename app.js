@@ -2876,13 +2876,15 @@ function displayVin(rec) {
   if (!rec || !rec.code) return '';
   return cleanVin(rec.code);
 }
-/* Most-frequent value of a field across a set of VIN records.
-   Used to derive a batch's dominant model / colour. */
+/* Most-frequent non-empty value of a field across a set of VIN records.
+   Empty / whitespace-only values are skipped, so a batch inherits a colour
+   (or model, or colour code) as soon as any VIN carries one. */
 function dominantField(vins, field) {
   if (!vins || !vins.length) return '';
   const counts = {};
   for (const v of vins) {
-    const val = v[field] || '';
+    const val = String(v[field] || '').trim();
+    if (!val) continue;                                  // ← skip empties
     counts[val] = (counts[val] || 0) + 1;
   }
   let best = '', bestN = 0;
@@ -2890,6 +2892,33 @@ function dominantField(vins, field) {
     if (n > bestN) { best = k; bestN = n; }
   }
   return best;
+}
+/* True when the batch's VINs disagree on a field:
+   two or more distinct non-empty values exist. */
+function hasFieldConflict(vins, field) {
+  if (!vins || !vins.length) return false;
+  const seen = new Set();
+  for (const v of vins) {
+    const val = String(v[field] || '').trim();
+    if (!val) continue;
+    seen.add(val);
+    if (seen.size > 1) return true;
+  }
+  return false;
+}
+
+/* True when the batch's VINs disagree on their production line.
+   '—' is ignored (VINs without a sequence don't vote). */
+function hasLineConflict(batch) {
+  if (!batch || !batch.vins || !batch.vins.length) return false;
+  const seen = new Set();
+  for (const r of batch.vins) {
+    const l = lineOfSequence(r.sequence);
+    if (l === '—') continue;
+    seen.add(l);
+    if (seen.size > 1) return true;
+  }
+  return false;
 }
 /* Most-frequent production line across a batch's VINs.
    Ignores the '—' placeholder (VINs with no sequence yet) so a batch is
@@ -3790,8 +3819,15 @@ function renderProductionBatchTable() {
   /* --- 2. Enrich with period counts + dominant line/model/colour --- */
   const enriched = [];
   for (const b of batches) {
-    const periodVins = b.vins.filter(recordMatchesFilters);   // ← was recordInPeriod
+    const periodVins = b.vins.filter(recordMatchesFilters);
     if (!periodVins.length) continue;
+
+    /* Conflict flags — computed across the FULL batch, not just period VINs,
+       so a hidden inconsistency is never masked by the current filter. */
+    const colorConflict = hasFieldConflict(b.vins, 'color')
+                       || hasFieldConflict(b.vins, 'colorCode');
+    const lineConflict  = hasLineConflict(b);
+
     enriched.push({
       id:           b.id,
       allVins:      b.vins,
@@ -3801,7 +3837,9 @@ function renderProductionBatchTable() {
       line:      dominantLine(b),
       model:     dominantField(b.vins, 'description') || '(no model)',
       color:     dominantField(b.vins, 'color')       || '(no colour)',
-      colorCode: dominantField(b.vins, 'colorCode')   || ''
+      colorCode: dominantField(b.vins, 'colorCode')   || '',
+      colorConflict,
+      lineConflict
     });
   }
   batches = enriched;
@@ -3947,7 +3985,15 @@ function renderProductionBatchTable() {
           else
             status = '<span class="pill warn">IN PROGRESS</span>';
 
-          html += `<tr class="prod-batch-row ${isOpen ? 'row-open' : ''}" data-batch="${escapeHtml(b.id)}">
+          const rowWarn = (b.colorConflict || b.lineConflict) ? ' row-warning' : '';
+          const warnTitle = [
+            b.colorConflict ? 'Colour mismatch across VINs in this batch.' : '',
+            b.lineConflict  ? 'Production-line mismatch across VINs in this batch.' : ''
+          ].filter(Boolean).join(' ');
+
+          html += `<tr class="prod-batch-row ${isOpen ? 'row-open' : ''}${rowWarn}"
+                       data-batch="${escapeHtml(b.id)}"
+                       ${warnTitle ? `title="${escapeHtml(warnTitle)}"` : ''}>
             <td class="prod-batch-toggle-cell">
               <button class="btn tiny prod-batch-toggle" data-batch="${escapeHtml(b.id)}"
                       title="${isOpen ? 'Hide VIN details' : 'Show VIN details'}">
