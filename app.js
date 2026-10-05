@@ -1284,37 +1284,6 @@ async function handleBatchFiles(files) {
   }
 }
 
-function parseBatches(rows) {
-  if (!rows.length) return [];
-
-  /* ============ LINE A — header normalisation ============ */
-  /* Was: const header = rows[0].map(h => String(h||'').trim().toLowerCase());
-     Now: strips nbsp + zero-width space before lowercasing. */
-  const header = rows[0].map(h =>
-    String(h || '')
-      .replace(/\u00a0/g, ' ')
-      .replace(/\u200b/g, '')
-      .trim()
-      .toLowerCase()
-  );
-   /* Extract production line + planning year from sheet names or filenames.
-   Accepts "Production Order M1 - 2026", "M0 - 2025", "A0-2024", etc.
-   Prefers the "Production Order XXX - YYYY" pattern. */
-function parseLineMeta(...names) {
-  /* Pass 1 — most specific form: Production Order <code> - <yyyy> */
-  for (const nm of names) {
-    if (!nm) continue;
-    const m = String(nm).match(/Production\s+Order\s+([A-Z][0-9])\s*-\s*(\d{4})/i);
-    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
-  }
-  /* Pass 2 — relaxed form anywhere in the string */
-  for (const nm of names) {
-    if (!nm) continue;
-    const m = String(nm).match(/\b([A-Z][0-9])\s*-\s*(\d{4})\b/i);
-    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
-  }
-  return { line: '', planYear: '' };
-}
 /* Extract production line + planning year from sheet names or filenames.
    Accepts "Production Order M1 - 2026", "M0 - 2025", "A0-2024", etc.
    Prefers the "Production Order XXX - YYYY" pattern. */
@@ -1333,10 +1302,21 @@ function parseLineMeta(...names) {
   }
   return { line: '', planYear: '' };
 }
+
+function parseBatches(rows) {
+  if (!rows.length) return [];
+
+  /* ============ LINE A — header normalisation ============ */
+  /* Was: const header = rows[0].map(h => String(h||'').trim().toLowerCase());
+     Now: strips nbsp + zero-width space before lowercasing. */
+  const header = rows[0].map(h =>
+    String(h || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\u200b/g, '')
+      .trim()
+      .toLowerCase()
+  );
   /* ============ LINE B — idx() now accepts an exclude list ============ */
-  /* Was: const idx = names => { … }
-     Now: skip already-claimed indices so 'colour code' can't be
-     mistaken for the plain 'colour' field. */
   const idx = (names, exclude = []) => {
     const isExcluded = i => exclude.includes(i);
     for (const n of names) {
@@ -2522,7 +2502,7 @@ function renderConversionTable() {
 
 function saveConversionTable() {
   savePersistedOverrides();
-  ();
+  renderBatchTable(); 
   renderBatchStats();
   computeInventory();
   renderInventoryTable();
