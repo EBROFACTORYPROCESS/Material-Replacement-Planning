@@ -2870,12 +2870,16 @@ function dominantField(vins, field) {
   }
   return best;
 }
-/* Most-frequent production line across a batch's VINs. */
+/* Most-frequent production line across a batch's VINs.
+   Ignores the '—' placeholder (VINs with no sequence yet) so a batch is
+   always tagged with the line its known VINs actually rolled out from.
+   Falls back to '—' only when no VIN in the batch has a resolvable line. */
 function dominantLine(batch) {
   if (!batch || !batch.vins || !batch.vins.length) return '—';
   const counts = {};
   for (const r of batch.vins) {
     const l = lineOfSequence(r.sequence);
+    if (l === '—') continue;                          // skip unknown lines
     counts[l] = (counts[l] || 0) + 1;
   }
   let best = '—', bestN = 0;
