@@ -282,16 +282,97 @@ function readFileAsText(file) {
     r.readAsText(file);
   });
 }
-async function fileToRows(file) {
+/* Return every sheet of a workbook as { name, rows }.
+   CSV files yield one pseudo-sheet named '(csv)'. */
+async function fileToSheetRows(file) {
   const name = file.name.toLowerCase();
-  if (name.endsWith('.csv')) {
+  if (name.endsWith('.csv') || name.endsWith('.tsv')) {
     const text = await readFileAsText(file);
-    return parseCSV(text);
+    return [{ name: '(csv)', rows: parseCSV(text) }];
   }
   const buf = await readFileAsArrayBuffer(file);
   const wb  = XLSX.read(buf, { type: 'array', cellDates: true });
-  const ws  = wb.Sheets[wb.SheetNames[0]];
-  return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+  return wb.SheetNames.map(sn => ({
+    name: sn,
+    rows: XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' })
+  }));
+}
+
+/* Backwards-compat single-sheet reader (BOM folder loader + scrap file). */
+async function fileToRows(file) {
+  const sheets = await fileToSheetRows(file);
+  return sheets[0] ? sheets[0].rows : [];
+}
+
+/* Heuristic: does this sheet look like a batch sheet?
+   Requires a batch-ish column AND at least one data column. */
+function sheetLooksLikeBatch(rows) {
+  if (!rows || !rows.length) return false;
+  const header = (rows[0] || []).map(h => String(h || '').trim().toLowerCase());
+  const has = names => names.some(n => header.some(h => h === n || h.includes(n)));
+  return has(['batch'])
+      && has(['model', 'modelo', 'color', 'cantidad', 'quantity', 'qty',
+              'arrival', 'decanting', 'trim in', 'production', 'ship']);
+}
+
+/* Modal prompt. Resolves with an array of selected { name, rows }
+   or null if the user cancelled. */
+function promptSheetSelection(sheets, fileName) {
+  return new Promise(resolve => {
+    const modal = $('#sheetPickerModal');
+    if (!modal) { resolve(sheets); return; }          // graceful fallback
+
+    $('#sheetPickerFile').textContent = fileName;
+    const list = $('#sheetPickerList');
+    list.innerHTML = sheets.map((s, i) => {
+      const looksOk = sheetLooksLikeBatch(s.rows);
+      return `
+      <label class="sheet-pick-item">
+        <input type="checkbox" data-i="${i}" ${looksOk ? 'checked' : ''} />
+        <span class="sheet-name">
+          ${escapeHtml(s.name)}
+          ${looksOk ? '' : '<small class="sheet-badge">not batch-shaped</small>'}
+        </span>
+        <span class="sheet-dims">${s.rows.length} row${s.rows.length === 1 ? '' : 's'}</span>
+      </label>`;
+    }).join('');
+
+    const cleanup = () => {
+      modal.classList.add('hidden');
+      document.body.style.overflow = '';
+      $('#sheetPickerConfirm').onclick = null;
+      $('#sheetPickerClose').onclick   = null;
+      $('#sheetPickerAll').onclick     = null;
+      $('#sheetPickerNone').onclick    = null;
+      modal.onclick = null;
+    };
+
+    $('#sheetPickerAll').onclick  = () => list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = true);
+    $('#sheetPickerNone').onclick = () => list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false);
+
+    $('#sheetPickerConfirm').onclick = () => {
+      const picked = [];
+      list.querySelectorAll('input[type=checkbox]:checked').forEach(cb => {
+        picked.push(sheets[+cb.dataset.i]);
+      });
+      if (!picked.length) { alert('Please select at least one sheet.'); return; }
+      cleanup();
+      resolve(picked);
+    };
+
+    $('#sheetPickerClose').onclick = () => { cleanup(); resolve(null); };
+    modal.onclick = e => { if (e.target === modal) { cleanup(); resolve(null); } };
+
+    document.addEventListener('keydown', function esc(ev) {
+      if (ev.key === 'Escape') {
+        document.removeEventListener('keydown', esc);
+        cleanup(); resolve(null);
+      }
+    });
+
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  });
 }
 /* Return every sheet of a workbook as { name, rows }.
    CSV files yield one pseudo-sheet named '(csv)'. */
@@ -559,7 +640,7 @@ async function handleBomFiles(files) {
         sheetsToProcess = sheets;
       } else {
         const picked = await promptSheetSelection(sheets, f.name);
-        if (!picked) continue;                           // user cancelled this file
+        if (!picked) continue;                             // user cancelled this file
         sheetsToProcess = picked;
       }
 
@@ -1132,16 +1213,40 @@ async function handleBatchFiles(files) {
   try {
     const sheets = await fileToSheetRows(f);
 
-    let combinedRows;
+    let sheetsToProcess;
     if (sheets.length === 1) {
-      combinedRows = sheets[0].rows;
+      sheetsToProcess = sheets;
     } else {
       const picked = await promptSheetSelection(sheets, f.name);
-      if (!picked) return;                              // user cancelled
-      combinedRows = picked.flatMap(s => s.rows);
+      if (!picked) return;                                // user cancelled
+      sheetsToProcess = picked;
     }
 
-    STATE.batches = parseBatches(combinedRows);
+    /* Parse each sheet with its own header row, then merge batch objects. */
+    const allBatches = [];
+    const sheetsReport = [];
+    for (const sheet of sheetsToProcess) {
+      const parsed = parseBatches(sheet.rows);
+      sheetsReport.push({ name: sheet.name, count: parsed.length });
+      if (parsed.length) allBatches.push(...parsed);
+    }
+
+    if (!allBatches.length) {
+      alert(
+        'No valid batch rows found in the selected sheet(s).\n' +
+        'Each sheet needs a header with at least a "Batch" column and one of\n' +
+        'Model / Color / Quantity / Arrival / Decanting / Trim-in / Production.'
+      );
+      return;
+    }
+
+    /* Deduplicate by batch number (first occurrence wins). */
+    const seen = new Map();
+    for (const b of allBatches) {
+      if (!seen.has(b.batch)) seen.set(b.batch, b);
+    }
+    STATE.batches = Array.from(seen.values());
+
     STATE.batchView = { sorts: {}, filters: {} };
     classifyBatches();
     renderBatchStats();
@@ -1149,6 +1254,15 @@ async function handleBatchFiles(files) {
     computeInventory();
     renderInventoryTable();
     renderPlanning();
+
+    /* Non-blocking summary of what came from where. */
+    if (sheetsReport.length > 1) {
+      console.info(
+        'Batch file loaded — sheets processed:\n' +
+        sheetsReport.map(s => `  • ${s.name}: ${s.count} batch${s.count === 1 ? '' : 'es'}`).join('\n') +
+        `\nTotal unique batches: ${STATE.batches.length}`
+      );
+    }
   } catch (e) {
     console.error(e);
     alert(`Failed to parse batch file: ${e.message}`);
@@ -1157,7 +1271,13 @@ async function handleBatchFiles(files) {
 
 function parseBatches(rows) {
   if (!rows.length) return [];
-  const header = rows[0].map(h => String(h||'').trim().toLowerCase());
+    const header = rows[0].map(h =>
+    String(h || '')
+      .replace(/\u00a0/g, ' ')   // nbsp → regular space
+      .replace(/\u200b/g, '')    // zero-width space
+      .trim()
+      .toLowerCase()
+  );
   const idx = names => {
     for (const n of names) {
       const i = header.findIndex(h => h === n.toLowerCase());
