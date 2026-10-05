@@ -1422,6 +1422,22 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 }
 .line-chip .lc-count { color: var(--muted); font-variant-numeric: tabular-nums; }
 .line-chip.active .lc-count { color: rgba(255,255,255,.85); }
+
+/* =========================================================
+   Production — batch inconsistency warning
+   ========================================================= */
+.prod-batch-row.row-warning > td {
+  background: #fef2f2;
+}
+.prod-batch-row.row-warning > td:first-child {
+  box-shadow: inset 3px 0 0 0 var(--danger);
+}
+.prod-batch-row.row-warning:hover > td {
+  background: #fee2e2;
+}
+.prod-batch-row.row-warning .prod-batch-toggle {
+  border-color: #fecaca;
+}
 /* =========================================================
    Responsive
    ========================================================= */
