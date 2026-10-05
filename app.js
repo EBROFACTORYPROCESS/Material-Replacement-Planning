@@ -3067,7 +3067,16 @@ async function parseProductionCSV(text, onProgress) {
 function computeProductionBatches(records) {
   const map = new Map();
   for (const r of records) {
-    const id = r.batch || '(no batch)';
+
+    /* Orphan VINs (no sales batch) are grouped by their own line + model +
+       colour so they can't be pooled with unrelated VINs from other lines,
+       models or colours into one synthetic "(no batch)" pile. */
+    const id = r.batch
+      ? r.batch
+      : `(no batch) · ${lineOfSequence(r.sequence)}`
+      + ` · ${r.description || '(no model)'}`
+      + ` · ${r.color       || '(no colour)'}`;
+
     let b = map.get(id);
     if (!b) { b = { id, vins: [], counts: {} }; map.set(id, b); }
     b.vins.push(r);
@@ -3077,7 +3086,6 @@ function computeProductionBatches(records) {
   }
   return map;
 }
-
 /* ---- File ingestion ---- */
 async function handleProductionFiles(files) {
   const f = files[0];
