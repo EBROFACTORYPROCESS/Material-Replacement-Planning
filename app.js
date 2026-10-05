@@ -1248,6 +1248,9 @@ async function handleBatchFiles(files) {
     STATE.batches = Array.from(seen.values());
 
     STATE.batchView = { sorts: {}, filters: {} };
+    
+    BATCH_MODEL_COLLAPSED.clear();
+    BATCH_COLOR_COLLAPSED.clear(); 
     classifyBatches();
     renderBatchStats();
     renderBatchTable();
@@ -1805,6 +1808,25 @@ function renderBatchTable() {
     });
   });
 }
+function batchExpandAll() {
+  BATCH_MODEL_COLLAPSED.clear();
+  BATCH_COLOR_COLLAPSED.clear();
+  if (STATE.batches.length) renderBatchTable();
+}
+
+function batchCollapseAll() {
+  if (!STATE.batches.length) return;
+  const models = new Set();
+  for (const b of STATE.batches) {
+    const model = b.model || '(no model)';
+    const color = b.color || '(no colour)';
+    const cc    = b.colorCode || '';
+    models.add(model);
+    BATCH_COLOR_COLLAPSED.add(model + '||' + color + '||' + cc);
+  }
+  for (const m of models) BATCH_MODEL_COLLAPSED.add(m);
+  renderBatchTable();
+}
 /* =========================================================
    FILTER POPUP
    ========================================================= */
@@ -2191,7 +2213,10 @@ function bindButtons() {
     $('#batchSearch').value = '';
     renderBatchTable();
   });
-
+  /* NEW — expand / collapse the batch tree */
+  $('#batchExpandAll')?.addEventListener('click', batchExpandAll);
+  $('#batchCollapseAll')?.addEventListener('click', batchCollapseAll);
+   
   $('#autoClassify').addEventListener('click', () => {
     classifyBatches(); renderBatchStats(); renderBatchTable();
     computeInventory(); renderInventoryTable(); renderPlanning();
