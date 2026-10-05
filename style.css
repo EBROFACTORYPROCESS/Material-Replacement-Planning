@@ -1468,6 +1468,11 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 .comp-delta-pos { color: var(--ok); font-weight: 600; }
 .comp-delta-neg { color: var(--danger); font-weight: 600; }
 .comp-delta-ok  { color: var(--muted); }
+
+#compTable .prod-batch-inner-table td .comp-status {
+  font-size: 10.5px;
+  padding: 1px 7px;
+}
 /* =========================================================
    Responsive
    ========================================================= */
