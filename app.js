@@ -4871,7 +4871,7 @@ function buildComparisonRows() {
       id, inv, prod,
       planQty, planModel, planColor, planColorCode, planLine, planStage,
       planTrimIn, planArrival, planDecanting,
-      actualVins, actualModel, actualColor, actualLine,
+      actualVins, actualModel, actualColor, actualColorCode, actualLine,
       actualDev, actualTrim, actualOff, actualBuyOff, actualCin, actualCot,
       progressPct, qtyVariance, trimDeltaDays,
       status, statusKey
@@ -4986,7 +4986,7 @@ function renderComparison() {
   const lineOf  = r => r.planLine  || r.actualLine  || '(no line)';
   const modelOf = r => r.planModel || r.actualModel || '(no model)';
   const colorOf = r => r.planColor || r.actualColor || '(no colour)';
-  const codeOf  = r => r.planColorCode || '';
+  const codeOf  = r => r.planColorCode || r.actualColorCode || '';
 
   /* --- Build Line → Model → Colour → rows --- */
   const lineMap = new Map();
