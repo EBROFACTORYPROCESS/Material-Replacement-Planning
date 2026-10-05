@@ -1227,6 +1227,14 @@ async function handleBatchFiles(files) {
     const sheetsReport = [];
     for (const sheet of sheetsToProcess) {
       const parsed = parseBatches(sheet.rows);
+      /* Prefer the sheet's own name; fall back to the filename. */
+      const meta = parseLineMeta(sheet.name, f.name);
+
+      for (const b of parsed) {
+        b._line      = meta.line     || b._line      || '';
+        b._planYear  = meta.planYear || b._planYear  || '';
+        b._sheetName = sheet.name;
+      }       
       sheetsReport.push({ name: sheet.name, count: parsed.length });
       if (parsed.length) allBatches.push(...parsed);
     }
@@ -1251,6 +1259,7 @@ async function handleBatchFiles(files) {
     
     BATCH_MODEL_COLLAPSED.clear();
     BATCH_COLOR_COLLAPSED.clear(); 
+    BATCH_LINE_COLLAPSED.clear(); 
     classifyBatches();
     renderBatchStats();
     renderBatchTable();
@@ -1285,7 +1294,42 @@ function parseBatches(rows) {
       .trim()
       .toLowerCase()
   );
-
+   /* Extract production line + planning year from sheet names or filenames.
+   Accepts "Production Order M1 - 2026", "M0 - 2025", "A0-2024", etc.
+   Prefers the "Production Order XXX - YYYY" pattern. */
+function parseLineMeta(...names) {
+  /* Pass 1 — most specific form: Production Order <code> - <yyyy> */
+  for (const nm of names) {
+    if (!nm) continue;
+    const m = String(nm).match(/Production\s+Order\s+([A-Z][0-9])\s*-\s*(\d{4})/i);
+    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
+  }
+  /* Pass 2 — relaxed form anywhere in the string */
+  for (const nm of names) {
+    if (!nm) continue;
+    const m = String(nm).match(/\b([A-Z][0-9])\s*-\s*(\d{4})\b/i);
+    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
+  }
+  return { line: '', planYear: '' };
+}
+/* Extract production line + planning year from sheet names or filenames.
+   Accepts "Production Order M1 - 2026", "M0 - 2025", "A0-2024", etc.
+   Prefers the "Production Order XXX - YYYY" pattern. */
+function parseLineMeta(...names) {
+  /* Pass 1 — most specific form: Production Order <code> - <yyyy> */
+  for (const nm of names) {
+    if (!nm) continue;
+    const m = String(nm).match(/Production\s+Order\s+([A-Z][0-9])\s*-\s*(\d{4})/i);
+    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
+  }
+  /* Pass 2 — relaxed form anywhere in the string */
+  for (const nm of names) {
+    if (!nm) continue;
+    const m = String(nm).match(/\b([A-Z][0-9])\s*-\s*(\d{4})\b/i);
+    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
+  }
+  return { line: '', planYear: '' };
+}
   /* ============ LINE B — idx() now accepts an exclude list ============ */
   /* Was: const idx = names => { … }
      Now: skip already-claimed indices so 'colour code' can't be
@@ -2808,6 +2852,7 @@ const PROD_LINE_COLLAPSED = new Set();
 /* Inventory batch tree — collapse state (persists across re-renders) */
 const BATCH_MODEL_COLLAPSED = new Set();
 const BATCH_COLOR_COLLAPSED = new Set();
+const BATCH_LINE_COLLAPSED = new Set();
 
 function lineOfSequence(seq) {
   if (!seq) return '—';
