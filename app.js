@@ -1561,6 +1561,43 @@ function getUniqueValues(colId) {
 function renderBatchStats() {
   const stages = STATE.config.stages;
   const agg = {};
+  /* ---- Line chips ---- */
+  const chips = $('#batchLineChips');
+  if (chips) {
+    const lineAgg = new Map();
+    for (const b of STATE.batches) {
+      const line = b._line || '(no line)';
+      if (!lineAgg.has(line)) lineAgg.set(line, { count: 0, qty: 0 });
+      const a = lineAgg.get(line);
+      a.count += 1;
+      a.qty   += (b.qty || 0);
+    }
+    const sortedLines = Array.from(lineAgg.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+    const activeLine = ($('#batchLineFilter')?.value || '');
+    const allActive  = !activeLine;
+
+    chips.innerHTML =
+      `<button class="line-chip ${allActive ? 'active' : ''}" data-line="">
+         <span class="lc-name">All</span>
+         <span class="lc-count">${fmt(STATE.batches.length)} batches · ${fmt(STATE.batches.reduce((s,b)=>s+(b.qty||0),0))} veh</span>
+       </button>` +
+      sortedLines.map(([l, a]) => `
+        <button class="line-chip ${activeLine === l ? 'active' : ''}" data-line="${escapeHtml(l)}">
+          <span class="lc-name">${escapeHtml(l)}</span>
+          <span class="lc-count">${fmt(a.count)} batches · ${fmt(a.qty)} veh</span>
+        </button>`).join('');
+
+    chips.querySelectorAll('.line-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const sel = $('#batchLineFilter');
+        if (sel) sel.value = btn.dataset.line || '';
+        renderBatchStats();
+        renderBatchTable();
+      });
+    });
+  }   
   for (const b of STATE.batches) {
     if (!agg[b._stage]) agg[b._stage] = { count: 0, qty: 0, byModel: {} };
     agg[b._stage].count += 1;
