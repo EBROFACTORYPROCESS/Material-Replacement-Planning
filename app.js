@@ -1658,13 +1658,24 @@ function renderBatchTable() {
       for (const { b, i } of rows) {
         const s = STATE.config.stages[b._stage] || { label: b._stage, color: '#9ca3af' };
 
-        const linkedKey = resolveBomKeyForBatch(b);
-        const linkedBom = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
-        const linkCell = linkedBom
-          ? `<span title="${escapeHtml(bomDisplayName(linkedBom))}">${escapeHtml(shorten(bomDisplayName(linkedBom),18))}</span>`
-          : (b.model
-              ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
-              : '—');
+        /* --- Linked BOM cell: button that opens the Display BOM modal --- */
+        const linkedKey  = resolveBomKeyForBatch(b);
+        const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
+
+        let linkCell;
+        if (linkedBom) {
+          const bomId    = linkedBom.bomId || '(unassigned)';
+          const fullName = bomDisplayName(linkedBom);
+          linkCell = `<button class="btn tiny" data-role="batch-bom-display"
+                              data-bomid="${escapeHtml(bomId)}"
+                              title="${escapeHtml(fullName)}">
+                        ${escapeHtml(bomId)}
+                      </button>`;
+        } else if (b.model) {
+          linkCell = `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`;
+        } else {
+          linkCell = '—';
+        }
 
         const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
         const unassignedFlag = isUnassignedNoDate
@@ -1706,7 +1717,7 @@ function renderBatchTable() {
 
   tree.innerHTML = html;
 
-  /* --- 7. Wire interactions (same as before, just scoped to #batchTable) --- */
+  /* --- 7. Wire interactions --- */
   tree.querySelectorAll('.filter-btn').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -1719,6 +1730,15 @@ function renderBatchTable() {
       const i = +e.target.dataset.i;
       STATE.batches[i]._warehouse = e.target.value || null;
       computeInventory(); renderInventoryTable(); renderPlanning();
+    });
+  });
+
+  /* Display BOM buttons inside the Linked BOM column */
+  tree.querySelectorAll('button[data-role=batch-bom-display]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      openBomDisplay(btn.dataset.bomid);
     });
   });
 }
