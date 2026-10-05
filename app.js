@@ -1254,6 +1254,9 @@ async function handleBatchFiles(files) {
       if (!seen.has(b.batch)) seen.set(b.batch, b);
     }
     STATE.batches = Array.from(seen.values());
+    const lineSel = $('#batchLineFilter');
+    if (lineSel) lineSel.value = '';
+    populateBatchLineFilter();
 
     STATE.batchView = { sorts: {}, filters: {} };
     
@@ -1630,6 +1633,7 @@ function renderBatchTable() {
   }
 
   const searchText = ($('#batchSearch').value || '').trim().toLowerCase();
+  const lineFilter = ($('#batchLineFilter')?.value || '').trim();
 
   /* --- 1. Column filters --- */
   let list = STATE.batches.map((b, i) => ({ b, i }));
@@ -1638,33 +1642,43 @@ function renderBatchTable() {
     list = list.filter(({ b }) => allowedSet.has(String(getBatchCellValue(b, colId))));
   }
 
-  /* --- 2. Text search --- */
+  /* --- 2. Line dropdown filter --- */
+  if (lineFilter) {
+    list = list.filter(({ b }) => (b._line || '(no line)') === lineFilter);
+  }
+
+  /* --- 3. Text search (now includes line) --- */
   if (searchText) {
     list = list.filter(({ b }) => {
-      const hay = `${b.batch} ${b.model} ${b.color} ${b.ship} ${b.production}`.toLowerCase();
+      const hay = `${b.batch} ${b.model} ${b.color} ${b._line || ''} ${b.ship} ${b.production}`.toLowerCase();
       return hay.includes(searchText);
     });
   }
 
-  /* --- 3. Group: model → colour → batches --- */
-  const modelMap = new Map();
+  /* --- 4. Group: line → model → colour → batches --- */
+  const lineMap = new Map();
   for (const item of list) {
     const b = item.b;
+    const line  = b._line || '(no line)';
     const model = b.model || '(no model)';
     const color = b.color || '(no colour)';
     const cc    = b.colorCode || '';
 
+    if (!lineMap.has(line)) lineMap.set(line, new Map());
+    const modelMap = lineMap.get(line);
+
     if (!modelMap.has(model)) modelMap.set(model, new Map());
     const colorMap = modelMap.get(model);
+
     const ckey = color + '||' + cc;
     if (!colorMap.has(ckey)) colorMap.set(ckey, { color, colorCode: cc, rows: [] });
     colorMap.get(ckey).rows.push(item);
   }
 
-  const sortedModels = Array.from(modelMap.entries())
+  const sortedLines = Array.from(lineMap.entries())
     .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-  /* --- 4. Sort helper (applied inside each colour group) --- */
+  /* --- 5. Sort helper --- */
   const sortCol = Object.keys(STATE.batchView.sorts)[0] || '';
   const sortDir = sortCol && STATE.batchView.sorts[sortCol] === 'desc' ? -1 : 1;
   const applySortToRows = (rows) => {
@@ -1682,127 +1696,164 @@ function renderBatchTable() {
     return out;
   };
 
-  /* --- 5. Visible columns --- */
+  /* --- 6. Visible columns --- */
   const visibleCols = BATCH_COLS.filter(c => c.id !== 'model' && c.id !== 'color');
 
-  /* --- 6. Render tree (respects collapse sets) --- */
+  /* --- 7. Render 4-level tree --- */
   let html = '';
-  for (const [model, colorMap] of sortedModels) {
-    const modelRows = Array.from(colorMap.values()).flatMap(c => c.rows);
-    const modelQty  = modelRows.reduce((s, it) => s + (it.b.qty || 0), 0);
-    const modelOpen = !BATCH_MODEL_COLLAPSED.has(model);      // ← NEW
+  for (const [line, modelMap] of sortedLines) {
+    /* Aggregate per line */
+    const lineRows = [];
+    for (const colorMap of modelMap.values())
+      for (const cg of colorMap.values())
+        lineRows.push(...cg.rows);
+    const lineQty       = lineRows.reduce((s, it) => s + (it.b.qty || 0), 0);
+    const lineModelCnt  = modelMap.size;
+    const lineYearSet   = new Set();
+    for (const it of lineRows) if (it.b._planYear) lineYearSet.add(it.b._planYear);
+    const lineYears     = Array.from(lineYearSet).sort().join(', ');
 
-    html += `<details class="prod-spec-group batch-model-group"
-                     data-model="${escapeHtml(model)}"
-                     ${modelOpen ? 'open' : ''}>
-      <summary class="prod-spec-header">
-        <span class="spec-name">${escapeHtml(model)}</span>
-        <span class="spec-count">
-          ${modelRows.length} batch${modelRows.length === 1 ? '' : 'es'} ·
-          ${colorMap.size} colour${colorMap.size === 1 ? '' : 's'} ·
-          ${fmt(modelQty)} vehicles
+    const lineOpen = !BATCH_LINE_COLLAPSED.has(line);
+
+    html += `<details class="prod-line-group batch-line-group"
+                     data-line="${escapeHtml(line)}"
+                     ${lineOpen ? 'open' : ''}>
+      <summary class="prod-line-header">
+        <span class="line-name">${escapeHtml(line)}</span>
+        <span class="line-count">
+          ${lineYears ? `<b>${escapeHtml(lineYears)}</b> · ` : ''}
+          ${lineModelCnt} model${lineModelCnt === 1 ? '' : 's'} ·
+          ${lineRows.length} batch${lineRows.length === 1 ? '' : 'es'} ·
+          ${fmt(lineQty)} vehicles
         </span>
       </summary>
-      <div class="prod-color-list">`;
+      <div class="prod-spec-list">`;
 
-    const sortedColors = Array.from(colorMap.entries())
+    const sortedModelEntries = Array.from(modelMap.entries())
       .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-    for (const [ckey, cg] of sortedColors) {
-      const colorQty  = cg.rows.reduce((s, it) => s + (it.b.qty || 0), 0);
-      const colorKey  = model + '||' + ckey;
-      const colorOpen = !BATCH_COLOR_COLLAPSED.has(colorKey);   // ← NEW
+    for (const [model, colorMap] of sortedModelEntries) {
+      const modelRows = Array.from(colorMap.values()).flatMap(c => c.rows);
+      const modelQty  = modelRows.reduce((s, it) => s + (it.b.qty || 0), 0);
+      const modelKey  = line + '||' + model;
+      const modelOpen = !BATCH_MODEL_COLLAPSED.has(modelKey);
 
-      html += `<details class="prod-color-group batch-color-group"
+      html += `<details class="prod-spec-group batch-model-group"
+                       data-line="${escapeHtml(line)}"
                        data-model="${escapeHtml(model)}"
-                       data-color="${escapeHtml(ckey)}"
-                       ${colorOpen ? 'open' : ''}>
-        <summary class="prod-color-header">
-          <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
-          <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
-          <span class="color-count">
-            ${cg.rows.length} batch${cg.rows.length === 1 ? '' : 'es'} ·
-            ${fmt(colorQty)} vehicles
+                       ${modelOpen ? 'open' : ''}>
+        <summary class="prod-spec-header">
+          <span class="spec-name">${escapeHtml(model)}</span>
+          <span class="spec-count">
+            ${modelRows.length} batch${modelRows.length === 1 ? '' : 'es'} ·
+            ${colorMap.size} colour${colorMap.size === 1 ? '' : 's'} ·
+            ${fmt(modelQty)} vehicles
           </span>
         </summary>
-        <div class="prod-batch-list">
-          <table class="prod-batch-inner-table">
-            <thead>
-              <tr>
-                ${visibleCols.map(col => {
-                  const cls = [
-                    'col-head',
-                    col.num ? 'num' : '',
-                    STATE.batchView.filters[col.id] ? 'filtered' : '',
-                    STATE.batchView.sorts[col.id]   ? 'sorted'   : ''
-                  ].filter(Boolean).join(' ');
-                  const mark = STATE.batchView.sorts[col.id] === 'asc' ? '▲'
-                             : STATE.batchView.sorts[col.id] === 'desc' ? '▼' : '';
-                  return `<th class="${cls}" data-col="${col.id}">
-                    ${escapeHtml(col.label)}${mark ? `<span class="sort-mark">${mark}</span>` : ''}
-                    <button class="filter-btn" data-col="${col.id}" title="Sort / filter">▾</button>
-                  </th>`;
-                }).join('')}
-              </tr>
-            </thead>
-            <tbody>`;
+        <div class="prod-color-list">`;
 
-      const rows = applySortToRows(cg.rows);
+      const sortedColorEntries = Array.from(colorMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-      for (const { b, i } of rows) {
-        const s = STATE.config.stages[b._stage] || { label: b._stage, color: '#9ca3af' };
+      for (const [ckey, cg] of sortedColorEntries) {
+        const colorQty  = cg.rows.reduce((s, it) => s + (it.b.qty || 0), 0);
+        const colorKey  = line + '||' + model + '||' + ckey;
+        const colorOpen = !BATCH_COLOR_COLLAPSED.has(colorKey);
 
-        const linkedKey  = resolveBomKeyForBatch(b);
-        const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
+        html += `<details class="prod-color-group batch-color-group"
+                         data-line="${escapeHtml(line)}"
+                         data-model="${escapeHtml(model)}"
+                         data-color="${escapeHtml(ckey)}"
+                         ${colorOpen ? 'open' : ''}>
+          <summary class="prod-color-header">
+            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
+            <span class="color-count">
+              ${cg.rows.length} batch${cg.rows.length === 1 ? '' : 'es'} ·
+              ${fmt(colorQty)} vehicles
+            </span>
+          </summary>
+          <div class="prod-batch-list">
+            <table class="prod-batch-inner-table">
+              <thead>
+                <tr>
+                  ${visibleCols.map(col => {
+                    const cls = [
+                      'col-head',
+                      col.num ? 'num' : '',
+                      STATE.batchView.filters[col.id] ? 'filtered' : '',
+                      STATE.batchView.sorts[col.id]   ? 'sorted'   : ''
+                    ].filter(Boolean).join(' ');
+                    const mark = STATE.batchView.sorts[col.id] === 'asc' ? '▲'
+                               : STATE.batchView.sorts[col.id] === 'desc' ? '▼' : '';
+                    return `<th class="${cls}" data-col="${col.id}">
+                      ${escapeHtml(col.label)}${mark ? `<span class="sort-mark">${mark}</span>` : ''}
+                      <button class="filter-btn" data-col="${col.id}" title="Sort / filter">▾</button>
+                    </th>`;
+                  }).join('')}
+                </tr>
+              </thead>
+              <tbody>`;
 
-        let linkCell;
-        if (linkedBom) {
-          const bomId    = linkedBom.bomId || '(unassigned)';
-          const fullName = bomDisplayName(linkedBom);
-          linkCell = `<button class="btn tiny" data-role="batch-bom-display"
-                              data-bomid="${escapeHtml(bomId)}"
-                              title="${escapeHtml(fullName)}">
-                        ${escapeHtml(bomId)}
-                      </button>`;
-        } else if (b.model) {
-          linkCell = `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`;
-        } else {
-          linkCell = '—';
+        const rows = applySortToRows(cg.rows);
+
+        for (const { b, i } of rows) {
+          const s = STATE.config.stages[b._stage] || { label: b._stage, color: '#9ca3af' };
+
+          const linkedKey  = resolveBomKeyForBatch(b);
+          const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
+
+          let linkCell;
+          if (linkedBom) {
+            const bomId    = linkedBom.bomId || '(unassigned)';
+            const fullName = bomDisplayName(linkedBom);
+            linkCell = `<button class="btn tiny" data-role="batch-bom-display"
+                                data-bomid="${escapeHtml(bomId)}"
+                                title="${escapeHtml(fullName)}">
+                          ${escapeHtml(bomId)}
+                        </button>`;
+          } else if (b.model) {
+            linkCell = `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`;
+          } else {
+            linkCell = '—';
+          }
+
+          const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
+          const unassignedFlag = isUnassignedNoDate
+            ? `<span class="pill warn" title="No Arrival Date — cannot be classified" style="margin-left:6px">⚠</span>`
+            : '';
+
+          const whLabel = b._warehouse
+            ? (STATE.config.warehouses.find(w => w.id === b._warehouse)?.name || b._warehouse)
+            : '—';
+
+          const cells = {
+            batch:      `<td>${escapeHtml(b.batch)}${unassignedFlag}</td>`,
+            qty:        `<td class="num">${fmt(b.qty)}</td>`,
+            ship:       `<td>${escapeHtml(b.ship)}</td>`,
+            arrival:    `<td>${b.arrival   ? b.arrival.toLocaleDateString()   : '—'}</td>`,
+            decanting:  `<td>${b.decanting ? b.decanting.toLocaleDateString() : '—'}</td>`,
+            trimIn:     `<td>${b.trimIn    ? b.trimIn.toLocaleDateString()    : '—'}</td>`,
+            production: `<td>${escapeHtml(b.production)}</td>`,
+            stage:      `<td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>`,
+            warehouse:  `<td>${b._stage === 'warehouse'
+                          ? `<select data-role="wh" data-i="${i}">
+                               <option value="">—</option>
+                               ${STATE.config.warehouses.map(w =>
+                                 `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`
+                               ).join('')}
+                             </select>`
+                          : escapeHtml(whLabel)}</td>`,
+            linkedBom:  `<td>${linkCell}</td>`
+          };
+
+          html += `<tr data-i="${i}">${visibleCols.map(c => cells[c.id] || '<td></td>').join('')}</tr>`;
         }
 
-        const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
-        const unassignedFlag = isUnassignedNoDate
-          ? `<span class="pill warn" title="No Arrival Date — cannot be classified" style="margin-left:6px">⚠</span>`
-          : '';
-
-        const whLabel = b._warehouse
-          ? (STATE.config.warehouses.find(w => w.id === b._warehouse)?.name || b._warehouse)
-          : '—';
-
-        const cells = {
-          batch:      `<td>${escapeHtml(b.batch)}${unassignedFlag}</td>`,
-          qty:        `<td class="num">${fmt(b.qty)}</td>`,
-          ship:       `<td>${escapeHtml(b.ship)}</td>`,
-          arrival:    `<td>${b.arrival   ? b.arrival.toLocaleDateString()   : '—'}</td>`,
-          decanting:  `<td>${b.decanting ? b.decanting.toLocaleDateString() : '—'}</td>`,
-          trimIn:     `<td>${b.trimIn    ? b.trimIn.toLocaleDateString()    : '—'}</td>`,
-          production: `<td>${escapeHtml(b.production)}</td>`,
-          stage:      `<td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>`,
-          warehouse:  `<td>${b._stage === 'warehouse'
-                        ? `<select data-role="wh" data-i="${i}">
-                             <option value="">—</option>
-                             ${STATE.config.warehouses.map(w =>
-                               `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`
-                             ).join('')}
-                           </select>`
-                        : escapeHtml(whLabel)}</td>`,
-          linkedBom:  `<td>${linkCell}</td>`
-        };
-
-        html += `<tr data-i="${i}">${visibleCols.map(c => cells[c.id] || '<td></td>').join('')}</tr>`;
+        html += `</tbody></table></div></details>`;
       }
 
-      html += `</tbody></table></div></details>`;
+      html += `</div></details>`;
     }
 
     html += `</div></details>`;
@@ -1810,8 +1861,7 @@ function renderBatchTable() {
 
   tree.innerHTML = html;
 
-  /* --- 7. Wire interactions --- */
-
+  /* --- 8. Wire interactions --- */
   tree.querySelectorAll('.filter-btn').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -1835,10 +1885,18 @@ function renderBatchTable() {
     });
   });
 
-  /* --- 8. Persist collapse state --- */
+  /* --- 9. Persist collapse state --- */
+  tree.querySelectorAll('details.batch-line-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line;
+      if (d.open) BATCH_LINE_COLLAPSED.delete(key);
+      else        BATCH_LINE_COLLAPSED.add(key);
+    });
+  });
+
   tree.querySelectorAll('details.batch-model-group').forEach(d => {
     d.addEventListener('toggle', () => {
-      const key = d.dataset.model;
+      const key = d.dataset.line + '||' + d.dataset.model;
       if (d.open) BATCH_MODEL_COLLAPSED.delete(key);
       else        BATCH_MODEL_COLLAPSED.add(key);
     });
@@ -1846,29 +1904,32 @@ function renderBatchTable() {
 
   tree.querySelectorAll('details.batch-color-group').forEach(d => {
     d.addEventListener('toggle', () => {
-      const key = d.dataset.model + '||' + d.dataset.color;
+      const key = d.dataset.line + '||' + d.dataset.model + '||' + d.dataset.color;
       if (d.open) BATCH_COLOR_COLLAPSED.delete(key);
       else        BATCH_COLOR_COLLAPSED.add(key);
     });
   });
 }
 function batchExpandAll() {
+  BATCH_LINE_COLLAPSED.clear();
   BATCH_MODEL_COLLAPSED.clear();
   BATCH_COLOR_COLLAPSED.clear();
   if (STATE.batches.length) renderBatchTable();
 }
-
 function batchCollapseAll() {
   if (!STATE.batches.length) return;
-  const models = new Set();
+  const lines = new Set();
   for (const b of STATE.batches) {
-    const model = b.model || '(no model)';
-    const color = b.color || '(no colour)';
+    const line  = b._line  || '(no line)';
+    const model = b.model  || '(no model)';
+    const color = b.color  || '(no colour)';
     const cc    = b.colorCode || '';
-    models.add(model);
-    BATCH_COLOR_COLLAPSED.add(model + '||' + color + '||' + cc);
+
+    lines.add(line);
+    BATCH_MODEL_COLLAPSED.add(line + '||' + model);
+    BATCH_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + cc);
   }
-  for (const m of models) BATCH_MODEL_COLLAPSED.add(m);
+  for (const l of lines) BATCH_LINE_COLLAPSED.add(l);
   renderBatchTable();
 }
 /* =========================================================
@@ -2243,6 +2304,7 @@ function bindButtons() {
     const nowHidden = list.classList.toggle('hidden');
     btn.textContent = nowHidden ? '▸ Display batch list' : '▾ Hide batch list';
   });
+  $('#batchLineFilter')?.addEventListener('change', renderBatchTable);   
   $('#bomSearch').addEventListener('input', renderBomTable);
   $('#bomFilter').addEventListener('change', renderBomTable);
   $('#invSearch').addEventListener('input', renderInventoryTable);
@@ -2250,8 +2312,7 @@ function bindButtons() {
   $('#planOnlyShort').addEventListener('change', renderPlanning);
   $('#batchSearch').addEventListener('input', renderBatchTable);
   ['c_factoryFloor','c_edgeLine','c_inTransit','c_safety'].forEach(id =>
-    $('#'+id).addEventListener('change', renderPlanning));
-
+  $('#'+id).addEventListener('change', renderPlanning));
   $('#batchClearFilters').addEventListener('click', () => {
     STATE.batchView = { sorts: {}, filters: {} };
     $('#batchSearch').value = '';
@@ -2424,7 +2485,7 @@ function renderConversionTable() {
 
 function saveConversionTable() {
   savePersistedOverrides();
-  renderBatchTable();
+  ();
   renderBatchStats();
   computeInventory();
   renderInventoryTable();
@@ -4157,6 +4218,22 @@ function sanitizeFileName(name) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 180);
+}
+
+function populateBatchLineFilter() {
+  const sel = $('#batchLineFilter');
+  if (!sel) return;
+  const lines = new Set();
+  for (const b of STATE.batches) lines.add(b._line || '(no line)');
+  const sorted = Array.from(lines).sort();
+  const current = sel.value;
+  sel.innerHTML =
+    `<option value="">All lines (${STATE.batches.length} batches)</option>` +
+    sorted.map(l => {
+      const n = STATE.batches.filter(b => (b._line || '(no line)') === l).length;
+      return `<option value="${escapeHtml(l)}">${escapeHtml(l)} — ${n} batch${n === 1 ? '' : 'es'}</option>`;
+    }).join('');
+  sel.value = sorted.includes(current) ? current : '';
 }
 
 /* Build the XML string for one VIN, one <InventoryLine> per BOM part. */
