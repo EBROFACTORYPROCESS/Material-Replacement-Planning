@@ -1438,6 +1438,36 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 .prod-batch-row.row-warning .prod-batch-toggle {
   border-color: #fecaca;
 }
+
+/* =========================================================
+   Plan vs Execution — comparison table
+   ========================================================= */
+#compTable { font-size: 12px; }
+#compTable th,
+#compTable td { white-space: nowrap; }
+#compTable td.num,
+#compTable th.num { text-align: right; font-variant-numeric: tabular-nums; }
+#compTable td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+
+.comp-row-issues > td { background: #fff7ed; }
+.comp-row-issues:hover > td { background: #ffedd5; }
+
+.comp-status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.comp-status.matched     { background: #dcfce7; color: #166534; }
+.comp-status.variance    { background: #fef3c7; color: #92400e; }
+.comp-status.planOnly    { background: #dbeafe; color: #1e40af; }
+.comp-status.execOnly    { background: #e9d5ff; color: #6b21a8; }
+
+.comp-delta-pos { color: var(--ok); font-weight: 600; }
+.comp-delta-neg { color: var(--danger); font-weight: 600; }
+.comp-delta-ok  { color: var(--muted); }
 /* =========================================================
    Responsive
    ========================================================= */
