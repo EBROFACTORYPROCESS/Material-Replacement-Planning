@@ -1267,6 +1267,10 @@ async function handleBatchFiles(files) {
     BATCH_MODEL_COLLAPSED.clear();
     BATCH_COLOR_COLLAPSED.clear(); 
     BATCH_LINE_COLLAPSED.clear(); 
+    COMP_LINE_COLLAPSED.clear();
+    COMP_MODEL_COLLAPSED.clear();
+    COMP_COLOR_COLLAPSED.clear();
+     
     classifyBatches();
     renderBatchStats();
     renderBatchTable();
@@ -2989,6 +2993,10 @@ const PROD_LINE_COLLAPSED = new Set();
 const BATCH_MODEL_COLLAPSED = new Set();
 const BATCH_COLOR_COLLAPSED = new Set();
 const BATCH_LINE_COLLAPSED = new Set();
+/* Plan vs Execution tree — collapse state */
+const COMP_LINE_COLLAPSED  = new Set();
+const COMP_MODEL_COLLAPSED = new Set();
+const COMP_COLOR_COLLAPSED = new Set();
 
 function lineOfSequence(seq) {
   if (!seq) return '—';
@@ -3185,6 +3193,9 @@ async function handleProductionFiles(files) {
      PROD_LINE_COLLAPSED.clear();     // ← add
      PROD_SPEC_COLLAPSED.clear();
      PROD_COLOR_COLLAPSED.clear();
+     COMP_LINE_COLLAPSED.clear();
+     COMP_MODEL_COLLAPSED.clear();
+     COMP_COLOR_COLLAPSED.clear();
 
     /* --- Default monitoring period = entire file --- */
     const { min, max } = getFileDateBounds();
@@ -4937,122 +4948,300 @@ function refreshComparisonIfVisible() {
 }
 /* Main renderer. */
 function renderComparison() {
-  const tbl = $('#compTable');
-  if (!tbl) return;
+  const tree = $('#compTable');
+  if (!tree) return;
 
   const rows = buildComparisonRows();
   renderCompStats(rows);
 
-  const search = ($('#compSearch')?.value || '').trim().toLowerCase();
+  if (!rows.length) {
+    tree.innerHTML = '<div class="hint" style="margin:0">Load a batch/shipment file and a production tracking file to see the comparison.</div>';
+    return;
+  }
+
+  const search       = ($('#compSearch')?.value || '').trim().toLowerCase();
   const statusFilter = $('#compStatus')?.value || 'all';
 
+  /* --- Filter --- */
   let filtered = rows;
-
-  /* Status filter */
-  if (statusFilter === 'matched')     filtered = filtered.filter(r => r.statusKey === 'matched');
+  if (statusFilter === 'matched')          filtered = filtered.filter(r => r.statusKey === 'matched');
   else if (statusFilter === 'qtyVariance') filtered = filtered.filter(r => r.statusKey === 'variance');
   else if (statusFilter === 'planOnly')    filtered = filtered.filter(r => r.statusKey === 'planOnly');
   else if (statusFilter === 'execOnly')    filtered = filtered.filter(r => r.statusKey === 'execOnly');
   else if (statusFilter === 'issues')      filtered = filtered.filter(r => r.statusKey !== 'matched');
 
-  /* Search */
   if (search) {
     filtered = filtered.filter(r =>
       `${r.id} ${r.planModel} ${r.planColor} ${r.planLine} ${r.actualModel} ${r.actualColor} ${r.actualLine}`
         .toLowerCase().includes(search));
   }
 
-  /* Sort by batch ID */
-  filtered.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
-
-  if (!rows.length) {
-    tbl.innerHTML = `<thead><tr><th>Load a batch/shipment file and a production tracking file to see the comparison</th></tr></thead>`;
-    return;
-  }
   if (!filtered.length) {
-    tbl.innerHTML = `<thead><tr><th>No batches match the current filters</th></tr></thead>`;
+    tree.innerHTML = '<div class="hint" style="margin:8px 0 0">No batches match the current filters.</div>';
     return;
   }
 
-  const head = `
-    <thead><tr>
-      <th>Batch</th>
-      <th>Status</th>
-      <th>Line</th>
-      <th>Model</th>
-      <th>Colour</th>
-      <th class="num">Plan Qty</th>
-      <th class="num">Actual VINs</th>
-      <th class="num">Δ</th>
-      <th class="num">Progress</th>
-      <th>Plan Stage</th>
-      <th>Plan Trim-in</th>
-      <th>Actual Trim-in</th>
-      <th class="num">Trim Δ (d)</th>
-    </tr></thead>`;
+  /* --- Grouping keys: prefer Plan, fall back to Execution --- */
+  const lineOf  = r => r.planLine  || r.actualLine  || '(no line)';
+  const modelOf = r => r.planModel || r.actualModel || '(no model)';
+  const colorOf = r => r.planColor || r.actualColor || '(no colour)';
+  const codeOf  = r => r.planColorCode || '';
 
-  const body = filtered.map(r => {
-    /* Line column: prefer Plan, flag if the two disagree */
-    const line = r.planLine || r.actualLine || '—';
-    const lineConflict = r.planLine && r.actualLine && r.planLine !== r.actualLine;
-    const lineCell = lineConflict
-      ? `<span style="color:var(--danger);font-weight:600" title="Plan sheet says ${escapeHtml(r.planLine)}, execution says ${escapeHtml(r.actualLine)}">${escapeHtml(line)} ⚠</span>`
-      : escapeHtml(line);
+  /* --- Build Line → Model → Colour → rows --- */
+  const lineMap = new Map();
+  for (const r of filtered) {
+    const line = lineOf(r);
+    const model = modelOf(r);
+    const ckey = colorOf(r) + '||' + codeOf(r);
 
-    /* Model: plan if present, else exec */
-    const model = r.planModel || r.actualModel || '—';
+    if (!lineMap.has(line)) lineMap.set(line, new Map());
+    const modelMap = lineMap.get(line);
 
-    /* Colour: prefer plan, badge the code */
-    const color     = r.planColor     || r.actualColor     || '—';
-    const colorCode = r.planColorCode || '';
-    const colorCell = colorCode
-      ? `<span class="color-code" style="${colorBadgeStyle(colorCode)}">${escapeHtml(colorCode)}</span> ${escapeHtml(color)}`
-      : escapeHtml(color);
+    if (!modelMap.has(model)) modelMap.set(model, new Map());
+    const colorMap = modelMap.get(model);
 
-    /* Delta cell */
-    const dv = r.qtyVariance;
-    const deltaClass = dv === 0 ? 'comp-delta-ok'
-                     : dv > 0   ? 'comp-delta-pos'
-                     : 'comp-delta-neg';
-    const deltaCell = dv === 0 ? '<span class="comp-delta-ok">0</span>'
-                    : `<span class="${deltaClass}">${dv > 0 ? '+' : ''}${fmt(dv)}</span>`;
+    if (!colorMap.has(ckey)) {
+      colorMap.set(ckey, { color: colorOf(r), colorCode: codeOf(r), rows: [] });
+    }
+    colorMap.get(ckey).rows.push(r);
+  }
 
-    /* Trim-in deltas */
-    const tdv = r.trimDeltaDays;
-    const trimDeltaCell = (tdv === null)
-      ? '—'
-      : tdv === 0
-        ? '<span class="comp-delta-ok">0</span>'
-        : `<span class="${tdv > 0 ? 'comp-delta-neg' : 'comp-delta-pos'}">${tdv > 0 ? '+' : ''}${tdv}</span>`;
+  const sortedLines = Array.from(lineMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-    /* Stage label */
-    const stageLabel = r.planStage
-      ? (STATE.config.stages[r.planStage]?.label || r.planStage)
-      : '—';
+  /* --- Columns inside each colour group (line/model/colour promoted) --- */
+  const innerCols = [
+    { id: 'batch',     label: 'Batch',          align: '' },
+    { id: 'status',    label: 'Status',         align: '' },
+    { id: 'planQty',   label: 'Plan Qty',       align: 'num' },
+    { id: 'actualVins',label: 'Actual VINs',    align: 'num' },
+    { id: 'delta',     label: 'Δ',              align: 'num' },
+    { id: 'progress',  label: 'Progress',       align: 'num' },
+    { id: 'planStage', label: 'Plan Stage',     align: '' },
+    { id: 'planTrim',  label: 'Plan Trim-in',   align: '' },
+    { id: 'actualTrim',label: 'Actual Trim-in', align: '' },
+    { id: 'trimDelta', label: 'Trim Δ (d)',     align: 'num' }
+  ];
 
-    const rowClass = r.statusKey === 'matched' ? '' : 'comp-row-issues';
+  /* --- Render --- */
+  let html = '';
+  for (const [line, modelMap] of sortedLines) {
+    const lineRows = [];
+    for (const cm of modelMap.values())
+      for (const cg of cm.values())
+        lineRows.push(...cg.rows);
 
-    return `
-      <tr class="${rowClass}" data-batch="${escapeHtml(r.id)}">
-        <td class="mono">${escapeHtml(r.id)}</td>
-        <td><span class="comp-status ${r.statusKey}">${escapeHtml(r.status)}</span></td>
-        <td>${lineCell}</td>
-        <td>${escapeHtml(model)}</td>
-        <td>${colorCell}</td>
-        <td class="num">${fmt(r.planQty)}</td>
-        <td class="num">${fmt(r.actualVins)}</td>
-        <td class="num">${deltaCell}</td>
-        <td class="num">${r.prod ? r.progressPct + '%' : '—'}</td>
-        <td>${escapeHtml(stageLabel)}</td>
-        <td>${r.planTrimIn ? fmtDate(r.planTrimIn) : '—'}</td>
-        <td>${r.actualTrim ? fmtDate(new Date(r.actualTrim)) : '—'}</td>
-        <td class="num">${trimDeltaCell}</td>
-      </tr>`;
-  }).join('');
+    const lineQty    = lineRows.reduce((s, r) => s + r.planQty, 0);
+    const lineActual = lineRows.reduce((s, r) => s + r.actualVins, 0);
+    const lineDelta  = lineActual - lineQty;
+    const lineOpen   = !COMP_LINE_COLLAPSED.has(line);
 
-  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
+    /* Line-level conflict: any batch in this line whose plan line ≠ exec line */
+    const lineHasConflict = lineRows.some(r =>
+      r.planLine && r.actualLine && r.planLine !== r.actualLine);
+
+    html += `<details class="prod-line-group batch-line-group"
+                     data-line="${escapeHtml(line)}"
+                     ${lineOpen ? 'open' : ''}>
+      <summary class="prod-line-header">
+        <span class="line-name">${escapeHtml(line)}${lineHasConflict ? ' ⚠' : ''}</span>
+        <span class="line-count">
+          ${modelMap.size} model${modelMap.size === 1 ? '' : 's'} ·
+          ${lineRows.length} batch${lineRows.length === 1 ? '' : 'es'} ·
+          <b>${fmt(lineQty)}</b> planned ·
+          <b>${fmt(lineActual)}</b> actual ·
+          <span class="${lineDelta === 0 ? 'comp-delta-ok' : lineDelta > 0 ? 'comp-delta-pos' : 'comp-delta-neg'}">
+            ${lineDelta >= 0 ? '+' : ''}${fmt(lineDelta)} Δ
+          </span>
+        </span>
+      </summary>
+      <div class="prod-spec-list">`;
+
+    const sortedModelEntries = Array.from(modelMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+    for (const [model, colorMap] of sortedModelEntries) {
+      const modelRows = [];
+      for (const cg of colorMap.values()) modelRows.push(...cg.rows);
+
+      const modelQty    = modelRows.reduce((s, r) => s + r.planQty, 0);
+      const modelActual = modelRows.reduce((s, r) => s + r.actualVins, 0);
+      const modelDelta  = modelActual - modelQty;
+      const modelKey    = line + '||' + model;
+      const modelOpen   = !COMP_MODEL_COLLAPSED.has(modelKey);
+
+      html += `<details class="prod-spec-group batch-model-group"
+                       data-line="${escapeHtml(line)}"
+                       data-model="${escapeHtml(model)}"
+                       ${modelOpen ? 'open' : ''}>
+        <summary class="prod-spec-header">
+          <span class="spec-name">${escapeHtml(model)}</span>
+          <span class="spec-count">
+            ${modelRows.length} batch${modelRows.length === 1 ? '' : 'es'} ·
+            ${colorMap.size} colour${colorMap.size === 1 ? '' : 's'} ·
+            <b>${fmt(modelQty)}</b> planned ·
+            <b>${fmt(modelActual)}</b> actual ·
+            <span class="${modelDelta === 0 ? 'comp-delta-ok' : modelDelta > 0 ? 'comp-delta-pos' : 'comp-delta-neg'}">
+              ${modelDelta >= 0 ? '+' : ''}${fmt(modelDelta)} Δ
+            </span>
+          </span>
+        </summary>
+        <div class="prod-color-list">`;
+
+      const sortedColorEntries = Array.from(colorMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+      for (const [ckey, cg] of sortedColorEntries) {
+        const colorQty    = cg.rows.reduce((s, r) => s + r.planQty, 0);
+        const colorActual = cg.rows.reduce((s, r) => s + r.actualVins, 0);
+        const colorDelta  = colorActual - colorQty;
+        const colorKey    = line + '||' + model + '||' + ckey;
+        const colorOpen   = !COMP_COLOR_COLLAPSED.has(colorKey);
+
+        html += `<details class="prod-color-group batch-color-group"
+                         data-line="${escapeHtml(line)}"
+                         data-model="${escapeHtml(model)}"
+                         data-color="${escapeHtml(ckey)}"
+                         ${colorOpen ? 'open' : ''}>
+          <summary class="prod-color-header">
+            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
+            <span class="color-count">
+              ${cg.rows.length} batch${cg.rows.length === 1 ? '' : 'es'} ·
+              <b>${fmt(colorQty)}</b> planned ·
+              <b>${fmt(colorActual)}</b> actual ·
+              <span class="${colorDelta === 0 ? 'comp-delta-ok' : colorDelta > 0 ? 'comp-delta-pos' : 'comp-delta-neg'}">
+                ${colorDelta >= 0 ? '+' : ''}${fmt(colorDelta)} Δ
+              </span>
+            </span>
+          </summary>
+          <div class="prod-batch-list">
+            <table class="prod-batch-inner-table">
+              <thead>
+                <tr>
+                  ${innerCols.map(c =>
+                    `<th class="${c.align || ''}">${escapeHtml(c.label)}</th>`
+                  ).join('')}
+                </tr>
+              </thead>
+              <tbody>`;
+
+        const sortedRows = cg.rows.slice()
+          .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+        for (const r of sortedRows) {
+          /* Status pill */
+          const statusCell = `<span class="comp-status ${r.statusKey}">${escapeHtml(r.status)}</span>`;
+
+          /* Δ qty */
+          const dv = r.qtyVariance;
+          const deltaClass = dv === 0 ? 'comp-delta-ok'
+                           : dv > 0   ? 'comp-delta-pos'
+                           : 'comp-delta-neg';
+          const deltaCell = dv === 0
+            ? '<span class="comp-delta-ok">0</span>'
+            : `<span class="${deltaClass}">${dv > 0 ? '+' : ''}${fmt(dv)}</span>`;
+
+          /* Trim-in Δ (days) */
+          const tdv = r.trimDeltaDays;
+          const trimDeltaCell = (tdv === null)
+            ? '—'
+            : tdv === 0
+              ? '<span class="comp-delta-ok">0</span>'
+              : `<span class="${tdv > 0 ? 'comp-delta-neg' : 'comp-delta-pos'}">${tdv > 0 ? '+' : ''}${tdv}</span>`;
+
+          /* Plan stage label */
+          const stageLabel = r.planStage
+            ? (STATE.config.stages[r.planStage]?.label || r.planStage)
+            : '—';
+
+          /* Line-conflict flag (only when it happens inside a batch) */
+          const innerConflict = r.planLine && r.actualLine && r.planLine !== r.actualLine;
+          const rowClass = (r.statusKey !== 'matched' || innerConflict) ? 'comp-row-issues' : '';
+
+          const cells = {
+            batch:      `<td class="mono">${escapeHtml(r.id)}</td>`,
+            status:     `<td>${statusCell}</td>`,
+            planQty:    `<td class="num">${fmt(r.planQty)}</td>`,
+            actualVins: `<td class="num">${fmt(r.actualVins)}</td>`,
+            delta:      `<td class="num">${deltaCell}</td>`,
+            progress:   `<td class="num">${r.prod ? r.progressPct + '%' : '—'}</td>`,
+            planStage:  `<td>${escapeHtml(stageLabel)}</td>`,
+            planTrim:   `<td>${r.planTrimIn ? fmtDate(r.planTrimIn) : '—'}</td>`,
+            actualTrim: `<td>${r.actualTrim ? fmtDate(new Date(r.actualTrim)) : '—'}</td>`,
+            trimDelta:  `<td class="num">${trimDeltaCell}</td>`
+          };
+
+          html += `<tr class="${rowClass}" data-batch="${escapeHtml(r.id)}"
+                       ${innerConflict
+                         ? `title="Plan line ${escapeHtml(r.planLine)} ≠ execution line ${escapeHtml(r.actualLine)}"`
+                         : ''}>
+            ${innerCols.map(c => cells[c.id] || '<td></td>').join('')}
+          </tr>`;
+        }
+
+        html += `</tbody></table></div></details>`;
+      }
+
+      html += `</div></details>`;
+    }
+
+    html += `</div></details>`;
+  }
+
+  tree.innerHTML = html;
+
+  /* --- Persist collapse state --- */
+  tree.querySelectorAll('details.batch-line-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line;
+      if (d.open) COMP_LINE_COLLAPSED.delete(key);
+      else        COMP_LINE_COLLAPSED.add(key);
+    });
+  });
+  tree.querySelectorAll('details.batch-model-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line + '||' + d.dataset.model;
+      if (d.open) COMP_MODEL_COLLAPSED.delete(key);
+      else        COMP_MODEL_COLLAPSED.add(key);
+    });
+  });
+  tree.querySelectorAll('details.batch-color-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line + '||' + d.dataset.model + '||' + d.dataset.color;
+      if (d.open) COMP_COLOR_COLLAPSED.delete(key);
+      else        COMP_COLOR_COLLAPSED.add(key);
+    });
+  });
 }
 
+function compExpandAll() {
+  COMP_LINE_COLLAPSED.clear();
+  COMP_MODEL_COLLAPSED.clear();
+  COMP_COLOR_COLLAPSED.clear();
+  renderComparison();
+}
+
+function compCollapseAll() {
+  const rows = buildComparisonRows();
+  const lineSet  = new Set();
+  const modelSet = new Set();
+
+  for (const r of rows) {
+    const line  = r.planLine  || r.actualLine  || '(no line)';
+    const model = r.planModel || r.actualModel || '(no model)';
+    const color = r.planColor || r.actualColor || '(no colour)';
+    const ccode = r.planColorCode || '';
+
+    lineSet.add(line);
+    modelSet.add(line + '||' + model);
+    COMP_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + ccode);
+  }
+  for (const l of lineSet)  COMP_LINE_COLLAPSED.add(l);
+  for (const m of modelSet) COMP_MODEL_COLLAPSED.add(m);
+
+  renderComparison();
+}
 /* Excel export of the comparison table. */
 function exportComparison() {
   const rows = buildComparisonRows()
@@ -5104,6 +5293,8 @@ function exportComparison() {
 function bindComparison() {
   $('#compSearch')?.addEventListener('input', renderComparison);
   $('#compStatus')?.addEventListener('change', renderComparison);
+  $('#compExpandAll')?.addEventListener('click', compExpandAll);
+  $('#compCollapseAll')?.addEventListener('click', compCollapseAll);
   $('#compClear')?.addEventListener('click', () => {
     const s = $('#compSearch'); if (s) s.value = '';
     const st = $('#compStatus'); if (st) st.value = 'all';
