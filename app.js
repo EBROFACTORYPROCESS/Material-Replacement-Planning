@@ -173,7 +173,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   renderWarehouseEditor();
   renderWarehouseChecklist();
   renderScrapList();
-  $('#todayBadge').textContent = new Date().toLocaleDateString();
+  $('#todayBadge').textContent = fmtDate(new Date());
   $('#c_safety').value          = STATE.config.shortageDefaults.safetyFactor;
   $('#c_factoryFloor').checked  = STATE.config.shortageDefaults.includeFactoryFloor;
   $('#c_edgeLine').checked      = STATE.config.shortageDefaults.includeEdgeLine;
@@ -1512,7 +1512,7 @@ function getBatchCellLabel(b, colId) {
     return w ? w.name : v;
   }
   if (colId === 'arrival' || colId === 'decanting' || colId === 'trimIn') {
-    return v ? new Date(v + 'T00:00:00').toLocaleDateString() : '—';
+    return v ? fmtDate(new Date(v + 'T00:00:00')) : '—';
   }
   if (colId === 'linkedBom') {
     if (!v) return '—';
@@ -1848,9 +1848,9 @@ function renderBatchTable() {
             batch:      `<td>${escapeHtml(b.batch)}${unassignedFlag}</td>`,
             qty:        `<td class="num">${fmt(b.qty)}</td>`,
             ship:       `<td>${escapeHtml(b.ship)}</td>`,
-            arrival:    `<td>${b.arrival   ? b.arrival.toLocaleDateString()   : '—'}</td>`,
-            decanting:  `<td>${b.decanting ? b.decanting.toLocaleDateString() : '—'}</td>`,
-            trimIn:     `<td>${b.trimIn    ? b.trimIn.toLocaleDateString()    : '—'}</td>`,
+            arrival:    `<td>${b.arrival   ? fmtDate(b.arrival)   : '—'}</td>`,
+            decanting:  `<td>${b.decanting ? fmtDate(b.decanting) : '—'}</td>`,
+            trimIn:     `<td>${b.trimIn    ? fmtDate(b.trimIn)    : '—'}</td>`,
             production: `<td>${escapeHtml(b.production)}</td>`,
             stage:      `<td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>`,
             warehouse:  `<td>${b._stage === 'warehouse'
@@ -2204,7 +2204,7 @@ function renderScrapList() {
       <span>${escapeHtml(s.ubication || '—')}</span>
       <span class="num">−${fmt(s.qty)}</span>
       <span class="ts">${escapeHtml(s.note || '')}</span>
-      <span class="ts">${new Date(s.date).toLocaleString()}</span>
+      <span class="ts">${fmtDateTime(s.date)}</span>
       <button data-role="del" title="Delete">✕</button>
     </div>
   `).join('');
@@ -2806,6 +2806,27 @@ function escapeHtml(s) {
   })[c]);
 }
 function shorten(s, n) { s = String(s||''); return s.length > n ? s.slice(0, n-1) + '…' : s; }
+/* Locale-independent date formatters — DD/MM/YYYY. */
+function fmtDate(d) {
+  if (!d) return '';
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt)) return '';
+  const dd   = String(dt.getDate()).padStart(2, '0');
+  const mm   = String(dt.getMonth() + 1).padStart(2, '0');
+  const yyyy = dt.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+function fmtDateTime(d) {
+  if (!d) return '';
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt)) return '';
+  const dd   = String(dt.getDate()).padStart(2, '0');
+  const mm   = String(dt.getMonth() + 1).padStart(2, '0');
+  const yyyy = dt.getFullYear();
+  const hh   = String(dt.getHours()).padStart(2, '0');
+  const mi   = String(dt.getMinutes()).padStart(2, '0');
+  return `${dd}/${mm}/${yyyy} ${hh}:${mi}`;
+}
 function dateStamp() {
   const d = new Date();
   return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
