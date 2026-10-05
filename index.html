@@ -379,9 +379,13 @@
           <option value="execOnly">Exec only (no plan)</option>
           <option value="matched">Matched</option>
         </select>
+        <button class="btn ghost" id="compExpandAll">▾ Expand all</button>
+        <button class="btn ghost" id="compCollapseAll">▸ Collapse all</button>
         <button class="btn ghost" id="compClear">✕ Clear filters</button>
         <button class="btn" id="compExport">⤓ Export Excel</button>
       </div>
+
+<div id="compTable" class="batch-tree"></div>
   
       <div class="table-wrap"><table id="compTable"></table></div>
     </div>
