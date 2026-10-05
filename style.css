@@ -1388,6 +1388,9 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   font-weight: 500;
   vertical-align: middle;
 }
+.batch-tree .prod-batch-inner-table td .btn.tiny {
+  display: inline-block;
+}
 /* =========================================================
    Responsive
    ========================================================= */
