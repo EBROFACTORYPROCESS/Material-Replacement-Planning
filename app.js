@@ -1584,7 +1584,7 @@ function renderBatchTable() {
 
   const searchText = ($('#batchSearch').value || '').trim().toLowerCase();
 
-  /* --- 1. Column filters (flat) --- */
+  /* --- 1. Column filters --- */
   let list = STATE.batches.map((b, i) => ({ b, i }));
   for (const [colId, allowedSet] of Object.entries(STATE.batchView.filters)) {
     if (!allowedSet) continue;
@@ -1617,7 +1617,7 @@ function renderBatchTable() {
   const sortedModels = Array.from(modelMap.entries())
     .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-  /* --- 4. Active sort (applied inside each colour group) --- */
+  /* --- 4. Sort helper (applied inside each colour group) --- */
   const sortCol = Object.keys(STATE.batchView.sorts)[0] || '';
   const sortDir = sortCol && STATE.batchView.sorts[sortCol] === 'desc' ? -1 : 1;
   const applySortToRows = (rows) => {
@@ -1635,16 +1635,19 @@ function renderBatchTable() {
     return out;
   };
 
-  /* --- 5. Visible columns (model/color promoted to group headers) --- */
+  /* --- 5. Visible columns --- */
   const visibleCols = BATCH_COLS.filter(c => c.id !== 'model' && c.id !== 'color');
 
-  /* --- 6. Render tree --- */
+  /* --- 6. Render tree (respects collapse sets) --- */
   let html = '';
   for (const [model, colorMap] of sortedModels) {
     const modelRows = Array.from(colorMap.values()).flatMap(c => c.rows);
     const modelQty  = modelRows.reduce((s, it) => s + (it.b.qty || 0), 0);
+    const modelOpen = !BATCH_MODEL_COLLAPSED.has(model);      // ← NEW
 
-    html += `<details class="prod-spec-group" open>
+    html += `<details class="prod-spec-group batch-model-group"
+                     data-model="${escapeHtml(model)}"
+                     ${modelOpen ? 'open' : ''}>
       <summary class="prod-spec-header">
         <span class="spec-name">${escapeHtml(model)}</span>
         <span class="spec-count">
@@ -1659,9 +1662,14 @@ function renderBatchTable() {
       .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
     for (const [ckey, cg] of sortedColors) {
-      const colorQty = cg.rows.reduce((s, it) => s + (it.b.qty || 0), 0);
+      const colorQty  = cg.rows.reduce((s, it) => s + (it.b.qty || 0), 0);
+      const colorKey  = model + '||' + ckey;
+      const colorOpen = !BATCH_COLOR_COLLAPSED.has(colorKey);   // ← NEW
 
-      html += `<details class="prod-color-group" open>
+      html += `<details class="prod-color-group batch-color-group"
+                       data-model="${escapeHtml(model)}"
+                       data-color="${escapeHtml(ckey)}"
+                       ${colorOpen ? 'open' : ''}>
         <summary class="prod-color-header">
           <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
           <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
@@ -1697,7 +1705,6 @@ function renderBatchTable() {
       for (const { b, i } of rows) {
         const s = STATE.config.stages[b._stage] || { label: b._stage, color: '#9ca3af' };
 
-        /* --- Linked BOM cell: button that opens the Display BOM modal --- */
         const linkedKey  = resolveBomKeyForBatch(b);
         const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
 
@@ -1757,6 +1764,7 @@ function renderBatchTable() {
   tree.innerHTML = html;
 
   /* --- 7. Wire interactions --- */
+
   tree.querySelectorAll('.filter-btn').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -1772,12 +1780,28 @@ function renderBatchTable() {
     });
   });
 
-  /* Display BOM buttons inside the Linked BOM column */
   tree.querySelectorAll('button[data-role=batch-bom-display]').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
       openBomDisplay(btn.dataset.bomid);
+    });
+  });
+
+  /* --- 8. Persist collapse state --- */
+  tree.querySelectorAll('details.batch-model-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.model;
+      if (d.open) BATCH_MODEL_COLLAPSED.delete(key);
+      else        BATCH_MODEL_COLLAPSED.add(key);
+    });
+  });
+
+  tree.querySelectorAll('details.batch-color-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.model + '||' + d.dataset.color;
+      if (d.open) BATCH_COLOR_COLLAPSED.delete(key);
+      else        BATCH_COLOR_COLLAPSED.add(key);
     });
   });
 }
