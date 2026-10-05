@@ -167,6 +167,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindUploads();
   bindButtons();
   bindProduction();
+  bindComparison();
   bindBomDisplayModal();
   bindFilterPopupGlobal();
   renderConversionTable();
@@ -246,6 +247,9 @@ function bindTabs() {
     $$('.tab-panel').forEach(x => x.classList.remove('active'));
     t.classList.add('active');
     $('#panel-' + t.dataset.tab).classList.add('active');
+    if (t.dataset.tab === 'comparison') {
+      setTimeout(renderComparison, 0);
+    }
   }));
 }
 
@@ -4927,7 +4931,10 @@ function renderCompStats(rows) {
     </div>
   `;
 }
-
+function refreshComparisonIfVisible() {
+  const panel = document.getElementById('panel-comparison');
+  if (panel && panel.classList.contains('active')) renderComparison();
+}
 /* Main renderer. */
 function renderComparison() {
   const tbl = $('#compTable');
