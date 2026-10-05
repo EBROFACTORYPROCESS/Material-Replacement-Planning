@@ -1343,6 +1343,52 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   font-variant-numeric: tabular-nums;
 }
 /* =========================================================
+   Sheet picker modal (multi-sheet Excel import)
+   ========================================================= */
+.sheet-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+.sheet-pick-item {
+  display: grid;
+  grid-template-columns: 20px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fafbff;
+  cursor: pointer;
+  font-size: 13px;
+}
+.sheet-pick-item:hover { background: #f1f5f9; }
+.sheet-pick-item input { margin: 0; }
+.sheet-pick-item .sheet-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sheet-pick-item .sheet-dims {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.sheet-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 99px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+/* =========================================================
    Responsive
    ========================================================= */
 @media (max-width:900px){
