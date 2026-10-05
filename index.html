@@ -19,6 +19,7 @@
     <button class="tab" data-tab="bom">Material List</button>
     <button class="tab" data-tab="production">Production Monitoring</button>
     <button class="tab" data-tab="inventory">Inventory &amp; Stock</button>
+    <button class="tab" data-tab="comparison">Plan vs Execution</button>
     <button class="tab" data-tab="planning">Production Planning</button>
     <button class="tab" data-tab="settings">Settings</button>
   </nav>
@@ -351,6 +352,38 @@
         <button class="btn" id="exportInv">⤓ Export Excel</button>
       </div>
       <div class="table-wrap"><table id="invTable"></table></div>
+    </div>
+  </section>
+  <!-- ============ TAB: PLAN vs EXECUTION ============ -->
+  <section class="tab-panel" id="panel-comparison">
+    <div class="card">
+      <h2>Batch comparison — Planned vs Executed</h2>
+      <p class="hint">
+        Cross-checks <b>Inventory &amp; Stock</b> (planned qty, estimated dates, classification stage)
+        against <b>Production Monitoring</b> (actual VINs, milestone timestamps), joined on batch number.
+        Plan-only batches have no production started yet; Exec-only batches have VINs in the tracking file
+        but no matching row in the batch/shipment plan.
+      </p>
+  
+      <div class="stats" id="compStats">
+        <div class="hint" style="margin:0">Load a batch/shipment file and a production tracking file to see the comparison.</div>
+      </div>
+  
+      <div class="toolbar">
+        <input id="compSearch" type="search" placeholder="Search batch / model / colour / line…" />
+        <select id="compStatus">
+          <option value="all">All batches</option>
+          <option value="issues">⚠ Any mismatch only</option>
+          <option value="qtyVariance">Qty variance</option>
+          <option value="planOnly">Plan only (no production yet)</option>
+          <option value="execOnly">Exec only (no plan)</option>
+          <option value="matched">Matched</option>
+        </select>
+        <button class="btn ghost" id="compClear">✕ Clear filters</button>
+        <button class="btn" id="compExport">⤓ Export Excel</button>
+      </div>
+  
+      <div class="table-wrap"><table id="compTable"></table></div>
     </div>
   </section>
 
