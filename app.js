@@ -1317,19 +1317,22 @@ function renderBatchStats() {
    BATCH TABLE
    ========================================================= */
 function renderBatchTable() {
-  const tbl = $('#batchTable');
+  const tree = $('#batchTable');
   if (!STATE.batches.length) {
-    tbl.innerHTML = `<thead><tr><th>No batch data</th></tr></thead>`;
+    tree.innerHTML = '<div class="hint" style="margin:0">No batch data</div>';
     return;
   }
 
   const searchText = ($('#batchSearch').value || '').trim().toLowerCase();
 
+  /* --- 1. Column filters (flat) --- */
   let list = STATE.batches.map((b, i) => ({ b, i }));
   for (const [colId, allowedSet] of Object.entries(STATE.batchView.filters)) {
     if (!allowedSet) continue;
     list = list.filter(({ b }) => allowedSet.has(String(getBatchCellValue(b, colId))));
   }
+
+  /* --- 2. Text search --- */
   if (searchText) {
     list = list.filter(({ b }) => {
       const hay = `${b.batch} ${b.model} ${b.color} ${b.ship} ${b.production}`.toLowerCase();
@@ -1337,86 +1340,161 @@ function renderBatchTable() {
     });
   }
 
-  const sortCol = Object.keys(STATE.batchView.sorts)[0];
-  if (sortCol) {
-    const dir = STATE.batchView.sorts[sortCol] === 'desc' ? -1 : 1;
-    list.sort((x, y) => {
-      const a = getBatchCellValue(x.b, sortCol);
-      const b = getBatchCellValue(y.b, sortCol);
-      if (sortCol === 'qty') return ((Number(a)||0) - (Number(b)||0)) * dir;
-      return String(a).localeCompare(String(b), undefined, { numeric: true }) * dir;
-    });
+  /* --- 3. Group: model → colour → batches --- */
+  const modelMap = new Map();
+  for (const item of list) {
+    const b = item.b;
+    const model = b.model || '(no model)';
+    const color = b.color || '(no colour)';
+    const cc    = b.colorCode || '';
+
+    if (!modelMap.has(model)) modelMap.set(model, new Map());
+    const colorMap = modelMap.get(model);
+    const ckey = color + '||' + cc;
+    if (!colorMap.has(ckey)) colorMap.set(ckey, { color, colorCode: cc, rows: [] });
+    colorMap.get(ckey).rows.push(item);
   }
 
-  const header = BATCH_COLS.map(col => {
-    const cls = [
-      'col-head',
-      col.num ? 'num' : '',
-      STATE.batchView.filters[col.id] ? 'filtered' : '',
-      STATE.batchView.sorts[col.id]   ? 'sorted'   : ''
-    ].filter(Boolean).join(' ');
-    const mark = STATE.batchView.sorts[col.id] === 'asc' ? '▲'
-               : STATE.batchView.sorts[col.id] === 'desc' ? '▼' : '';
-    return `<th class="${cls}" data-col="${col.id}">
-      ${escapeHtml(col.label)}${mark ? `<span class="sort-mark">${mark}</span>` : ''}
-      <button class="filter-btn" data-col="${col.id}" title="Sort / filter">▾</button>
-    </th>`;
-  }).join('');
+  const sortedModels = Array.from(modelMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-  const whOpts = STATE.config.warehouses;
-  const stages = STATE.config.stages;
+  /* --- 4. Active sort (applied inside each colour group) --- */
+  const sortCol = Object.keys(STATE.batchView.sorts)[0] || '';
+  const sortDir = sortCol && STATE.batchView.sorts[sortCol] === 'desc' ? -1 : 1;
+  const applySortToRows = (rows) => {
+    const out = rows.slice();
+    if (sortCol && sortCol !== 'model' && sortCol !== 'color') {
+      out.sort((x, y) => {
+        const a = getBatchCellValue(x.b, sortCol);
+        const b = getBatchCellValue(y.b, sortCol);
+        if (sortCol === 'qty') return ((Number(a) || 0) - (Number(b) || 0)) * sortDir;
+        return String(a).localeCompare(String(b), undefined, { numeric: true }) * sortDir;
+      });
+    } else {
+      out.sort((x, y) => x.b.batch.localeCompare(y.b.batch, undefined, { numeric: true }));
+    }
+    return out;
+  };
 
-  const body = list.map(({ b, i }) => {
-    const s = stages[b._stage] || { label: b._stage, color: '#9ca3af' };
+  /* --- 5. Visible columns (model/color promoted to group headers) --- */
+  const visibleCols = BATCH_COLS.filter(c => c.id !== 'model' && c.id !== 'color');
 
-    const linkedKey  = resolveBomKeyForBatch(b);
-    const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
-    const linkCell = linkedBom
-      ? `<span title="${escapeHtml(bomDisplayName(linkedBom))}">${escapeHtml(shorten(bomDisplayName(linkedBom),18))}</span>`
-      : (b.model
-          ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
-          : '—');
+  /* --- 6. Render tree --- */
+  let html = '';
+  for (const [model, colorMap] of sortedModels) {
+    const modelRows = Array.from(colorMap.values()).flatMap(c => c.rows);
+    const modelQty  = modelRows.reduce((s, it) => s + (it.b.qty || 0), 0);
 
-    const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
-    const unassignedFlag = isUnassignedNoDate
-      ? `<span class="pill warn" title="No Arrival Date — cannot be classified" style="margin-left:6px">⚠</span>`
-      : '';
+    html += `<details class="prod-spec-group" open>
+      <summary class="prod-spec-header">
+        <span class="spec-name">${escapeHtml(model)}</span>
+        <span class="spec-count">
+          ${modelRows.length} batch${modelRows.length === 1 ? '' : 'es'} ·
+          ${colorMap.size} colour${colorMap.size === 1 ? '' : 's'} ·
+          ${fmt(modelQty)} vehicles
+        </span>
+      </summary>
+      <div class="prod-color-list">`;
 
-    const whLabel = b._warehouse
-      ? (STATE.config.warehouses.find(w => w.id === b._warehouse)?.name || b._warehouse)
-      : '—';
+    const sortedColors = Array.from(colorMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
 
-    return `
-      <tr data-i="${i}">
-        <td>${escapeHtml(b.batch)}${unassignedFlag}</td>
-        <td>${escapeHtml(b.model)}</td>
-        <td>${escapeHtml(b.color)}</td>
-        <td class="num">${fmt(b.qty)}</td>
-        <td>${escapeHtml(b.ship)}</td>
-        <td>${b.arrival   ? b.arrival.toLocaleDateString()   : '—'}</td>
-        <td>${b.decanting ? b.decanting.toLocaleDateString() : '—'}</td>
-        <td>${b.trimIn    ? b.trimIn.toLocaleDateString()    : '—'}</td>
-        <td>${escapeHtml(b.production)}</td>
-        <td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>
-        <td>${b._stage === 'warehouse' ? `
-          <select data-role="wh" data-i="${i}">
-            <option value="">—</option>
-            ${whOpts.map(w => `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}
-          </select>` : escapeHtml(whLabel)}</td>
-        <td>${linkCell}</td>
-      </tr>`;
-  }).join('');
+    for (const [ckey, cg] of sortedColors) {
+      const colorQty = cg.rows.reduce((s, it) => s + (it.b.qty || 0), 0);
 
-  tbl.innerHTML = `<thead><tr>${header}</tr></thead><tbody>${body || `<tr><td colspan="12" style="text-align:center;color:#6b7280;padding:16px">No batches match the current filters</td></tr>`}</tbody>`;
+      html += `<details class="prod-color-group" open>
+        <summary class="prod-color-header">
+          <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+          <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
+          <span class="color-count">
+            ${cg.rows.length} batch${cg.rows.length === 1 ? '' : 'es'} ·
+            ${fmt(colorQty)} vehicles
+          </span>
+        </summary>
+        <div class="prod-batch-list">
+          <table class="prod-batch-inner-table">
+            <thead>
+              <tr>
+                ${visibleCols.map(col => {
+                  const cls = [
+                    'col-head',
+                    col.num ? 'num' : '',
+                    STATE.batchView.filters[col.id] ? 'filtered' : '',
+                    STATE.batchView.sorts[col.id]   ? 'sorted'   : ''
+                  ].filter(Boolean).join(' ');
+                  const mark = STATE.batchView.sorts[col.id] === 'asc' ? '▲'
+                             : STATE.batchView.sorts[col.id] === 'desc' ? '▼' : '';
+                  return `<th class="${cls}" data-col="${col.id}">
+                    ${escapeHtml(col.label)}${mark ? `<span class="sort-mark">${mark}</span>` : ''}
+                    <button class="filter-btn" data-col="${col.id}" title="Sort / filter">▾</button>
+                  </th>`;
+                }).join('')}
+              </tr>
+            </thead>
+            <tbody>`;
 
-  tbl.querySelectorAll('.filter-btn').forEach(btn => {
+      const rows = applySortToRows(cg.rows);
+
+      for (const { b, i } of rows) {
+        const s = STATE.config.stages[b._stage] || { label: b._stage, color: '#9ca3af' };
+
+        const linkedKey = resolveBomKeyForBatch(b);
+        const linkedBom = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
+        const linkCell = linkedBom
+          ? `<span title="${escapeHtml(bomDisplayName(linkedBom))}">${escapeHtml(shorten(bomDisplayName(linkedBom),18))}</span>`
+          : (b.model
+              ? `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`
+              : '—');
+
+        const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
+        const unassignedFlag = isUnassignedNoDate
+          ? `<span class="pill warn" title="No Arrival Date — cannot be classified" style="margin-left:6px">⚠</span>`
+          : '';
+
+        const whLabel = b._warehouse
+          ? (STATE.config.warehouses.find(w => w.id === b._warehouse)?.name || b._warehouse)
+          : '—';
+
+        const cells = {
+          batch:      `<td>${escapeHtml(b.batch)}${unassignedFlag}</td>`,
+          qty:        `<td class="num">${fmt(b.qty)}</td>`,
+          ship:       `<td>${escapeHtml(b.ship)}</td>`,
+          arrival:    `<td>${b.arrival   ? b.arrival.toLocaleDateString()   : '—'}</td>`,
+          decanting:  `<td>${b.decanting ? b.decanting.toLocaleDateString() : '—'}</td>`,
+          trimIn:     `<td>${b.trimIn    ? b.trimIn.toLocaleDateString()    : '—'}</td>`,
+          production: `<td>${escapeHtml(b.production)}</td>`,
+          stage:      `<td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>`,
+          warehouse:  `<td>${b._stage === 'warehouse'
+                        ? `<select data-role="wh" data-i="${i}">
+                             <option value="">—</option>
+                             ${STATE.config.warehouses.map(w =>
+                               `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`
+                             ).join('')}
+                           </select>`
+                        : escapeHtml(whLabel)}</td>`,
+          linkedBom:  `<td>${linkCell}</td>`
+        };
+
+        html += `<tr data-i="${i}">${visibleCols.map(c => cells[c.id] || '<td></td>').join('')}</tr>`;
+      }
+
+      html += `</tbody></table></div></details>`;
+    }
+
+    html += `</div></details>`;
+  }
+
+  tree.innerHTML = html;
+
+  /* --- 7. Wire interactions (same as before, just scoped to #batchTable) --- */
+  tree.querySelectorAll('.filter-btn').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       openFilterPopup(btn.dataset.col, btn);
     });
   });
 
-  tbl.querySelectorAll('select[data-role=wh]').forEach(sel => {
+  tree.querySelectorAll('select[data-role=wh]').forEach(sel => {
     sel.addEventListener('change', e => {
       const i = +e.target.dataset.i;
       STATE.batches[i]._warehouse = e.target.value || null;
@@ -1424,7 +1502,6 @@ function renderBatchTable() {
     });
   });
 }
-
 /* =========================================================
    FILTER POPUP
    ========================================================= */
