@@ -4831,7 +4831,8 @@ function buildComparisonRows() {
     /* ---- Execution (Production Monitoring) ---- */
     const actualVins   = prod ? prod.vins.length : 0;
     const actualModel  = prod ? dominantField(prod.vins, 'description') : '';
-    const actualColor  = prod ? dominantField(prod.vins, 'color')       : '';
+    const actualColor     = prod ? dominantField(prod.vins, 'color')     : '';
+    const actualColorCode = prod ? dominantField(prod.vins, 'colorCode') : '';
     const actualLine   = prod ? dominantLine(prod) : '';
 
     const actualDev      = prod ? earliestMilestone(prod.vins, 'devanning')   : null;
