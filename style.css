@@ -1391,6 +1391,37 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 .batch-tree .prod-batch-inner-table td .btn.tiny {
   display: inline-block;
 }
+.line-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.line-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #eef2f7;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.line-chip:hover { background: #dbeafe; border-color: #93c5fd; }
+.line-chip.active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+.line-chip .lc-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+.line-chip .lc-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.line-chip.active .lc-count { color: rgba(255,255,255,.85); }
 /* =========================================================
    Responsive
    ========================================================= */
