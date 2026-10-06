@@ -170,6 +170,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindStoredFilesTab();
   bindPersistentFileSlots();
   bindComparison();
+  bindStockCalc();
   bindBomDisplayModal();
   bindFilterPopupGlobal();
   renderConversionTable();
@@ -537,6 +538,9 @@ async function processBomFolder() {
     try {
       const rows = await fileToRows(file);
       const parsedList = parseBOM(rows, path);
+      STATE.mrpStock.model  = '';
+      STATE.mrpStock.bomId  = '';
+      STATE.mrpStock.target = null;       
       if (!parsedList.length) throw new Error('no parts found');
 
       for (const parsed of parsedList) {
@@ -574,6 +578,13 @@ async function processBomFolder() {
   renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
   renderBatchTable(); renderBatchStats();
   computeInventory(); renderInventoryTable(); renderPlanning();
+
+  if (typeof renderStockFeasibility === 'function') {
+    populateStockModelSelect();
+    populateStockBomSelect();
+    renderStockFeasibility();
+  }
+   
 }
 function bindFolderFallback() {
   const inp = $('#bomFolderFallback');
@@ -602,7 +613,9 @@ async function handleBomFiles(files) {
   for (const f of files) {
     try {
       const sheets = await fileToSheetRows(f);
-
+      STATE.mrpStock.model  = '';
+      STATE.mrpStock.bomId  = '';
+      STATE.mrpStock.target = null;
       let sheetsToProcess;
       if (sheets.length === 1) {
         sheetsToProcess = sheets;
@@ -636,6 +649,11 @@ async function handleBomFiles(files) {
   renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
   renderBatchTable(); renderBatchStats();
   computeInventory(); renderInventoryTable(); renderPlanning();
+  if (typeof renderStockFeasibility === 'function') {
+    populateStockModelSelect();
+    populateStockBomSelect();
+    renderStockFeasibility();
+  } 
 }
 function parseBOM(rows, filename) {
   if (!rows || !rows.length) throw new Error('Empty file');
@@ -2349,6 +2367,9 @@ function bindButtons() {
     STATE.batchView = { sorts: {}, filters: {} };
     STATE.bomRegistry = new Map();
     STATE.bomCounter  = new Map();
+    STATE.mrpStock = { items: [], byPartNo: {}, loaded: false, fileName: '', model: '', bomId: '', target: null };
+    const sp = $('#stockFilePath'); if (sp) sp.value = '';
+    const si = $('#stockFileInfo'); if (si) si.textContent = 'No stock file loaded.';     
     WHERE_USED_OPEN.clear();
     savePersistedScrap();
     try { localStorage.removeItem(LS_CONFIG); } catch(e){}
@@ -5688,5 +5709,437 @@ async function autoReloadStoredFiles() {
   }
   await renderAllFileChips();
 }
+/* =========================================================
+   MATERIAL AVAILABILITY CALCULATOR (Production Planning)
+   ========================================================= */
+STATE.mrpStock = {
+  items: [],        // [{ partNo, qty }]
+  byPartNo: {},     // { partNo: totalQty }
+  loaded: false,
+  fileName: '',
+  model: '',        // specKey (from specKeyOf)
+  bomId: '',        // BOM ID of the selected variant
+  target: null      // null → default to computed max
+};
 
+/* ---------- File parsing ---------- */
+function parseStockFile(rows) {
+  if (!rows || !rows.length) return [];
+  const header = rows[0].map(h =>
+    String(h || '').replace(/\u00a0/g, ' ').replace(/\u200b/g, '').trim().toLowerCase()
+  );
+  const idx = (names, exclude = []) => {
+    const isEx = i => exclude.includes(i);
+    for (const n of names) {
+      const i = header.findIndex((h, j) => !isEx(j) && h === n.toLowerCase());
+      if (i >= 0) return i;
+    }
+    for (const n of names) {
+      const i = header.findIndex((h, j) => !isEx(j) && h.includes(n.toLowerCase()));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+  const cPart = idx(['material number', 'material no', 'part number', 'part no', 'partno', 'matnr', 'material']);
+  const cQty  = idx(['quantity', 'qty', 'cantidad', 'on hand', 'stock']);
+
+  if (cPart < 0 || cQty < 0) throw new Error('Columns "Material Number" and "Quantity" are required');
+
+  const items = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+    const partNo = String(r[cPart] || '').trim();
+    if (!partNo) continue;
+    const raw = String(r[cQty]).replace(/[^0-9.\-]/g, '');
+    const qty = Number(raw);
+    if (!isFinite(qty) || qty === 0) continue;
+    items.push({ partNo, qty });
+  }
+  return items;
+}
+
+function buildStockIndex(items) {
+  const byPartNo = {};
+  for (const it of items) {
+    byPartNo[it.partNo] = (byPartNo[it.partNo] || 0) + it.qty;
+  }
+  return byPartNo;
+}
+
+/* ---------- File ingestion ---------- */
+async function handleStockFiles(files) {
+  const f = files[0];
+  if (!f) return;
+  try {
+    const sheets = await fileToSheetRows(f);
+    let rows;
+    if (sheets.length === 1) {
+      rows = sheets[0].rows;
+    } else {
+      const picked = await promptSheetSelection(sheets, f.name);
+      if (!picked || !picked.length) return;
+      rows = picked[0].rows;
+    }
+    const items = parseStockFile(rows);
+    if (!items.length) {
+      alert('No valid stock rows found. Each row needs a Material Number and a non-zero Quantity.');
+      return;
+    }
+
+    STATE.mrpStock.items     = items;
+    STATE.mrpStock.byPartNo  = buildStockIndex(items);
+    STATE.mrpStock.loaded    = true;
+    STATE.mrpStock.fileName  = f.name;
+
+    $('#stockFilePath').value = f.name;
+    $('#stockFileInfo').textContent =
+      `Loaded — ${items.length} part${items.length === 1 ? '' : 's'} · ` +
+      `${Object.keys(STATE.mrpStock.byPartNo).length} unique`;
+
+    populateStockModelSelect();
+    populateStockBomSelect();
+    renderStockFeasibility();
+  } catch (e) {
+    console.error(e);
+    alert('Failed to parse stock file: ' + e.message);
+  }
+}
+
+/* ---------- Model / BOM dropdowns ---------- */
+function getStockModelOptions() {
+  const bySpec = new Map();
+  for (const bom of STATE.boms) {
+    const sk = specKeyOf(bom.vehicleMatNo);
+    if (!bySpec.has(sk)) bySpec.set(sk, { specKey: sk, boms: [] });
+    bySpec.get(sk).boms.push(bom);
+  }
+  const out = [];
+  for (const [sk, g] of bySpec) {
+    g.specName = deriveSpecName(g.boms);
+    out.push({ key: sk, name: g.specName, boms: g.boms });
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  return out;
+}
+
+function populateStockModelSelect() {
+  const sel = $('#stockModel');
+  if (!sel) return;
+  const models = getStockModelOptions();
+  if (!models.length) {
+    sel.innerHTML = '<option value="">— load BOMs first —</option>';
+    STATE.mrpStock.model = '';
+    return;
+  }
+  const current = STATE.mrpStock.model || '';
+  sel.innerHTML = models.map(m =>
+    `<option value="${escapeHtml(m.key)}" ${m.key === current ? 'selected' : ''}>` +
+    `${escapeHtml(m.name)} — ${m.boms.length} variant${m.boms.length === 1 ? '' : 's'}</option>`
+  ).join('');
+  if (!current || !models.some(m => m.key === current)) {
+    STATE.mrpStock.model = models[0].key;
+    sel.value = models[0].key;
+  }
+}
+
+function populateStockBomSelect() {
+  const sel = $('#stockBom');
+  if (!sel) return;
+  const models = getStockModelOptions();
+  const spec = models.find(m => m.key === STATE.mrpStock.model);
+  if (!spec) {
+    sel.innerHTML = '<option value="">— pick a model —</option>';
+    STATE.mrpStock.bomId = '';
+    return;
+  }
+  const boms = spec.boms.slice().sort((a, b) =>
+    String(a.bomId || '').localeCompare(String(b.bomId || ''), undefined, { numeric: true }));
+  const current = STATE.mrpStock.bomId || '';
+  sel.innerHTML = boms.map(b => {
+    const color = deriveColorName([b], spec.name) || b.vehicleDesc || b.vehicleMatNo;
+    return `<option value="${escapeHtml(b.bomId || '')}" ${b.bomId === current ? 'selected' : ''}>` +
+           `${escapeHtml(b.bomId || '?')} — ${escapeHtml(color)} (${b.parts.length} parts)</option>`;
+  }).join('');
+  if (!current || !boms.some(b => b.bomId === current)) {
+    STATE.mrpStock.bomId = boms[0]?.bomId || '';
+    sel.value = STATE.mrpStock.bomId;
+  }
+}
+
+/* ---------- Feasibility math ---------- */
+function computeStockFeasibility(bom, byPartNo) {
+  if (!bom || !bom.parts || !bom.parts.length) {
+    return { maxVehicles: 0, limitingPart: null, parts: [] };
+  }
+  /* Aggregate per-part quantities (a BOM may list the same part twice) */
+  const reqPerVehicle = {};
+  for (const p of bom.parts) {
+    reqPerVehicle[p.partNo] = (reqPerVehicle[p.partNo] || 0) + (Number(p.qty) || 0);
+  }
+  const parts = [];
+  let max = Infinity;
+  let limitingPart = null;
+
+  for (const [partNo, perVeh] of Object.entries(reqPerVehicle)) {
+    const available = byPartNo[partNo] || 0;
+    const feas = perVeh > 0 ? Math.max(0, Math.floor(available / perVeh)) : 0;
+    if (perVeh > 0 && feas < max) { max = feas; limitingPart = partNo; }
+    parts.push({ partNo, perVehicle: perVeh, available });
+  }
+  if (!isFinite(max)) max = 0;
+  return { maxVehicles: max, limitingPart, parts };
+}
+
+function applyStockTarget(parts, target) {
+  return parts.map(p => {
+    const needed   = p.perVehicle * target;
+    const leftover = p.available - needed;
+    return { ...p, needed, leftover };
+  });
+}
+
+/* ---------- Render ---------- */
+function renderStockFeasibility() {
+  const tbl = $('#stockTable');
+  const sum = $('#stockSummary');
+  if (!tbl) return;
+
+  if (!STATE.boms.length) {
+    tbl.innerHTML = `<thead><tr><th>Load BOM files first</th></tr></thead>`;
+    if (sum) sum.innerHTML = '';
+    return;
+  }
+  if (!STATE.mrpStock.loaded) {
+    tbl.innerHTML = `<thead><tr><th>Load a stock file to begin</th></tr></thead>`;
+    if (sum) sum.innerHTML = '';
+    return;
+  }
+
+  const models = getStockModelOptions();
+  const spec   = models.find(m => m.key === STATE.mrpStock.model);
+  if (!spec) {
+    tbl.innerHTML = `<thead><tr><th>Pick a model</th></tr></thead>`;
+    return;
+  }
+  const bom = spec.boms.find(b => b.bomId === STATE.mrpStock.bomId);
+  if (!bom) {
+    tbl.innerHTML = `<thead><tr><th>Pick a BOM variant</th></tr></thead>`;
+    return;
+  }
+
+  const feas = computeStockFeasibility(bom, STATE.mrpStock.byPartNo);
+
+  /* target: default to computed max, keep user value if valid */
+  let target = Number(STATE.mrpStock.target);
+  if (!isFinite(target) || STATE.mrpStock.target === null) target = feas.maxVehicles;
+
+  const parts = applyStockTarget(feas.parts, target).sort((a, b) => {
+    /* shortages first, then descending shortage amount, then part no */
+    const sa = a.leftover < 0 ? -a.leftover : 0;
+    const sb = b.leftover < 0 ? -b.leftover : 0;
+    if (sa !== sb) return sb - sa;
+    return a.partNo.localeCompare(b.partNo, undefined, { numeric: true });
+  });
+
+  const shortages  = parts.filter(p => p.leftover < 0);
+  const totalShort = shortages.reduce((s, p) => s + (-p.leftover), 0);
+
+  /* Reflect target on the input box */
+  const input = $('#stockTarget');
+  if (input && document.activeElement !== input) {
+    input.value = target;
+  }
+
+  if (sum) {
+    sum.innerHTML = `
+      <div class="stat">
+        <div class="label">Max producible</div>
+        <div class="value">${fmt(feas.maxVehicles)}<span class="unit">vehicles</span></div>
+        <div class="sub">limited by <b>${escapeHtml(feas.limitingPart || '—')}</b></div>
+      </div>
+      <div class="stat">
+        <div class="label">Target</div>
+        <div class="value">${fmt(target)}<span class="unit">vehicles</span></div>
+        <div class="sub">${target <= feas.maxVehicles
+          ? '<span style="color:var(--ok)">feasible</span>'
+          : '<b style="color:var(--danger)">exceeds stock</b>'}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Parts with demand</div>
+        <div class="value" style="color:${shortages.length ? 'var(--danger)' : 'var(--ok)'}">${fmt(shortages.length)}</div>
+        <div class="sub">${totalShort
+          ? `<b>${fmt(totalShort)}</b> units short in total`
+          : 'no shortage'}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Parts on hand</div>
+        <div class="value">${fmt(Object.keys(STATE.mrpStock.byPartNo).length)}</div>
+        <div class="sub">from <b>${escapeHtml(STATE.mrpStock.fileName || '—')}</b></div>
+      </div>`;
+  }
+
+  const head = `
+    <thead><tr>
+      <th>Material Number</th>
+      <th>Description</th>
+      <th>UOM</th>
+      <th class="num">Per Vehicle</th>
+      <th class="num">On Hand</th>
+      <th class="num">Required</th>
+      <th class="num">Leftover</th>
+      <th class="num">Demand</th>
+    </tr></thead>`;
+
+  const body = parts.map(p => {
+    const info = STATE.partIndex[p.partNo] || {};
+    const name = info.nameEN || info.nameCN || '';
+    const uom  = info.uom || '';
+    const demand = p.leftover < 0 ? -p.leftover : 0;
+    return `
+      <tr class="${demand ? 'stock-short-row' : ''}">
+        <td class="mono">${escapeHtml(p.partNo)}</td>
+        <td>${escapeHtml(name)}</td>
+        <td>${escapeHtml(uom)}</td>
+        <td class="num">${fmt(p.perVehicle)}</td>
+        <td class="num">${fmt(p.available)}</td>
+        <td class="num">${fmt(p.needed)}</td>
+        <td class="num" style="color:${p.leftover < 0 ? 'var(--danger)' : 'inherit'};font-weight:${p.leftover < 0 ? '600' : '400'}">${fmt(p.leftover)}</td>
+        <td class="num" style="color:${demand ? 'var(--danger)' : 'inherit'};font-weight:${demand ? '600' : '400'}">${demand ? '−' + fmt(demand) : '—'}</td>
+      </tr>`;
+  }).join('');
+
+  tbl.innerHTML = head + `<tbody>${body || '<tr><td colspan="8" style="text-align:center;color:#6b7280;padding:16px">This BOM has no parts</td></tr>'}</tbody>`;
+}
+
+/* ---------- Export ---------- */
+function exportStockCalc() {
+  const models = getStockModelOptions();
+  const spec   = models.find(m => m.key === STATE.mrpStock.model);
+  if (!spec) { alert('Pick a model first.'); return; }
+  const bom = spec.boms.find(b => b.bomId === STATE.mrpStock.bomId);
+  if (!bom) { alert('Pick a BOM variant first.'); return; }
+
+  const feas = computeStockFeasibility(bom, STATE.mrpStock.byPartNo);
+  let target = Number(STATE.mrpStock.target);
+  if (!isFinite(target) || STATE.mrpStock.target === null) target = feas.maxVehicles;
+
+  const parts = applyStockTarget(feas.parts, target).sort((a, b) => {
+    const sa = a.leftover < 0 ? -a.leftover : 0;
+    const sb = b.leftover < 0 ? -b.leftover : 0;
+    if (sa !== sb) return sb - sa;
+    return a.partNo.localeCompare(b.partNo, undefined, { numeric: true });
+  });
+
+  const aoa = [
+    ['Material availability — stock vs BOM'],
+    ['Model', spec.name],
+    ['BOM variant', bom.bomId || ''],
+    ['Stock file', STATE.mrpStock.fileName || ''],
+    ['Max producible', feas.maxVehicles],
+    ['Limiting part', feas.limitingPart || ''],
+    ['Target', target],
+    [],
+    ['Material Number', 'Description', 'UOM', 'Per Vehicle', 'On Hand', 'Required', 'Leftover', 'Demand']
+  ];
+  for (const p of parts) {
+    const info = STATE.partIndex[p.partNo] || {};
+    const demand = p.leftover < 0 ? -p.leftover : 0;
+    aoa.push([
+      p.partNo, info.nameEN || info.nameCN || '', info.uom || '',
+      round3(p.perVehicle), round3(p.available), round3(p.needed),
+      round3(p.leftover), round3(demand)
+    ]);
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Feasibility');
+  downloadWorkbook(wb, `Stock_Feasibility_${dateStamp()}.xlsx`);
+}
+
+/* ---------- Bindings ---------- */
+function bindStockCalc() {
+  /* Picker — native FSA when available */
+  $('#stockFilePick')?.addEventListener('click', async () => {
+    if (typeof window.showOpenFilePicker !== 'function') { $('#stockInput').click(); return; }
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{
+          description: 'Stock list',
+          accept: {
+            'text/csv': ['.csv', '.tsv'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+            'application/vnd.ms-excel': ['.xls']
+          }
+        }]
+      });
+      const f = await handle.getFile();
+      await handleStockFiles([f]);
+    } catch (e) {
+      if (e.name !== 'AbortError') { console.error(e); alert('Failed to open file: ' + e.message); }
+    }
+  });
+
+  $('#stockInput')?.addEventListener('change', e => {
+    const f = e.target.files?.[0];
+    if (f) handleStockFiles([f]);
+    e.target.value = '';
+  });
+
+  const dz = $('#stockDrop');
+  if (dz) {
+    ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
+      e.preventDefault(); dz.classList.add('drag');
+    }));
+    ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
+      e.preventDefault(); dz.classList.remove('drag');
+    }));
+    dz.addEventListener('drop', e => {
+      const f = e.dataTransfer.files?.[0];
+      if (f) handleStockFiles([f]);
+    });
+  }
+
+  $('#stockFileClear')?.addEventListener('click', () => {
+    STATE.mrpStock = { items: [], byPartNo: {}, loaded: false, fileName: '', model: '', bomId: '', target: null };
+    const p = $('#stockFilePath'); if (p) p.value = '';
+    const i = $('#stockFileInfo'); if (i) i.textContent = 'No stock file loaded.';
+    populateStockModelSelect();
+    populateStockBomSelect();
+    renderStockFeasibility();
+  });
+
+  $('#stockModel')?.addEventListener('change', e => {
+    STATE.mrpStock.model  = e.target.value || '';
+    STATE.mrpStock.bomId  = '';
+    STATE.mrpStock.target = null;
+    populateStockBomSelect();
+    renderStockFeasibility();
+  });
+
+  $('#stockBom')?.addEventListener('change', e => {
+    STATE.mrpStock.bomId  = e.target.value || '';
+    STATE.mrpStock.target = null;
+    renderStockFeasibility();
+  });
+
+  $('#stockTarget')?.addEventListener('input', e => {
+    const v = e.target.value;
+    STATE.mrpStock.target = v === '' ? null : Number(v);
+    renderStockFeasibility();
+  });
+
+  $('#stockCalc')?.addEventListener('click', () => {
+    const models = getStockModelOptions();
+    const spec   = models.find(m => m.key === STATE.mrpStock.model);
+    if (!spec) { alert('Pick a model first.'); return; }
+    const bom = spec.boms.find(b => b.bomId === STATE.mrpStock.bomId);
+    if (!bom) { alert('Pick a BOM variant first.'); return; }
+    const feas = computeStockFeasibility(bom, STATE.mrpStock.byPartNo);
+    STATE.mrpStock.target = feas.maxVehicles;
+    const inp = $('#stockTarget'); if (inp) inp.value = feas.maxVehicles;
+    renderStockFeasibility();
+  });
+
+  $('#stockExport')?.addEventListener('click', exportStockCalc);
+}
 window.MRP = STATE;
