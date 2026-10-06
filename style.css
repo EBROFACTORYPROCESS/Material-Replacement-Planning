@@ -1638,6 +1638,66 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 }
 .file-chip .fc-action:hover { background: #dbeafe; }
 /* =========================================================
+   Material availability calculator
+   ========================================================= */
+.mrp-stock-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.mrp-stock-row input[type=text] {
+  flex: 1;
+  min-width: 240px;
+  padding: 8px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+}
+.mrp-stock-row input[type=text]:not([value=""]) { color: var(--text); }
+
+.mrp-stock-selectors {
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed #e2e8f0;
+}
+.mrp-stock-selectors label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  font-weight: 600;
+}
+.mrp-stock-selectors select,
+.mrp-stock-selectors input[type=number] {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  min-width: 220px;
+}
+.mrp-stock-selectors input[type=number] { min-width: 120px; }
+
+#stockTable td.mono,
+#stockTable th.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+
+.stock-short-row > td { background: #fef2f2; }
+.stock-short-row:hover > td { background: #fee2e2; }
+.stock-short-row > td:first-child { box-shadow: inset 3px 0 0 0 var(--danger); }
+/* =========================================================
    Responsive
    ========================================================= */
 @media (max-width:900px){
