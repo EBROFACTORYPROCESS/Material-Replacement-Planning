@@ -10,7 +10,6 @@
 </head>
 <body>
 <header class="topbar">
-  <div id="storedFilesBar" class="stored-bar hidden"></div>
   <div class="brand">
     <span class="logo">◈</span>
     <h1>MRP Planner</h1>
@@ -22,6 +21,7 @@
     <button class="tab" data-tab="inventory">Inventory &amp; Stock</button>
     <button class="tab" data-tab="comparison">Plan vs Execution</button>
     <button class="tab" data-tab="planning">Production Planning</button>
+    <button class="tab" data-tab="files">Stored Files</button>
     <button class="tab" data-tab="settings">Settings</button>
   </nav>
   <div class="meta"><span id="todayBadge"></span></div>
@@ -30,9 +30,9 @@
 <main>
   <!-- ============ TAB: BOM LIST (loader + tree) ============ -->
   <section class="tab-panel active" id="panel-bomlist">
-
     <div class="card">
       <h2>1. Load BOM folder</h2>
+      <div class="file-chip-container" id="fileChip-bomFolder"></div>
       <p class="hint">Pick the folder that contains your BOM files. Subfolders are scanned recursively for <code>.xlsx</code>, <code>.xls</code>, and <code>.csv</code>. Each file may contain many vehicle+colour+batch combinations — they’re grouped automatically. Files must contain columns for <b>Vehicle Matl. Num.</b> (A), <b>Vehicle Desc.</b> (B), <b>batch</b> (E), <b>Part NO.</b> (J), <b>Part Name(EN)</b> (K), <b>Qty</b> (T), and <b>UOM</b> (U).</p>
 
       <div class="folder-loader">
@@ -275,6 +275,7 @@
   
     <div class="card">
       <h2>4. VIN detail</h2>
+      <div class="file-chip-container" id="fileChip-exportFolder"></div>
       <p class="hint">Individual VIN timeline through each milestone. Use the filters to focus on stalled vehicles.</p>
       <div class="toolbar">
         <input id="prodVinSearch" type="search" placeholder="Search VIN / batch / sequence / model…" />
@@ -314,6 +315,7 @@
   <section class="tab-panel" id="panel-inventory">
     <div class="card">
       <h2>1. Upload Batch / Shipment file</h2>
+      <div class="file-chip-container" id="fileChip-batchFile"></div>
       <p class="hint">
         Select the batch / shipment file. The path is stored locally so on next visit the file reloads
         without re-picking. Columns: <code>batch number, Modelo, Color, Cantidad, TRIM IN DATE, Name of ship,
@@ -432,6 +434,7 @@
   <section class="tab-panel" id="panel-planning">
     <div class="card">
       <h2>Production plan</h2>
+      <div class="file-chip-container" id="fileChip-productionFile"></div>
       <div class="plan-add">
         <select id="planModel"></select>
         <input id="planQty" type="number" min="0" step="1" placeholder="Quantity" />
@@ -470,7 +473,24 @@
       <div class="table-wrap"><table id="planTable"></table></div>
     </div>
   </section>
-
+  <!-- ============ TAB: STORED FILES ============ -->
+  <section class="tab-panel" id="panel-files">
+    <div class="card">
+      <h2>Stored files</h2>
+      <p class="hint">
+        Every file and folder you have selected is remembered locally. On future visits the data reloads
+        automatically when the browser still grants permission. If a green <b>Connected</b> badge is not shown,
+        click <b>Reconnect</b> — a single click, no file dialog. Works in Chrome, Edge, Opera and Brave;
+        Firefox and Safari fall back to manual selection each session.
+      </p>
+      <div class="toolbar">
+        <button class="btn" id="sfReloadAll">↻ Reload all connected</button>
+        <span class="prod-period-spacer"></span>
+        <button class="btn danger ghost" id="sfForgetAll">✕ Forget all files</button>
+      </div>
+      <div class="table-wrap"><table id="sfTable"></table></div>
+    </div>
+  </section>
   <!-- ============ TAB: SETTINGS ============ -->
   <section class="tab-panel" id="panel-settings">
     <div class="card">
