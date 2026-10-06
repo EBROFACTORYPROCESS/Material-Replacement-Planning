@@ -1474,6 +1474,79 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   padding: 1px 7px;
 }
 /* =========================================================
+   Persistent file handles — status bar
+   ========================================================= */
+.stored-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 24px;
+  background: #f8fafc;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+  position: sticky;
+  top: 60px;                          /* just below the .topbar */
+  z-index: 40;
+}
+.stored-bar.hidden { display: none; }
+
+.stored-bar .sb-title {
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  font-size: 11px;
+  margin-right: 4px;
+}
+
+.sb-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background .12s, border-color .12s;
+}
+.sb-item:hover { background: #eff6ff; border-color: #93c5fd; }
+.sb-item.disabled { cursor: default; opacity: .7; }
+.sb-item.disabled:hover { background: #fff; border-color: var(--border); }
+
+.sb-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 8px;
+}
+.sb-dot.ok      { background: var(--ok); }
+.sb-dot.prompt  { background: var(--warn); animation: sb-pulse 1.6s ease-in-out infinite; }
+.sb-dot.absent  { background: #cbd5e1; }
+.sb-dot.loading { background: var(--brand); animation: sb-pulse 1s ease-in-out infinite; }
+@keyframes sb-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .35; }
+}
+
+.sb-label { color: var(--text); font-weight: 500; }
+.sb-hint  { color: var(--muted); font-size: 11px; }
+
+.sb-forget {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: 5px;
+}
+.sb-forget:hover { background: #fee2e2; color: var(--danger); }
+/* =========================================================
    Responsive
    ========================================================= */
 @media (max-width:900px){
