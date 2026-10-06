@@ -5303,4 +5303,71 @@ function bindComparison() {
   });
   $('#compExport')?.addEventListener('click', exportComparison);
 }
+/* =========================================================
+   PERSISTENT FILE HANDLES
+   ========================================================= */
+const HANDLE_DB    = 'mrp.handles.v1';
+const HANDLE_STORE = 'handles';
+
+/* The four slots we persist. `mode` is the permission level each needs. */
+const STORED_SLOTS = {
+  bomFolder:      { label: 'BOM folder',               kind: 'directory', mode: 'read'      },
+  batchFile:      { label: 'Batch / shipment file',    kind: 'file',      mode: 'read'      },
+  productionFile: { label: 'Production tracking file', kind: 'file',      mode: 'read'      },
+  exportFolder:   { label: 'XML export folder',        kind: 'directory', mode: 'readwrite' }
+};
+
+function openHandleDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(HANDLE_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(HANDLE_STORE)) db.createObjectStore(HANDLE_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+async function saveHandle(key, handle) {
+  const db = await openHandleDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HANDLE_STORE, 'readwrite');
+    tx.objectStore(HANDLE_STORE).put(handle, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+
+async function loadHandle(key) {
+  const db = await openHandleDB();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(HANDLE_STORE, 'readonly');
+    const req = tx.objectStore(HANDLE_STORE).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+async function removeHandle(key) {
+  const db = await openHandleDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HANDLE_STORE, 'readwrite');
+    tx.objectStore(HANDLE_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+
+/* Permission helpers — safe on browsers without FSA. */
+async function handlePermission(handle, mode = 'read') {
+  if (!handle || !handle.queryPermission) return 'granted';
+  try { return await handle.queryPermission({ mode }); }
+  catch { return 'denied'; }
+}
+async function requestHandlePermission(handle, mode = 'read') {
+  if (!handle || !handle.requestPermission) return 'granted';
+  try { return await handle.requestPermission({ mode }); }
+  catch { return 'denied'; }
+}
 window.MRP = STATE;
