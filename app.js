@@ -179,6 +179,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('#c_factoryFloor').checked  = STATE.config.shortageDefaults.includeFactoryFloor;
   $('#c_edgeLine').checked      = STATE.config.shortageDefaults.includeEdgeLine;
   $('#c_inTransit').checked     = STATE.config.shortageDefaults.includeInTransit;
+  await autoReloadStoredFiles(); 
 });
 
 async function loadConfig() {
@@ -258,7 +259,37 @@ function bindTabs() {
    ========================================================= */
 function bindUploads() {
   wireDropzone('#bomDrop',   '#bomInput',   handleBomFiles);
-  wireDropzone('#batchDrop', '#batchInput', handleBatchFiles);
+  // Batch + Production dropzones now call the persistent picker on click:
+  wirePersistentDropzone('#batchDrop', '#batchInput', pickBatchFile, handleBatchFiles);
+  // (Production dropzone is inside bindProduction – see below)
+}
+/* Like wireDropzone, but the click handler is replaced with a persistent picker.
+   Drag-and-drop still works with the old handler. */
+function wirePersistentDropzone(dzSel, inputSel, pickFn, dropHandler) {
+  const dz = $(dzSel), input = $(inputSel);
+  if (!dz || !input) return;
+
+  input.addEventListener('change', e => {
+    dropHandler(Array.from(e.target.files || []));
+    e.target.value = '';
+  });
+  dz.addEventListener('click', e => {
+    if (e.target === input) return;      // ignore the invisible input's own click
+    e.preventDefault();
+    e.stopPropagation();
+    pickFn();
+  }, true);
+
+  ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.add('drag');
+  }));
+  ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.remove('drag');
+  }));
+  dz.addEventListener('drop', e => {
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length) dropHandler(files);
+  });
 }
 function wireDropzone(dzSel, inputSel, handler) {
   const dz = $(dzSel), input = $(inputSel);
@@ -278,6 +309,26 @@ function readFileAsArrayBuffer(file) {
     r.onload = () => res(r.result); r.onerror = rej;
     r.readAsArrayBuffer(file);
   });
+}
+async function autoReloadStoredFiles() {
+  if (typeof window.showOpenFilePicker !== 'function') {
+    // Firefox / Safari — no persistence; hide the bar and bail out.
+    $('#storedFilesBar')?.classList.add('hidden');
+    return;
+  }
+
+  /* For each stored slot, attempt a background reload when permission
+     was already granted. Otherwise leave it for the user to click. */
+  for (const [key, meta] of Object.entries(STORED_SLOTS)) {
+    const handle = await loadHandle(key);
+    if (!handle) continue;
+    const perm = await handlePermission(handle, meta.mode);
+    if (perm !== 'granted') continue;
+    try { await reloadSlot(key, handle); }
+    catch (e) { console.error(`Auto-reload failed for ${key}:`, e); }
+  }
+
+  renderStoredFilesBar();
 }
 function readFileAsText(file) {
   return new Promise((res, rej) => {
@@ -490,6 +541,8 @@ async function pickBomFolder() {
   if (typeof window.showDirectoryPicker === 'function') {
     try {
       const handle = await window.showDirectoryPicker({ mode: 'read' });
+      await saveHandle('bomFolder', handle);       
+      renderStoredFilesBar();                       
       _bomFolderHandle = handle;
       $('#bomFolderPath').value = '/' + handle.name + '/';
       _bomFolderFiles = [];
@@ -4383,6 +4436,8 @@ async function pickExportFolder() {
   }
   try {
     const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    await saveHandle('exportFolder', handle);      
+    renderStoredFilesBar();                        
     _exportFolderHandle = handle;
     $('#exportFolderPath').value = '/' + handle.name + '/';
   } catch (e) {
@@ -4597,6 +4652,98 @@ function exportXmlErrors() {
   XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'XML Export Errors');
   downloadWorkbook(wb, `XML_Export_Errors_${dateStamp()}.xlsx`);
 }
+async function reloadBomFolderFromHandle(handle) {
+  if (!handle) return;
+  const perm = await requestHandlePermission(handle, 'read');
+  if (perm !== 'granted') return;
+
+  _bomFolderHandle = handle;
+  _bomFolderFiles = [];
+  $('#bomFolderPath').value  = '/' + handle.name + '/';
+  $('#bomFolderInfo').textContent = 'Scanning stored folder…';
+  $('#bomFolderProcess').disabled = true;
+
+  await walkDirectory(handle, '');
+  updateFolderInfo();
+  await processBomFolder();
+}
+async function renderStoredFilesBar() {
+  const bar = $('#storedFilesBar');
+  if (!bar) return;
+
+  const entries = [];
+  for (const [key, meta] of Object.entries(STORED_SLOTS)) {
+    const handle = await loadHandle(key);
+    if (!handle) continue;                             // slot never used → hide
+    const perm = await handlePermission(handle, meta.mode);
+    entries.push({ key, meta, handle, perm });
+  }
+
+  if (!entries.length) {
+    bar.classList.add('hidden');
+    bar.innerHTML = '';
+    return;
+  }
+
+  bar.classList.remove('hidden');
+  bar.innerHTML =
+    `<span class="sb-title">Stored files</span>` +
+    entries.map(({ key, meta, handle, perm }) => {
+      const stateClass = perm === 'granted' ? 'ok' : perm === 'prompt' ? 'prompt' : 'absent';
+      const hint = perm === 'granted' ? 'connected'
+                 : perm === 'prompt'  ? 'click to reconnect'
+                 : 'permission denied';
+      return `<button class="sb-item ${perm === 'granted' ? 'disabled' : ''}"
+                       data-key="${escapeHtml(key)}"
+                       data-perm="${escapeHtml(perm)}"
+                       title="${escapeHtml(meta.label)} — ${escapeHtml(handle.name)} (${hint})">
+        <span class="sb-dot ${stateClass}"></span>
+        <span class="sb-label">${escapeHtml(meta.label)}</span>
+        <span class="sb-hint">· ${escapeHtml(handle.name)}</span>
+      </button>`;
+    }).join('') +
+    `<button class="sb-forget" id="sbForgetAll" title="Forget all stored files">✕ Forget all</button>`;
+
+  /* Reconnect on click if permission was lost */
+  bar.querySelectorAll('.sb-item[data-perm="prompt"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const key = btn.dataset.key;
+      const handle = await loadHandle(key);
+      if (!handle) return;
+      const meta = STORED_SLOTS[key];
+      const perm = await requestHandlePermission(handle, meta.mode);
+      if (perm !== 'granted') { renderStoredFilesBar(); return; }
+      await reloadSlot(key, handle);
+      renderStoredFilesBar();
+    });
+  });
+
+  $('#sbForgetAll')?.addEventListener('click', async () => {
+    if (!confirm('Forget all stored file handles? You will need to pick the files again next time.')) return;
+    for (const key of Object.keys(STORED_SLOTS)) await removeHandle(key);
+    _bomFolderHandle = null;
+    _exportFolderHandle = null;
+    renderStoredFilesBar();
+  });
+}
+
+/* Route a handle to the right reloader. */
+async function reloadSlot(key, handle) {
+  switch (key) {
+    case 'bomFolder':      return reloadBomFolderFromHandle(handle);
+    case 'batchFile':      return reloadBatchFromHandle(handle);
+    case 'productionFile': return reloadProductionFromHandle(handle);
+    case 'exportFolder':   return reloadExportFolderFromHandle(handle);
+  }
+}
+async function reloadExportFolderFromHandle(handle) {
+  if (!handle) return;
+  const perm = await requestHandlePermission(handle, 'readwrite');
+  if (perm !== 'granted') return;
+  _exportFolderHandle = handle;
+  $('#exportFolderPath').value = '/' + handle.name + '/';
+  renderStoredFilesBar();
+}
 /* =========================================================
    BIND — Production tab UI
    ========================================================= */
@@ -4610,6 +4757,12 @@ function bindProduction() {
     handleProductionFiles(Array.from(e.target.files || []));
     e.target.value = '';
   });
+  dz.addEventListener('click', e => {
+    if (e.target === input) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pickProductionFile();
+  }, true);
   ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => {
     e.preventDefault(); dz.classList.add('drag');
   }));
@@ -5369,5 +5522,69 @@ async function requestHandlePermission(handle, mode = 'read') {
   if (!handle || !handle.requestPermission) return 'granted';
   try { return await handle.requestPermission({ mode }); }
   catch { return 'denied'; }
+}
+/* ----- Batch file ----- */
+async function pickBatchFile() {
+  if (typeof window.showOpenFilePicker !== 'function') {
+    $('#batchInput').click();
+    return;
+  }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{
+        description: 'Batch / shipment file',
+        accept: {
+          'text/csv':  ['.csv', '.tsv'],
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+          'application/vnd.ms-excel': ['.xls']
+        }
+      }]
+    });
+    await saveHandle('batchFile', handle);
+    await reloadBatchFromHandle(handle);
+    renderStoredFilesBar();
+  } catch (e) {
+    if (e.name !== 'AbortError') { console.error(e); alert('Failed to open file: ' + e.message); }
+  }
+}
+
+async function reloadBatchFromHandle(handle) {
+  if (!handle) return;
+  const perm = await requestHandlePermission(handle, 'read');
+  if (perm !== 'granted') return;
+  const file = await handle.getFile();
+  await handleBatchFiles([file]);
+}
+
+/* ----- Production tracking file ----- */
+async function pickProductionFile() {
+  if (typeof window.showOpenFilePicker !== 'function') {
+    $('#prodInput').click();
+    return;
+  }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{
+        description: 'Production tracking file',
+        accept: {
+          'text/csv': ['.csv', '.tsv'],
+          'text/plain': ['.txt']
+        }
+      }]
+    });
+    await saveHandle('productionFile', handle);
+    await reloadProductionFromHandle(handle);
+    renderStoredFilesBar();
+  } catch (e) {
+    if (e.name !== 'AbortError') { console.error(e); alert('Failed to open file: ' + e.message); }
+  }
+}
+
+async function reloadProductionFromHandle(handle) {
+  if (!handle) return;
+  const perm = await requestHandlePermission(handle, 'read');
+  if (perm !== 'granted') return;
+  const file = await handle.getFile();
+  await handleProductionFiles([file]);
 }
 window.MRP = STATE;
