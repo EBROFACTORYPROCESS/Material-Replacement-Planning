@@ -167,6 +167,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindUploads();
   bindButtons();
   bindProduction();
+  bindPersistentFileSlots();   
   bindComparison();
   bindBomDisplayModal();
   bindFilterPopupGlobal();
@@ -179,6 +180,24 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('#c_factoryFloor').checked  = STATE.config.shortageDefaults.includeFactoryFloor;
   $('#c_edgeLine').checked      = STATE.config.shortageDefaults.includeEdgeLine;
   $('#c_inTransit').checked     = STATE.config.shortageDefaults.includeInTransit;
+    /* Restore stored file handles and try to auto-load them. */
+  await refreshSlotUI('batchFile',      '#batchFileInfo', '#batchFilePath', '#batchFileProcess');
+  await refreshSlotUI('productionFile', '#prodFileInfo',  '#prodFilePath',  '#prodFileProcess');
+
+  if (typeof window.showOpenFilePicker === 'function') {
+    /* Auto-load silently if permission is already granted. */
+    for (const [slotKey, pathSel, processBtnSel] of [
+      ['batchFile',      '#batchFilePath', '#batchFileProcess'],
+      ['productionFile', '#prodFilePath',  '#prodFileProcess']
+    ]) {
+      const h = await loadFileHandle(slotKey);
+      if (!h) continue;
+      const perm = await h.queryPermission({ mode: 'read' });
+      if (perm === 'granted') {
+        $(processBtnSel).click();           // routes through the standard load path
+      }
+    }
+  } 
   await autoReloadStoredFiles(); 
 });
 
@@ -4929,6 +4948,47 @@ function bindProduction() {
     if (STATE.production.loaded) renderProductionChart();
   });
 }
+
+function bindPersistentFileSlots() {
+  /* ---- Batch file ---- */
+  $('#batchFilePick')?.addEventListener('click', () =>
+    pickFileForSlot('batchFile', '#batchInput', handleBatchFiles,
+                    '#batchFileInfo', '#batchFilePath', '#batchFileProcess'));
+
+  $('#batchFileProcess')?.addEventListener('click', () =>
+    processFileForSlot('batchFile', async f => {
+      $('#batchFileInfo').textContent = 'Loading…';
+      try { await handleBatchFiles([f]);
+            $('#batchFileInfo').textContent = 'Loaded — ' + STATE.batches.length + ' batches.'; }
+      catch (e) { $('#batchFileInfo').textContent = 'Load failed: ' + e.message; }
+    }, '#batchFileInfo', '#batchFileProcess'));
+
+  /* Drop-in fallback still works */
+  $('#batchInput')?.addEventListener('change', e => {
+    const f = e.target.files?.[0];
+    if (f) handleBatchFiles([f]);
+    e.target.value = '';
+  });
+
+  /* ---- Production tracking file ---- */
+  $('#prodFilePick')?.addEventListener('click', () =>
+    pickFileForSlot('productionFile', '#prodInput', handleProductionFiles,
+                    '#prodFileInfo', '#prodFilePath', '#prodFileProcess'));
+
+  $('#prodFileProcess')?.addEventListener('click', () =>
+    processFileForSlot('productionFile', async f => {
+      $('#prodFileInfo').textContent = 'Parsing…';
+      try { await handleProductionFiles([f]);
+            $('#prodFileInfo').textContent = 'Loaded — ' + STATE.production.records.length + ' VINs.'; }
+      catch (e) { $('#prodFileInfo').textContent = 'Load failed: ' + e.message; }
+    }, '#prodFileInfo', '#prodFileProcess'));
+
+  $('#prodInput')?.addEventListener('change', e => {
+    const f = e.target.files?.[0];
+    if (f) handleProductionFiles([f]);
+    e.target.value = '';
+  });
+}
 /* =========================================================
    PLAN vs EXECUTION — Comparison
    ========================================================= */
@@ -5586,5 +5646,138 @@ async function reloadProductionFromHandle(handle) {
   if (perm !== 'granted') return;
   const file = await handle.getFile();
   await handleProductionFiles([file]);
+}
+/* =========================================================
+   PERSISTED FILE HANDLES — single-file slots
+   ========================================================= */
+const FILE_DB     = 'mrp.fileHandles.v1';
+const FILE_STORE  = 'files';
+
+const FILE_SLOTS = {
+  batchFile:      { label: 'Batch / shipment file',    types: ['csv','xlsx','xls'] },
+  productionFile: { label: 'Production tracking file', types: ['csv','tsv','txt'] }
+};
+
+function openFileDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(FILE_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(FILE_STORE)) db.createObjectStore(FILE_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+async function saveFileHandle(key, handle) {
+  const db = await openFileDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FILE_STORE, 'readwrite');
+    tx.objectStore(FILE_STORE).put(handle, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+
+async function loadFileHandle(key) {
+  const db = await openFileDB();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(FILE_STORE, 'readonly');
+    const req = tx.objectStore(FILE_STORE).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror   = () => reject(req.error);
+  });
+}
+/* ---------- Generic single-file slot controller ---------- */
+
+/* Open the native picker and persist the handle.
+   Falls back to the hidden <input type=file> if FSA is unavailable. */
+async function pickFileForSlot(slotKey, fallbackInputSel, onFile, infoSel, pathSel, processBtnSel) {
+  if (typeof window.showOpenFilePicker !== 'function') {
+    $(fallbackInputSel).click();
+    return;
+  }
+  const slot = FILE_SLOTS[slotKey];
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{
+        description: slot.label,
+        accept: { 'text/csv': slot.types.map(t => '.' + t) }
+      }],
+      excludeAcceptAllOption: false
+    });
+    await saveFileHandle(slotKey, handle);
+
+    $(pathSel).value = handle.name;
+    $(infoSel).textContent = 'Ready — click Process file to parse.';
+    $(processBtnSel).disabled = false;
+  } catch (e) {
+    if (e.name !== 'AbortError') { console.error(e); alert('Failed to pick file: ' + e.message); }
+  }
+}
+
+/* Load the file from the stored handle and process it. */
+async function processFileForSlot(slotKey, onFile, infoSel, processBtnSel) {
+  const handle = await loadFileHandle(slotKey);
+  if (!handle) { alert('No file stored. Choose one first.'); return; }
+
+  let perm = await handle.queryPermission({ mode: 'read' });
+  if (perm !== 'granted') {
+    perm = await handle.requestPermission({ mode: 'read' });
+  }
+  if (perm !== 'granted') {
+    $(infoSel).textContent = 'Permission denied — click Choose file to re-select.';
+    return;
+  }
+
+  let file;
+  try {
+    file = await handle.getFile();
+  } catch (e) {
+    console.error(e);
+    $(infoSel).textContent = 'File no longer available — click Choose file to re-select.';
+    await removeFileHandle(slotKey);
+    $(processBtnSel).disabled = true;
+    $(infoSel).previousElementSibling && null;   // no-op
+    return;
+  }
+
+  await onFile(file);
+}
+
+/* Refresh the slot UI from the stored handle on page load. */
+async function refreshSlotUI(slotKey, infoSel, pathSel, processBtnSel) {
+  const handle = await loadFileHandle(slotKey);
+  const hasFSA = typeof window.showOpenFilePicker === 'function';
+  if (!handle) {
+    $(pathSel).value = '';
+    $(infoSel).textContent = hasFSA
+      ? 'No file selected yet.'
+      : 'Browser has no File System Access API — pick the file each session.';
+    $(processBtnSel).disabled = true;
+    return;
+  }
+  $(pathSel).value = handle.name;
+  $(processBtnSel).disabled = false;
+
+  const perm = await handle.queryPermission({ mode: 'read' });
+  if (perm === 'granted') {
+    $(infoSel).textContent = 'Stored — auto-loading…';
+  } else if (perm === 'prompt') {
+    $(infoSel).textContent = 'Stored — click Process file to reconnect.';
+  } else {
+    $(infoSel).textContent = 'Permission denied — click Choose file to re-select.';
+    $(processBtnSel).disabled = true;
+  }
+}
+async function removeFileHandle(key) {
+  const db = await openFileDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FILE_STORE, 'readwrite');
+    tx.objectStore(FILE_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
 }
 window.MRP = STATE;
