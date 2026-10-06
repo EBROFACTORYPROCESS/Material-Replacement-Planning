@@ -168,6 +168,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindButtons();
   bindProduction();
   bindStoredFilesTab();
+  bindPersistentFileSlots();
   bindComparison();
   bindBomDisplayModal();
   bindFilterPopupGlobal();
@@ -5606,7 +5607,74 @@ function bindStoredFilesTab() {
     await renderStoredFilesTab();
   });
 }
+/* Wire the Choose file / Process file buttons in the Inventory and
+   Production Monitoring sections. */
+function bindPersistentFileSlots() {
 
+  /* ---- Inventory & Stock — Batch file ---- */
+  const bPick    = $('#batchFilePick');
+  const bProcess = $('#batchFileProcess');
+  const bInfo    = $('#batchFileInfo');
+
+  bPick?.addEventListener('click', () => pickBatchFile());
+
+  bProcess?.addEventListener('click', async () => {
+    const { handle, perm } = await getSlotStatus('batchFile');
+    if (!handle) { alert('No batch file stored yet. Click Choose file.'); return; }
+
+    let p = perm;
+    if (p !== 'granted') {
+      p = await handle.requestPermission({ mode: 'read' });
+    }
+    if (p !== 'granted') {
+      if (bInfo) bInfo.textContent = 'Permission denied — click Choose file to re-select.';
+      return;
+    }
+    if (bInfo) bInfo.textContent = 'Loading…';
+    try {
+      const file = await handle.getFile();
+      await handleBatchFiles([file]);
+      if (bInfo) bInfo.textContent = `Loaded — ${STATE.batches.length} batches.`;
+    } catch (e) {
+      console.error(e);
+      if (bInfo) bInfo.textContent = 'Load failed: ' + (e.message || e);
+    }
+    renderAllFileChips();
+  });
+
+  /* ---- Production Monitoring — Tracking file ---- */
+  const pPick    = $('#prodFilePick');
+  const pProcess = $('#prodFileProcess');
+  const pInfo    = $('#prodFileInfo');
+
+  pPick?.addEventListener('click', () => pickProductionFile());
+
+  pProcess?.addEventListener('click', async () => {
+    const { handle, perm } = await getSlotStatus('productionFile');
+    if (!handle) { alert('No production file stored yet. Click Choose file.'); return; }
+
+    let p = perm;
+    if (p !== 'granted') {
+      p = await handle.requestPermission({ mode: 'read' });
+    }
+    if (p !== 'granted') {
+      if (pInfo) pInfo.textContent = 'Permission denied — click Choose file to re-select.';
+      return;
+    }
+    if (pInfo) pInfo.textContent = 'Parsing…';
+    try {
+      const file = await handle.getFile();
+      await handleProductionFiles([file]);
+      if (pInfo) pInfo.textContent =
+        `Loaded — ${STATE.production.records.length} VINs · ` +
+        `${STATE.production.batches.size} batches.`;
+    } catch (e) {
+      console.error(e);
+      if (pInfo) pInfo.textContent = 'Load failed: ' + (e.message || e);
+    }
+    renderAllFileChips();
+  });
+}
 /* ---------- Boot & tab switch ---------- */
 async function autoReloadStoredFiles() {
   if (typeof window.showOpenFilePicker !== 'function') return;
