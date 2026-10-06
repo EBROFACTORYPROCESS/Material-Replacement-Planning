@@ -1698,6 +1698,90 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 .stock-short-row:hover > td { background: #fee2e2; }
 .stock-short-row > td:first-child { box-shadow: inset 3px 0 0 0 var(--danger); }
 /* =========================================================
+   Material availability calculator — demand list
+   ========================================================= */
+.mrp-demand-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #e2e8f0;
+}
+.mrp-demand-item {
+  display: grid;
+  grid-template-columns: 28px minmax(160px,1.4fr) 90px minmax(120px,1fr) 130px 90px 32px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+.mrp-demand-item .md-idx {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 700;
+  color: var(--brand);
+  font-size: 11px;
+}
+.mrp-demand-item .md-model {
+  font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mrp-demand-item .md-bom {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  background: #dbeafe;
+  color: var(--brand);
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+.mrp-demand-item .md-color {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mrp-demand-item .md-qty {
+  display: inline-flex; align-items: baseline; gap: 4px;
+}
+.mrp-demand-item .md-qty-input {
+  width: 74px;
+  padding: 4px 6px;
+  font-size: 12.5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  text-align: right;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.mrp-demand-item .md-qty small { color: var(--muted); font-size: 10.5px; }
+.mrp-demand-item .md-parts {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+}
+.mrp-demand-item .md-del {
+  background: transparent;
+  border: 0;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.mrp-demand-item .md-del:hover { background: #fee2e2; }
+
+@media (max-width: 900px) {
+  .mrp-demand-item {
+    grid-template-columns: 24px 1fr 70px 100px;
+  }
+  .mrp-demand-item .md-color,
+  .mrp-demand-item .md-parts { display: none; }
+}
+/* =========================================================
    Responsive
    ========================================================= */
 @media (max-width:900px){
