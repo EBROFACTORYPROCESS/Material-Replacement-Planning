@@ -2367,7 +2367,11 @@ function bindButtons() {
     STATE.batchView = { sorts: {}, filters: {} };
     STATE.bomRegistry = new Map();
     STATE.bomCounter  = new Map();
-    STATE.mrpStock = { items: [], byPartNo: {}, loaded: false, fileName: '', model: '', bomId: '', target: null };
+    STATE.mrpStock = {
+      items: [], byPartNo: {}, loaded: false, fileName: '',
+      model: '', bomId: '',
+      demands: []
+    };
     const sp = $('#stockFilePath'); if (sp) sp.value = '';
     const si = $('#stockFileInfo'); if (si) si.textContent = 'No stock file loaded.';     
     WHERE_USED_OPEN.clear();
@@ -5711,15 +5715,18 @@ async function autoReloadStoredFiles() {
 }
 /* =========================================================
    MATERIAL AVAILABILITY CALCULATOR (Production Planning)
+   Multi-model · multi-variant · multi-quantity demands
    ========================================================= */
 STATE.mrpStock = {
   items: [],        // [{ partNo, qty }]
   byPartNo: {},     // { partNo: totalQty }
   loaded: false,
   fileName: '',
-  model: '',        // specKey (from specKeyOf)
-  bomId: '',        // BOM ID of the selected variant
-  target: null      // null → default to computed max
+  // Staging values for the “+ Add demand” form:
+  model: '',
+  bomId: '',
+  // Demand list — each entry = independent model/variant/qty request
+  demands: []       // [{ id, model (specKey), bomId, qty }]
 };
 
 /* ---------- File parsing ---------- */
@@ -5806,7 +5813,7 @@ async function handleStockFiles(files) {
   }
 }
 
-/* ---------- Model / BOM dropdowns ---------- */
+/* ---------- Model / BOM dropdowns (staging) ---------- */
 function getStockModelOptions() {
   const bySpec = new Map();
   for (const bom of STATE.boms) {
@@ -5867,115 +5874,211 @@ function populateStockBomSelect() {
   }
 }
 
-/* ---------- Feasibility math ---------- */
-function computeStockFeasibility(bom, byPartNo) {
-  if (!bom || !bom.parts || !bom.parts.length) {
-    return { maxVehicles: 0, limitingPart: null, parts: [] };
-  }
-  /* Aggregate per-part quantities (a BOM may list the same part twice) */
-  const reqPerVehicle = {};
-  for (const p of bom.parts) {
-    reqPerVehicle[p.partNo] = (reqPerVehicle[p.partNo] || 0) + (Number(p.qty) || 0);
-  }
-  const parts = [];
-  let max = Infinity;
-  let limitingPart = null;
+/* ---------- Aggregation ---------- */
+/* Walk every demand, aggregate per-vehicle part quantities (a BOM may list the
+   same part twice), multiply by the demand qty, and sum across demands.
+   Returns:
+     required   — { partNo: totalQty }
+     usedIn     — { partNo: [{ demandId, qty }] }
+     totalVehicles */
+function aggregateDemands(demands, _byPartNo) {
+  const required  = {};
+  const usedIn    = {};
+  let totalVehicles = 0;
 
-  for (const [partNo, perVeh] of Object.entries(reqPerVehicle)) {
-    const available = byPartNo[partNo] || 0;
-    const feas = perVeh > 0 ? Math.max(0, Math.floor(available / perVeh)) : 0;
-    if (perVeh > 0 && feas < max) { max = feas; limitingPart = partNo; }
-    parts.push({ partNo, perVehicle: perVeh, available });
+  const models = getStockModelOptions();
+  const modelByKey = new Map(models.map(m => [m.key, m]));
+
+  for (const d of demands) {
+    const spec = modelByKey.get(d.model);
+    if (!spec) continue;
+    const bom = spec.boms.find(b => b.bomId === d.bomId);
+    if (!bom || !bom.parts) continue;
+
+    totalVehicles += d.qty;
+
+    /* Aggregate per-vehicle consumption for this BOM */
+    const perVeh = {};
+    for (const p of bom.parts) {
+      const q = Number(p.qty) || 0;
+      if (!q) continue;
+      perVeh[p.partNo] = (perVeh[p.partNo] || 0) + q;
+    }
+
+    for (const [partNo, pv] of Object.entries(perVeh)) {
+      const need = pv * d.qty;
+      required[partNo] = (required[partNo] || 0) + need;
+      if (!usedIn[partNo]) usedIn[partNo] = [];
+      usedIn[partNo].push({ demandId: d.id, qty: need });
+    }
   }
-  if (!isFinite(max)) max = 0;
-  return { maxVehicles: max, limitingPart, parts };
+
+  return { required, usedIn, totalVehicles };
 }
 
-function applyStockTarget(parts, target) {
-  return parts.map(p => {
-    const needed   = p.perVehicle * target;
-    const leftover = p.available - needed;
-    return { ...p, needed, leftover };
+/* Remove demands whose model/variant no longer exists in the current BOM set. */
+function sanitizeDemands() {
+  const models = getStockModelOptions();
+  const modelByKey = new Map(models.map(m => [m.key, m]));
+  STATE.mrpStock.demands = (STATE.mrpStock.demands || []).filter(d => {
+    const spec = modelByKey.get(d.model);
+    if (!spec) return false;
+    return spec.boms.some(b => b.bomId === d.bomId);
   });
 }
 
-/* ---------- Render ---------- */
+/* ---------- Demand list render ---------- */
+function renderStockDemandList() {
+  const wrap = $('#stockDemandList');
+  if (!wrap) return;
+  const demands = STATE.mrpStock.demands || [];
+  if (!demands.length) {
+    wrap.innerHTML =
+      '<div class="hint" style="margin:0">No demands yet. Pick a model, variant and quantity above, then click “+ Add demand”.</div>';
+    return;
+  }
+  const models = getStockModelOptions();
+  const modelByKey = new Map(models.map(m => [m.key, m]));
+
+  wrap.innerHTML = demands.map((d, i) => {
+    const spec = modelByKey.get(d.model);
+    const modelName = spec ? spec.name : d.model;
+    const bom = spec ? spec.boms.find(b => b.bomId === d.bomId) : null;
+    const colorName = bom ? (deriveColorName([bom], spec.name) || bom.vehicleDesc || bom.vehicleMatNo) : '';
+    const parts = bom ? bom.parts.length : 0;
+    return `
+      <div class="mrp-demand-item" data-id="${d.id}">
+        <span class="md-idx">${i + 1}</span>
+        <span class="md-model" title="${escapeHtml(modelName)}">${escapeHtml(modelName)}</span>
+        <span class="md-bom">${escapeHtml(d.bomId || '?')}</span>
+        <span class="md-color" title="${escapeHtml(colorName)}">${escapeHtml(colorName)}</span>
+        <span class="md-qty">
+          <input type="number" min="0" step="1" value="${d.qty}"
+                 data-id="${d.id}" class="md-qty-input" />
+          <small>veh</small>
+        </span>
+        <span class="md-parts">${parts} parts</span>
+        <button class="md-del" data-id="${d.id}" title="Remove">✕</button>
+      </div>`;
+  }).join('');
+
+  wrap.querySelectorAll('.md-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      STATE.mrpStock.demands = STATE.mrpStock.demands.filter(x => x.id !== btn.dataset.id);
+      renderStockFeasibility();
+    });
+  });
+  wrap.querySelectorAll('.md-qty-input').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const d = STATE.mrpStock.demands.find(x => x.id === inp.dataset.id);
+      if (!d) return;
+      d.qty = Math.max(0, Number(inp.value) || 0);
+      renderStockFeasibility();
+    });
+  });
+}
+
+/* ---------- Main render ---------- */
 function renderStockFeasibility() {
   const tbl = $('#stockTable');
   const sum = $('#stockSummary');
   if (!tbl) return;
 
+  sanitizeDemands();
+  const demands = STATE.mrpStock.demands || [];
+  const byPartNo = STATE.mrpStock.byPartNo || {};
+
   if (!STATE.boms.length) {
     tbl.innerHTML = `<thead><tr><th>Load BOM files first</th></tr></thead>`;
     if (sum) sum.innerHTML = '';
+    renderStockDemandList();
     return;
   }
   if (!STATE.mrpStock.loaded) {
     tbl.innerHTML = `<thead><tr><th>Load a stock file to begin</th></tr></thead>`;
     if (sum) sum.innerHTML = '';
+    renderStockDemandList();
+    return;
+  }
+  if (!demands.length) {
+    tbl.innerHTML = `<thead><tr><th>Add at least one demand (model · variant · quantity)</th></tr></thead>`;
+    if (sum) {
+      sum.innerHTML = `
+        <div class="stat">
+          <div class="label">Stock file</div>
+          <div class="value">${fmt(Object.keys(byPartNo).length)}</div>
+          <div class="sub">parts on hand from <b>${escapeHtml(STATE.mrpStock.fileName || '—')}</b></div>
+        </div>
+        <div class="stat">
+          <div class="label">Demands</div>
+          <div class="value">0</div>
+          <div class="sub">pick a model above and click “+ Add demand”</div>
+        </div>`;
+    }
+    renderStockDemandList();
     return;
   }
 
-  const models = getStockModelOptions();
-  const spec   = models.find(m => m.key === STATE.mrpStock.model);
-  if (!spec) {
-    tbl.innerHTML = `<thead><tr><th>Pick a model</th></tr></thead>`;
-    return;
+  const { required, usedIn, totalVehicles } = aggregateDemands(demands, byPartNo);
+
+  /* Union of required parts and stock parts, so we also see dead stock that
+     the current demands never consume (Required = 0). */
+  const allParts = new Set([...Object.keys(required), ...Object.keys(byPartNo)]);
+  const parts = [];
+  for (const partNo of allParts) {
+    const req      = required[partNo] || 0;
+    const avail    = byPartNo[partNo] || 0;
+    const leftover = avail - req;
+    const shortage = leftover < 0 ? -leftover : 0;
+    const info     = STATE.partIndex[partNo] || {};
+    parts.push({
+      partNo,
+      name:  info.nameEN || info.nameCN || '',
+      uom:   info.uom   || '',
+      available: avail,
+      required:  req,
+      leftover,
+      shortage,
+      usedIn: usedIn[partNo] || []
+    });
   }
-  const bom = spec.boms.find(b => b.bomId === STATE.mrpStock.bomId);
-  if (!bom) {
-    tbl.innerHTML = `<thead><tr><th>Pick a BOM variant</th></tr></thead>`;
-    return;
-  }
 
-  const feas = computeStockFeasibility(bom, STATE.mrpStock.byPartNo);
-
-  /* target: default to computed max, keep user value if valid */
-  let target = Number(STATE.mrpStock.target);
-  if (!isFinite(target) || STATE.mrpStock.target === null) target = feas.maxVehicles;
-
-  const parts = applyStockTarget(feas.parts, target).sort((a, b) => {
-    /* shortages first, then descending shortage amount, then part no */
-    const sa = a.leftover < 0 ? -a.leftover : 0;
-    const sb = b.leftover < 0 ? -b.leftover : 0;
-    if (sa !== sb) return sb - sa;
+  parts.sort((a, b) => {
+    if ((a.shortage > 0) !== (b.shortage > 0)) return a.shortage > 0 ? -1 : 1;
+    if (a.shortage !== b.shortage) return b.shortage - a.shortage;
+    if ((a.required > 0) !== (b.required > 0)) return a.required > 0 ? -1 : 1;
     return a.partNo.localeCompare(b.partNo, undefined, { numeric: true });
   });
 
-  const shortages  = parts.filter(p => p.leftover < 0);
-  const totalShort = shortages.reduce((s, p) => s + (-p.leftover), 0);
-
-  /* Reflect target on the input box */
-  const input = $('#stockTarget');
-  if (input && document.activeElement !== input) {
-    input.value = target;
-  }
+  const shortages       = parts.filter(p => p.shortage > 0);
+  const totalShort      = shortages.reduce((s, p) => s + p.shortage, 0);
+  const partsWithDemand = parts.filter(p => p.required > 0).length;
 
   if (sum) {
     sum.innerHTML = `
       <div class="stat">
-        <div class="label">Max producible</div>
-        <div class="value">${fmt(feas.maxVehicles)}<span class="unit">vehicles</span></div>
-        <div class="sub">limited by <b>${escapeHtml(feas.limitingPart || '—')}</b></div>
+        <div class="label">Demands</div>
+        <div class="value">${fmt(demands.length)}</div>
+        <div class="sub"><b>${fmt(totalVehicles)}</b> vehicles in total</div>
       </div>
       <div class="stat">
-        <div class="label">Target</div>
-        <div class="value">${fmt(target)}<span class="unit">vehicles</span></div>
-        <div class="sub">${target <= feas.maxVehicles
-          ? '<span style="color:var(--ok)">feasible</span>'
-          : '<b style="color:var(--danger)">exceeds stock</b>'}</div>
+        <div class="label">Distinct materials required</div>
+        <div class="value">${fmt(partsWithDemand)}</div>
+        <div class="sub">across all demands</div>
       </div>
       <div class="stat">
-        <div class="label">Parts with demand</div>
-        <div class="value" style="color:${shortages.length ? 'var(--danger)' : 'var(--ok)'}">${fmt(shortages.length)}</div>
+        <div class="label">Parts short</div>
+        <div class="value" style="color:${shortages.length ? 'var(--danger)' : 'var(--ok)'}">
+          ${fmt(shortages.length)}
+        </div>
         <div class="sub">${totalShort
           ? `<b>${fmt(totalShort)}</b> units short in total`
           : 'no shortage'}</div>
       </div>
       <div class="stat">
-        <div class="label">Parts on hand</div>
-        <div class="value">${fmt(Object.keys(STATE.mrpStock.byPartNo).length)}</div>
-        <div class="sub">from <b>${escapeHtml(STATE.mrpStock.fileName || '—')}</b></div>
+        <div class="label">Stock file</div>
+        <div class="value">${fmt(Object.keys(byPartNo).length)}</div>
+        <div class="sub">parts on hand from <b>${escapeHtml(STATE.mrpStock.fileName || '—')}</b></div>
       </div>`;
   }
 
@@ -5984,81 +6087,126 @@ function renderStockFeasibility() {
       <th>Material Number</th>
       <th>Description</th>
       <th>UOM</th>
-      <th class="num">Per Vehicle</th>
       <th class="num">On Hand</th>
       <th class="num">Required</th>
       <th class="num">Leftover</th>
-      <th class="num">Demand</th>
+      <th class="num">Shortage</th>
+      <th class="num">Used In</th>
     </tr></thead>`;
 
   const body = parts.map(p => {
-    const info = STATE.partIndex[p.partNo] || {};
-    const name = info.nameEN || info.nameCN || '';
-    const uom  = info.uom || '';
-    const demand = p.leftover < 0 ? -p.leftover : 0;
+    const shortCell = p.shortage > 0
+      ? `<span style="color:var(--danger);font-weight:600">−${fmt(p.shortage)}</span>`
+      : '—';
+    const usedInCell = p.usedIn.length
+      ? `<button class="btn tiny" data-role="used-in" data-partno="${escapeHtml(p.partNo)}">
+           ${p.usedIn.length} demand${p.usedIn.length === 1 ? '' : 's'}
+         </button>`
+      : '—';
     return `
-      <tr class="${demand ? 'stock-short-row' : ''}">
+      <tr class="${p.shortage > 0 ? 'stock-short-row' : ''}">
         <td class="mono">${escapeHtml(p.partNo)}</td>
-        <td>${escapeHtml(name)}</td>
-        <td>${escapeHtml(uom)}</td>
-        <td class="num">${fmt(p.perVehicle)}</td>
+        <td>${escapeHtml(p.name)}</td>
+        <td>${escapeHtml(p.uom)}</td>
         <td class="num">${fmt(p.available)}</td>
-        <td class="num">${fmt(p.needed)}</td>
-        <td class="num" style="color:${p.leftover < 0 ? 'var(--danger)' : 'inherit'};font-weight:${p.leftover < 0 ? '600' : '400'}">${fmt(p.leftover)}</td>
-        <td class="num" style="color:${demand ? 'var(--danger)' : 'inherit'};font-weight:${demand ? '600' : '400'}">${demand ? '−' + fmt(demand) : '—'}</td>
+        <td class="num">${fmt(p.required)}</td>
+        <td class="num" style="color:${p.leftover < 0 ? 'var(--danger)' : 'inherit'};font-weight:${p.leftover < 0 ? '600' : '400'}">
+          ${fmt(p.leftover)}
+        </td>
+        <td class="num">${shortCell}</td>
+        <td class="num">${usedInCell}</td>
       </tr>`;
   }).join('');
 
-  tbl.innerHTML = head + `<tbody>${body || '<tr><td colspan="8" style="text-align:center;color:#6b7280;padding:16px">This BOM has no parts</td></tr>'}</tbody>`;
+  tbl.innerHTML = head + `<tbody>${body ||
+    '<tr><td colspan="8" style="text-align:center;color:#6b7280;padding:16px">No materials to compute</td></tr>'}</tbody>`;
+
+  /* “Used In” breakdown */
+  tbl.querySelectorAll('button[data-role=used-in]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const partNo = btn.dataset.partno;
+      const p = parts.find(x => x.partNo === partNo);
+      if (!p) return;
+      const models = getStockModelOptions();
+      const modelByKey = new Map(models.map(m => [m.key, m]));
+      const lines = p.usedIn.map(u => {
+        const d = demands.find(x => x.id === u.demandId);
+        if (!d) return '';
+        const spec = modelByKey.get(d.model);
+        const label = spec ? spec.name : d.model;
+        const unit  = p.uom ? ' ' + p.uom : '';
+        return `• ${label} · ${d.bomId} · ${fmt(d.qty)} veh → ${fmt(u.qty)}${unit}`;
+      }).filter(Boolean).join('\n');
+      alert(`Used In — ${partNo}\n\n${lines}\n\nTotal required: ${fmt(p.required)}${p.uom ? ' ' + p.uom : ''}`);
+    });
+  });
+
+  renderStockDemandList();
 }
 
 /* ---------- Export ---------- */
 function exportStockCalc() {
+  const demands = STATE.mrpStock.demands || [];
+  if (!demands.length)      { alert('Add at least one demand first.'); return; }
+  if (!STATE.mrpStock.loaded) { alert('Load a stock file first.'); return; }
+
+  const byPartNo = STATE.mrpStock.byPartNo;
+  const { required, totalVehicles } = aggregateDemands(demands, byPartNo);
   const models = getStockModelOptions();
-  const spec   = models.find(m => m.key === STATE.mrpStock.model);
-  if (!spec) { alert('Pick a model first.'); return; }
-  const bom = spec.boms.find(b => b.bomId === STATE.mrpStock.bomId);
-  if (!bom) { alert('Pick a BOM variant first.'); return; }
-
-  const feas = computeStockFeasibility(bom, STATE.mrpStock.byPartNo);
-  let target = Number(STATE.mrpStock.target);
-  if (!isFinite(target) || STATE.mrpStock.target === null) target = feas.maxVehicles;
-
-  const parts = applyStockTarget(feas.parts, target).sort((a, b) => {
-    const sa = a.leftover < 0 ? -a.leftover : 0;
-    const sb = b.leftover < 0 ? -b.leftover : 0;
-    if (sa !== sb) return sb - sa;
-    return a.partNo.localeCompare(b.partNo, undefined, { numeric: true });
-  });
+  const modelByKey = new Map(models.map(m => [m.key, m]));
 
   const aoa = [
-    ['Material availability — stock vs BOM'],
-    ['Model', spec.name],
-    ['BOM variant', bom.bomId || ''],
+    ['Material availability — aggregated demand vs stock'],
     ['Stock file', STATE.mrpStock.fileName || ''],
-    ['Max producible', feas.maxVehicles],
-    ['Limiting part', feas.limitingPart || ''],
-    ['Target', target],
+    ['Total demands', demands.length],
+    ['Total vehicles', totalVehicles],
     [],
-    ['Material Number', 'Description', 'UOM', 'Per Vehicle', 'On Hand', 'Required', 'Leftover', 'Demand']
+    ['#', 'Model', 'BOM variant', 'Colour', 'Quantity (vehicles)']
   ];
-  for (const p of parts) {
-    const info = STATE.partIndex[p.partNo] || {};
-    const demand = p.leftover < 0 ? -p.leftover : 0;
+  demands.forEach((d, i) => {
+    const spec = modelByKey.get(d.model);
+    const modelName = spec ? spec.name : d.model;
+    const bom = spec ? spec.boms.find(b => b.bomId === d.bomId) : null;
+    const colorName = bom ? (deriveColorName([bom], spec.name) || bom.vehicleDesc || bom.vehicleMatNo) : '';
+    aoa.push([i + 1, modelName, d.bomId, colorName, d.qty]);
+  });
+  aoa.push([]);
+  aoa.push(['Material Number', 'Description', 'UOM', 'On Hand', 'Required', 'Leftover', 'Shortage']);
+
+  const allParts = new Set([...Object.keys(required), ...Object.keys(byPartNo)]);
+  const rows = [];
+  for (const partNo of allParts) {
+    const req      = required[partNo] || 0;
+    const avail    = byPartNo[partNo] || 0;
+    const leftover = avail - req;
+    const shortage = leftover < 0 ? -leftover : 0;
+    const info     = STATE.partIndex[partNo] || {};
+    rows.push({
+      partNo,
+      name:  info.nameEN || info.nameCN || '',
+      uom:   info.uom || '',
+      avail, req, leftover, shortage
+    });
+  }
+  rows.sort((a, b) => {
+    if (a.shortage !== b.shortage) return b.shortage - a.shortage;
+    return a.partNo.localeCompare(b.partNo, undefined, { numeric: true });
+  });
+  for (const r of rows) {
     aoa.push([
-      p.partNo, info.nameEN || info.nameCN || '', info.uom || '',
-      round3(p.perVehicle), round3(p.available), round3(p.needed),
-      round3(p.leftover), round3(demand)
+      r.partNo, r.name, r.uom,
+      round3(r.avail), round3(r.req), round3(r.leftover), round3(r.shortage)
     ]);
   }
+
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Feasibility');
-  downloadWorkbook(wb, `Stock_Feasibility_${dateStamp()}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Demand vs Stock');
+  downloadWorkbook(wb, `Stock_Demand_${dateStamp()}.xlsx`);
 }
 
 /* ---------- Bindings ---------- */
 function bindStockCalc() {
-  /* Picker — native FSA when available */
+  /* Native FSA picker, with fallback to <input type=file> */
   $('#stockFilePick')?.addEventListener('click', async () => {
     if (typeof window.showOpenFilePicker !== 'function') { $('#stockInput').click(); return; }
     try {
@@ -6100,43 +6248,47 @@ function bindStockCalc() {
   }
 
   $('#stockFileClear')?.addEventListener('click', () => {
-    STATE.mrpStock = { items: [], byPartNo: {}, loaded: false, fileName: '', model: '', bomId: '', target: null };
+    STATE.mrpStock.items    = [];
+    STATE.mrpStock.byPartNo = {};
+    STATE.mrpStock.loaded   = false;
+    STATE.mrpStock.fileName = '';
+    /* Demands are kept — the user may re-upload a new stock file for the same demands. */
     const p = $('#stockFilePath'); if (p) p.value = '';
     const i = $('#stockFileInfo'); if (i) i.textContent = 'No stock file loaded.';
-    populateStockModelSelect();
-    populateStockBomSelect();
     renderStockFeasibility();
   });
 
   $('#stockModel')?.addEventListener('change', e => {
-    STATE.mrpStock.model  = e.target.value || '';
-    STATE.mrpStock.bomId  = '';
-    STATE.mrpStock.target = null;
+    STATE.mrpStock.model = e.target.value || '';
+    STATE.mrpStock.bomId = '';
     populateStockBomSelect();
-    renderStockFeasibility();
   });
 
   $('#stockBom')?.addEventListener('change', e => {
-    STATE.mrpStock.bomId  = e.target.value || '';
-    STATE.mrpStock.target = null;
+    STATE.mrpStock.bomId = e.target.value || '';
+  });
+
+  $('#stockAddDemand')?.addEventListener('click', () => {
+    const model = STATE.mrpStock.model;
+    const bomId = STATE.mrpStock.bomId;
+    const qtyIn = $('#stockQty');
+    const qty   = Number(qtyIn?.value);
+    if (!model)                 { alert('Pick a model.'); return; }
+    if (!bomId)                 { alert('Pick a BOM variant.'); return; }
+    if (!qty || qty <= 0)       { alert('Enter a positive quantity.'); return; }
+
+    STATE.mrpStock.demands.push({
+      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
+      model, bomId, qty
+    });
+    if (qtyIn) qtyIn.value = '';
     renderStockFeasibility();
   });
 
-  $('#stockTarget')?.addEventListener('input', e => {
-    const v = e.target.value;
-    STATE.mrpStock.target = v === '' ? null : Number(v);
-    renderStockFeasibility();
-  });
-
-  $('#stockCalc')?.addEventListener('click', () => {
-    const models = getStockModelOptions();
-    const spec   = models.find(m => m.key === STATE.mrpStock.model);
-    if (!spec) { alert('Pick a model first.'); return; }
-    const bom = spec.boms.find(b => b.bomId === STATE.mrpStock.bomId);
-    if (!bom) { alert('Pick a BOM variant first.'); return; }
-    const feas = computeStockFeasibility(bom, STATE.mrpStock.byPartNo);
-    STATE.mrpStock.target = feas.maxVehicles;
-    const inp = $('#stockTarget'); if (inp) inp.value = feas.maxVehicles;
+  $('#stockDemandClear')?.addEventListener('click', () => {
+    if (!STATE.mrpStock.demands.length) return;
+    if (!confirm('Remove all demands?')) return;
+    STATE.mrpStock.demands = [];
     renderStockFeasibility();
   });
 
