@@ -440,14 +440,14 @@
       <div id="planList" class="file-list"></div>
     </div>
     <div class="card">
-  <h2>Material availability calculator</h2>
-  <p class="hint">
-    Upload a stock list (columns: <code>Material Number</code>, <code>Quantity</code>).
-    Pick a vehicle model and a specific BOM variant — the tool reports how many vehicles the current
-    stock can build, per-part leftover after consumption, and — when you push the target above the
-    max — the resulting shortage (procurement demand) highlighted in red.
-  </p>
-
+      <h2>Material availability calculator</h2>
+      <p class="hint">
+        Upload a stock list (columns: <code>Material Number</code>, <code>Quantity</code>).
+        Then add one or more <b>Model · Variant · Quantity</b> demands. The tool sums the
+        material requirements of every demand and reports the unique material request
+        against on-hand stock — shortages are highlighted in red.
+      </p>
+    
       <!-- 1. Load stock file -->
       <div class="mrp-stock-row">
         <input id="stockFilePath" type="text" readonly placeholder="No stock file loaded…" />
@@ -455,7 +455,7 @@
         <button class="btn ghost" id="stockFileClear">✕ Clear</button>
       </div>
       <div class="folder-hint" id="stockFileInfo">No stock file loaded.</div>
-
+    
       <details class="folder-fallback" style="margin-top:10px">
         <summary>…or drop the stock file here</summary>
         <div class="dropzone" id="stockDrop" style="margin-top:12px">
@@ -466,8 +466,8 @@
           </div>
         </div>
       </details>
-
-      <!-- 2. Selection + target -->
+    
+      <!-- 2. Build a demand -->
       <div class="mrp-stock-selectors">
         <label>
           <span>Model</span>
@@ -478,13 +478,19 @@
           <select id="stockBom"></select>
         </label>
         <label>
-          <span>Target vehicles</span>
-          <input id="stockTarget" type="number" min="0" step="1" />
+          <span>Quantity</span>
+          <input id="stockQty" type="number" min="1" step="1" placeholder="vehicles" />
         </label>
-        <button class="btn primary" id="stockCalc">▶ Compute max</button>
+        <button class="btn primary" id="stockAddDemand">+ Add demand</button>
       </div>
-
-      <!-- 3. Result -->
+    
+      <!-- 3. Demand list -->
+      <div class="mrp-demand-list" id="stockDemandList"></div>
+      <div class="row-2">
+        <button class="btn ghost" id="stockDemandClear">✕ Clear all demands</button>
+      </div>
+    
+      <!-- 4. Result -->
       <div class="stats" id="stockSummary" style="margin-top:14px"></div>
       <div class="table-wrap" style="max-height:520px;margin-top:6px">
         <table id="stockTable"></table>
