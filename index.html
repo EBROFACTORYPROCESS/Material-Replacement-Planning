@@ -105,21 +105,36 @@
   <section class="tab-panel" id="panel-production">
   
     <div class="card">
-      <h2>1. Load Production Tracking file</h2>
       <p class="hint">
-        Large CSV with one row per VIN. Columns are auto-detected by header name:
-        <code>vinId, sequence, batch, description, color, materialCode</code> and the milestone
-        columns <code>005 DEVANNING</code>, <code>020 TRIM IN</code>, <code>030 OFF LINE OK</code>,
-        <code>BUY OFF OK</code>, <code>COMPOUND GATE IN IN</code>, <code>COMPOUND GATE OUT OK</code>.
-        Files up to ~50 MB / hundreds of thousands of VINs are supported (parsed in chunks with progress).
+        Select the production tracking file. The path is stored locally so on next visit the file reloads
+        without re-picking. Large files (~50 MB, hundreds of thousands of VINs) are parsed in chunks.
       </p>
-      <div class="dropzone" id="prodDrop">
-        <input type="file" id="prodInput" accept=".csv,.tsv,.txt" />
-        <div class="dz-inner">
-          <strong>Drop production tracking CSV here</strong>
-          <span>or click to browse</span>
+      
+      <div class="folder-loader">
+        <div class="folder-path-row">
+          <input id="prodFilePath" type="text" readonly placeholder="No file selected…" />
+          <button class="btn" id="prodFilePick">📁 Choose file</button>
+          <button class="btn primary" id="prodFileProcess" disabled>▶ Process file</button>
+        </div>
+        <div class="folder-hint" id="prodFileInfo">No file selected yet.</div>
+      
+        <div class="progress-wrap hidden" id="prodProgressWrap">
+          <div class="progress-bar"><div class="progress-fill" id="prodProgressFill"></div></div>
+          <div class="progress-header">
+            <span class="progress-label" id="prodProgressLabel">Preparing…</span>
+          </div>
         </div>
       </div>
+      <details class="folder-fallback">
+        <summary>…or drop the file here</summary>
+        <div class="dropzone" id="prodDrop" style="margin-top:12px">
+          <input type="file" id="prodInput" accept=".csv,.tsv,.txt" />
+          <div class="dz-inner">
+            <strong>Drop production tracking CSV here</strong>
+            <span>or click to browse</span>
+          </div>
+        </div>
+      </details>
       <div class="card">
       <h2>2. Monitoring Period</h2>
       <p class="hint">Set the time window — all KPIs, batches, VIN tables and the capacity chart are filtered to this range. A VIN is in scope if any of its milestones falls inside the period.</p>
@@ -299,13 +314,34 @@
   <section class="tab-panel" id="panel-inventory">
     <div class="card">
       <h2>1. Upload Batch / Shipment file</h2>
-      <p class="hint">CSV or Excel with columns: <code>batch number, Modelo, Color, Cantidad, TRIM IN DATE, Name of ship, Week, Decanting date, …, Arrival Date, Production, …</code></p>
-      <div class="dropzone" id="batchDrop">
-        <input type="file" id="batchInput" accept=".csv,.xlsx,.xls" />
-        <div class="dz-inner">
-          <strong>Drop batch file here</strong>
-          <span>or click to browse</span>
+      <p class="hint">
+        Select the batch / shipment file. The path is stored locally so on next visit the file reloads
+        without re-picking. Columns: <code>batch number, Modelo, Color, Cantidad, TRIM IN DATE, Name of ship,
+        Week, Decanting date, Arrival Date, Production, Color code, Batch Carroceria…</code>
+      </p>
+      
+      <div class="folder-loader">
+        <div class="folder-path-row">
+          <input id="batchFilePath" type="text" readonly placeholder="No file selected…" />
+          <button class="btn" id="batchFilePick">📁 Choose file</button>
+          <button class="btn primary" id="batchFileProcess" disabled>▶ Process file</button>
         </div>
+        <div class="folder-hint" id="batchFileInfo">No file selected yet.</div>
+      </div>
+      
+      <details class="folder-fallback">
+        <summary>…or drop the file here</summary>
+        <div class="dropzone" id="batchDrop" style="margin-top:12px">
+          <input type="file" id="batchInput" accept=".csv,.xlsx,.xls" />
+          <div class="dz-inner">
+            <strong>Drop batch file here</strong>
+            <span>or click to browse</span>
+          </div>
+        </div>
+      </details>
+      
+      <div class="row-2">
+        <button class="btn ghost" id="autoClassify">↻ Re-classify batches</button>
       </div>
       <div class="row-2">
         <button class="btn ghost" id="autoClassify">↻ Re-classify batches</button>
