@@ -452,6 +452,8 @@ function yieldToUI() {
 async function pickBomFolder() {
   if (typeof window.showDirectoryPicker === 'function') {
     try {
+      STATE.mrpStock.model      = '';
+      STATE.mrpStock.variantKey = '';
       const handle = await window.showDirectoryPicker({ mode: 'read' });                     
       _bomFolderHandle = handle;
       await saveFileHandle('bomFolder', handle);
@@ -538,9 +540,8 @@ async function processBomFolder() {
     try {
       const rows = await fileToRows(file);
       const parsedList = parseBOM(rows, path);
-      STATE.mrpStock.model  = '';
-      STATE.mrpStock.bomId  = '';
-      STATE.mrpStock.target = null;       
+      STATE.mrpStock.model      = '';
+      STATE.mrpStock.variantKey = '';  
       if (!parsedList.length) throw new Error('no parts found');
 
       for (const parsed of parsedList) {
@@ -613,9 +614,8 @@ async function handleBomFiles(files) {
   for (const f of files) {
     try {
       const sheets = await fileToSheetRows(f);
-      STATE.mrpStock.model  = '';
-      STATE.mrpStock.bomId  = '';
-      STATE.mrpStock.target = null;
+      STATE.mrpStock.model      = '';
+      STATE.mrpStock.variantKey = '';
       let sheetsToProcess;
       if (sheets.length === 1) {
         sheetsToProcess = sheets;
@@ -5387,8 +5387,16 @@ async function reloadBatchFromHandle(handle) {
   let perm = await handle.queryPermission({ mode: 'read' });
   if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
   if (perm !== 'granted') return;
+
   const f = await handle.getFile();
+  const p = $('#batchFilePath'); if (p) p.value = f.name;
+  const i = $('#batchFileInfo'); if (i) i.textContent = `Loading ${f.name}…`;
+
   await handleBatchFiles([f]);
+
+  if (i) i.textContent = `Loaded — ${STATE.batches.length} batches.`;
+  await renderAllFileChips();
+  await renderStoredFilesTab();
 }
 
 async function pickProductionFile() {
@@ -5410,8 +5418,18 @@ async function reloadProductionFromHandle(handle) {
   let perm = await handle.queryPermission({ mode: 'read' });
   if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
   if (perm !== 'granted') return;
+
   const f = await handle.getFile();
+  const p = $('#prodFilePath'); if (p) p.value = f.name;
+  const i = $('#prodFileInfo'); if (i) i.textContent = `Loading ${f.name}…`;
+
   await handleProductionFiles([f]);
+
+  if (i) i.textContent =
+    `Loaded — ${STATE.production.records.length} VINs · ` +
+    `${STATE.production.batches.size} batches.`;
+  await renderAllFileChips();
+  await renderStoredFilesTab();
 }
 
 async function reloadBomFolderFromHandle(handle) {
@@ -5878,9 +5896,20 @@ function populateStockBomSelect() {
     return;
   }
 
-  /* Sort by BOM number, then by colour code so identical BOM numbers stay in a
-     stable, colour-ordered sequence inside the dropdown. */
-  const boms = spec.boms.slice().sort((a, b) => {
+  /* Deduplicate BOMs by their composite key (colorCode::bomId).
+     Two BOMs loaded from different sales batches with the same vehicleMatNo
+     and identical parts share the same bomId — they must appear once. */
+  const seenKeys = new Set();
+  const boms = [];
+  for (const b of spec.boms) {
+    const key = stockVariantKey(colorCodeOf(b.vehicleMatNo), b.bomId || '');
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    boms.push(b);
+  }
+
+  /* Sort by BOM number, then colour code — stable order in the dropdown. */
+  boms.sort((a, b) => {
     const n = String(a.bomId || '').localeCompare(String(b.bomId || ''), undefined, { numeric: true });
     if (n) return n;
     return colorCodeOf(a.vehicleMatNo).localeCompare(colorCodeOf(b.vehicleMatNo));
@@ -5896,13 +5925,12 @@ function populateStockBomSelect() {
            `${escapeHtml(b.bomId || '?')} — ${escapeHtml(color)} (${b.parts.length} parts)</option>`;
   }).join('');
 
-  /* If nothing was staged yet — or the staged variant disappeared after a BOM reload —
-     fall back to the first option in the new list. */
   if (!current || !boms.some(b =>
         stockVariantKey(colorCodeOf(b.vehicleMatNo), b.bomId || '') === current)) {
     const first = boms[0];
     if (first) {
-      STATE.mrpStock.variantKey = stockVariantKey(colorCodeOf(first.vehicleMatNo), first.bomId || '');
+      STATE.mrpStock.variantKey =
+        stockVariantKey(colorCodeOf(first.vehicleMatNo), first.bomId || '');
       sel.value = STATE.mrpStock.variantKey;
     } else {
       STATE.mrpStock.variantKey = '';
@@ -6333,5 +6361,70 @@ $('#stockAddDemand')?.addEventListener('click', () => {
   });
 
   $('#stockExport')?.addEventListener('click', exportStockCalc);
+}
+/* ---------------------------------------------------------
+   Restore-session banner
+   When Chrome/Edge blocks auto-reload of FSA handles on a fresh
+   session, we show a small card the user can click once to grant
+   permissions for every pending slot and reload them.
+   --------------------------------------------------------- */
+async function showRestoreSessionBanner() {
+  if (document.getElementById('restoreBanner')) return;
+
+  /* Collect slots stuck on 'prompt' or 'denied'. */
+  const pending = [];
+  for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
+    const { handle, perm } = await getSlotStatus(slotKey);
+    if (handle && perm !== 'granted' && perm !== 'absent') {
+      pending.push({ slotKey, slot, perm });
+    }
+  }
+  if (!pending.length) return;
+
+  const banner = document.createElement('div');
+  banner.id = 'restoreBanner';
+  banner.style.cssText = `
+    position: fixed; top: 72px; right: 20px; z-index: 250;
+    background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px;
+    padding: 14px 18px; box-shadow: 0 8px 24px rgba(16,24,40,.14);
+    max-width: 380px; font-size: 13px; line-height: 1.5;`;
+  banner.innerHTML = `
+    <div style="font-weight:600;color:#92400e;margin-bottom:6px">
+      ⚠ Stored files need reconnection
+    </div>
+    <div style="color:#78350f;margin-bottom:10px">
+      The browser blocked automatic reload of ${pending.length}
+      stored file${pending.length === 1 ? '' : 's'}.
+      Click below to reconnect and reload them in one go.
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button id="restoreDismiss" style="
+        padding:5px 10px;border:1px solid #e5e7eb;background:#fff;
+        border-radius:6px;cursor:pointer;font-size:12px">Dismiss</button>
+      <button id="restoreAll" style="
+        padding:5px 12px;border:1px solid #f59e0b;background:#f59e0b;
+        color:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600">
+        🔓 Reconnect &amp; Reload</button>
+    </div>`;
+  document.body.appendChild(banner);
+
+  document.getElementById('restoreDismiss').addEventListener('click', () => banner.remove());
+  document.getElementById('restoreAll').addEventListener('click', async () => {
+    banner.remove();
+    for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
+      const { handle, perm } = await getSlotStatus(slotKey);
+      if (!handle || perm === 'granted') continue;
+      /* We are inside a click handler, so requestPermission is allowed. */
+      let p = await handle.queryPermission({ mode: slot.mode });
+      if (p !== 'granted') p = await handle.requestPermission({ mode: slot.mode });
+      if (p !== 'granted') continue;
+      const fn = window[slot.reloadFn];
+      if (typeof fn === 'function') {
+        try { await fn(handle); } catch (e) { console.error('Restore ' + slotKey, e); }
+      }
+    }
+    await renderAllFileChips();
+    await renderStoredFilesTab();
+  });
 }
 window.MRP = STATE;
