@@ -95,7 +95,24 @@ function colorBadgeStyle(code) {
   const hue = Math.abs(h) % 360;
   return `background:hsl(${hue},70%,92%);color:hsl(${hue},65%,32%)`;
 }
+/* Material-code family: vehicle material number with the colour code (chars 8–9)
+   replaced by XX.  T7150U5CLNG0901 → T7150U5XXNG0901
+   Groups different SKD/DKD/CKD variants and model-year evolutions of the same spec. */
+function matFamilyOf(vehicleMatNo) {
+  const v = (vehicleMatNo || '').trim();
+  if (v.length < 9) return v || '__no_matno__';
+  return v.substring(0, 7) + 'XX' + v.substring(9);
+}
 
+/* Render the family key with the XX substitution highlighted. */
+function matFamilyBadgeHtml(famKey) {
+  const s = String(famKey || '');
+  const i = s.indexOf('XX');
+  if (i < 0) return escapeHtml(s);
+  return escapeHtml(s.slice(0, i))
+       + '<span class="xx">XX</span>'
+       + escapeHtml(s.slice(i + 2));
+}
 /* ---------------- BOM-ID assignment (scoped per spec + colour) ---------------- */
 function bomSignature(bom) {
   if (!bom || !bom.parts) return '';
