@@ -314,14 +314,12 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}
 
 /* =========================================================
    Hierarchical BOM list
-   spec (blue) → family (purple) → colour (slate) → BOM (blue)
-   Each level gets its own tint + a left accent bar so the eye
-   can lock onto the depth without tracing borders.
+   spec → family → colour → BOM, all in a single blue ramp
    ========================================================= */
 
 /* ---- Level 1: Spec ---------------------------------------- */
 .bom-spec-group{
-  border:1px solid #cbd5e1;border-radius:10px;background:#fff;
+  border:1px solid #bfdbfe;border-radius:10px;background:#fff;
   margin-bottom:14px;overflow:hidden;
   box-shadow:0 1px 2px rgba(16,24,40,.04)}
 .bom-spec-header{
@@ -347,33 +345,33 @@ details.bom-spec-group:not([open]) > .bom-spec-header::before{transform:rotate(-
   display:flex;flex-direction:column;
   padding:8px;background:#f8fafc;gap:8px}
 .bom-matcode-group{
-  border:1px solid #ddd6fe;border-left:4px solid #7c3aed;
+  border:1px solid #bfdbfe;border-left:4px solid #2563eb;
   border-radius:8px;background:#fff;overflow:hidden}
 .bom-matcode-header{
   display:flex;align-items:center;gap:12px;
   padding:9px 14px 9px 12px;
-  background:linear-gradient(to right,#f5f3ff 0%,#ede9fe 55%,#f5f3ff 100%);
+  background:linear-gradient(to right,#eff6ff 0%,#dbeafe 55%,#eff6ff 100%);
   cursor:pointer;list-style:none;user-select:none;font-size:12.5px;
-  border-bottom:1px solid #ddd6fe}
+  border-bottom:1px solid #bfdbfe}
 .bom-matcode-header::-webkit-details-marker{display:none}
 .bom-matcode-header::before{
-  content:'▾';color:#7c3aed;font-size:10.5px;font-weight:700;
+  content:'▾';color:#2563eb;font-size:10.5px;font-weight:700;
   width:10px;text-align:center;transition:transform .15s}
 details.bom-matcode-group:not([open]) > .bom-matcode-header::before{
   transform:rotate(-90deg)}
 .bom-matcode-header:hover{
-  background:linear-gradient(to right,#ede9fe 0%,#ddd6fe 55%,#ede9fe 100%)}
+  background:linear-gradient(to right,#dbeafe 0%,#bfdbfe 55%,#dbeafe 100%)}
 .bom-matcode-badge{
   display:inline-block;
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:12px;font-weight:800;padding:3px 12px;border-radius:6px;
-  background:#4c1d95;color:#f5f3ff;letter-spacing:.08em;
-  box-shadow:0 1px 2px rgba(76,29,149,.25)}
+  background:#1e40af;color:#eff6ff;letter-spacing:.08em;
+  box-shadow:0 1px 2px rgba(30,64,175,.22)}
 .bom-matcode-badge .xx{
-  color:#fbbf24;font-weight:900;letter-spacing:.14em}
+  color:#93c5fd;font-weight:900;letter-spacing:.14em}
 .bom-matcode-count{
-  margin-left:auto;font-size:11.5px;color:#5b21b6;font-weight:600;
-  background:rgba(124,58,237,.08);
+  margin-left:auto;font-size:11.5px;color:#1e40af;font-weight:600;
+  background:rgba(37,99,235,.08);
   padding:3px 10px;border-radius:999px;white-space:nowrap}
 
 /* ---- Level 3: Colour group -------------------------------- */
@@ -381,15 +379,15 @@ details.bom-matcode-group:not([open]) > .bom-matcode-header::before{
   display:flex;flex-direction:column;
   padding:8px 10px 10px 14px;gap:6px;background:#fff}
 .bom-color-group{
-  border:1px solid #e2e8f0;border-left:3px solid #94a3b8;
+  border:1px solid #dbeafe;border-left:3px solid #60a5fa;
   border-radius:6px;background:#f8fafc;overflow:hidden}
 .bom-color-header{
   display:flex;align-items:center;gap:10px;
   padding:7px 12px;background:#f1f5f9;cursor:pointer;list-style:none;
-  user-select:none;border-bottom:1px solid #e2e8f0}
+  user-select:none;border-bottom:1px solid #dbeafe}
 .bom-color-header::-webkit-details-marker{display:none}
 .bom-color-header::before{
-  content:'▾';color:#64748b;font-size:10px;
+  content:'▾';color:#3b82f6;font-size:10px;
   width:10px;text-align:center;transition:transform .15s}
 details.bom-color-group:not([open]) > .bom-color-header::before{
   transform:rotate(-90deg)}
@@ -402,7 +400,7 @@ details.bom-color-group:not([open]) > .bom-color-header::before{
   display:inline-block;
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;
-  background:#e2e8f0;color:#1e293b;letter-spacing:.04em}
+  background:#e2e8f0;color:#1e3a8a;letter-spacing:.04em}
 
 .color-code{
   display:inline-block;
@@ -415,7 +413,7 @@ details.bom-color-group:not([open]) > .bom-color-header::before{
   display:flex;flex-direction:column;
   padding:6px 8px 8px;gap:6px;background:#fff}
 .bom-id-group{
-  border:1px solid #e5e7eb;border-left:3px solid #2563eb;
+  border:1px solid #e0e7ff;border-left:3px solid #93c5fd;
   border-radius:6px;background:#fff;overflow:hidden}
 .bom-id-header{
   display:flex;align-items:center;gap:10px;
@@ -434,10 +432,10 @@ details.bom-color-group:not([open]) > .bom-color-header::before{
   list-style:none;user-select:none}
 .bom-batch-toggle > summary::-webkit-details-marker{display:none}
 .bom-batch-toggle > summary::before{
-  content:'▸';display:inline-block;width:12px;color:#94a3b8;
+  content:'▸';display:inline-block;width:12px;color:#93c5fd;
   font-size:10px;transition:transform .15s}
 .bom-batch-toggle[open] > summary::before{content:'▾'}
-.bom-batch-toggle > summary:hover{color:#2563eb;background:#f1f5f9}
+.bom-batch-toggle > summary:hover{color:#2563eb;background:#eff6ff}
 .bom-batch-toggle[open] > summary{
   border-bottom:1px solid #eef2f7;background:#f8fafc;
   color:#0f172a;font-weight:500}
@@ -448,13 +446,13 @@ details.bom-color-group:not([open]) > .bom-color-header::before{
   display:inline-block;
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11px;line-height:1.7;padding:1px 9px;
-  background:#eef2f7;color:#334155;border:1px solid #e2e8f0;
+  background:#eff6ff;color:#1e3a8a;border:1px solid #dbeafe;
   border-radius:99px;white-space:nowrap}
 .bom-batch-chip:hover{
-  background:#e0e7ff;border-color:#c7d2fe;color:#3730a3}
+  background:#dbeafe;border-color:#bfdbfe;color:#1e40af}
 
 /* Optional focus rings */
-.bom-matcode-group:hover{box-shadow:0 0 0 2px rgba(124,58,237,.12)}
+.bom-matcode-group:hover{box-shadow:0 0 0 2px rgba(37,99,235,.10)}
 .bom-spec-group:hover{box-shadow:0 0 0 3px rgba(37,99,235,.10)}
 
 /* =========================================================
@@ -614,9 +612,9 @@ details.bom-color-group:not([open]) > .bom-color-header::before{
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11px;font-weight:700;
   padding:1px 8px;border-radius:5px;
-  background:#ede9fe;color:#5b21b6;
+  background:#dbeafe;color:#1e40af;
   letter-spacing:.05em}
-.bom-search-matcode .xx{color:#a78bfa}
+.bom-search-matcode .xx{color:#60a5fa}
 .bom-search-matno{
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11px;color:#475569;
@@ -1681,11 +1679,11 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 .stock-short-row:hover > td { background: #fee2e2; }
 .stock-short-row > td:first-child { box-shadow: inset 3px 0 0 0 var(--danger); }
 
-/* Optional: optgroup styling for the BOM variant dropdown */
+/* Optgroup styling for the BOM variant dropdown */
 #stockBom optgroup {
   font-weight: 700;
-  color: #5b21b6;
-  background: #faf5ff;
+  color: #1e40af;
+  background: #eff6ff;
 }
 #stockBom option {
   font-weight: 400;
@@ -1740,11 +1738,11 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 5px;
-  background: #ede9fe;
-  color: #5b21b6;
+  background: #dbeafe;
+  color: #1e40af;
   letter-spacing: .05em;
 }
-.mrp-demand-item .md-family .xx { color: #a78bfa; }
+.mrp-demand-item .md-family .xx { color: #60a5fa; }
 .mrp-demand-item .md-color {
   color: var(--muted);
   font-size: 12px;
