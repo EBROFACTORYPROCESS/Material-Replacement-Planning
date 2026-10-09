@@ -259,7 +259,6 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}
 .folder-hint{font-size:12px;color:var(--muted)}
 
 /* Progress panel */
-/* Progress panel */
 .progress-wrap{
   padding:12px 14px;background:#fff;border:1px solid var(--border);border-radius:10px;
   display:flex;flex-direction:column;gap:6px}
@@ -312,105 +311,151 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}
   background:#fef2f2;border:1px solid #fecaca}
 .progress-file.fail-row .pf-name{color:var(--danger)}
 .progress-file.fail-row .pf-note{color:var(--danger);font-weight:600}
+
 /* =========================================================
-   Hierarchical BOM list (spec → colour → BOM-ID → batches)
+   Hierarchical BOM list
+   spec (blue) → family (purple) → colour (slate) → BOM (blue)
+   Each level gets its own tint + a left accent bar so the eye
+   can lock onto the depth without tracing borders.
    ========================================================= */
+
+/* ---- Level 1: Spec ---------------------------------------- */
 .bom-spec-group{
-  border:1px solid var(--border);border-radius:10px;background:#fff;
-  margin-bottom:10px;overflow:hidden}
+  border:1px solid #cbd5e1;border-radius:10px;background:#fff;
+  margin-bottom:14px;overflow:hidden;
+  box-shadow:0 1px 2px rgba(16,24,40,.04)}
 .bom-spec-header{
-  display:flex;align-items:center;gap:10px;
-  padding:10px 14px;background:#eef2f7;border-bottom:1px solid var(--border);
-  cursor:pointer;list-style:none}
+  display:flex;align-items:center;gap:12px;
+  padding:11px 16px;
+  background:linear-gradient(to right,#1e40af 0%,#2563eb 60%,#3b82f6 100%);
+  color:#fff;cursor:pointer;list-style:none;user-select:none;
+  font-size:13.5px}
 .bom-spec-header::-webkit-details-marker{display:none}
 .bom-spec-header::before{
-  content:'▾';color:var(--muted);font-size:11px;transition:transform .15s}
+  content:'▾';color:#bfdbfe;font-size:12px;font-weight:700;
+  width:12px;text-align:center;transition:transform .15s}
 details.bom-spec-group:not([open]) > .bom-spec-header::before{transform:rotate(-90deg)}
-.bom-spec-header .spec-name{font-weight:600;color:var(--text);flex:1}
-.bom-spec-header .spec-count{font-size:11px;color:var(--muted);font-weight:500}
-.bom-color-list{display:flex;flex-direction:column}
-.bom-color-group{padding:8px 14px 10px 22px;border-bottom:1px solid #f1f5f9}
-.bom-color-group:last-child{border-bottom:0}
+.bom-spec-header .spec-name{
+  font-weight:700;letter-spacing:.02em;flex:1;color:#fff}
+.bom-spec-header .spec-count{
+  font-size:11.5px;color:#dbeafe;font-weight:500;
+  background:rgba(255,255,255,.14);
+  padding:3px 10px;border-radius:999px;white-space:nowrap}
+
+/* ---- Level 2: Material-code family ------------------------ */
+.bom-matcode-list{
+  display:flex;flex-direction:column;
+  padding:8px;background:#f8fafc;gap:8px}
+.bom-matcode-group{
+  border:1px solid #ddd6fe;border-left:4px solid #7c3aed;
+  border-radius:8px;background:#fff;overflow:hidden}
+.bom-matcode-header{
+  display:flex;align-items:center;gap:12px;
+  padding:9px 14px 9px 12px;
+  background:linear-gradient(to right,#f5f3ff 0%,#ede9fe 55%,#f5f3ff 100%);
+  cursor:pointer;list-style:none;user-select:none;font-size:12.5px;
+  border-bottom:1px solid #ddd6fe}
+.bom-matcode-header::-webkit-details-marker{display:none}
+.bom-matcode-header::before{
+  content:'▾';color:#7c3aed;font-size:10.5px;font-weight:700;
+  width:10px;text-align:center;transition:transform .15s}
+details.bom-matcode-group:not([open]) > .bom-matcode-header::before{
+  transform:rotate(-90deg)}
+.bom-matcode-header:hover{
+  background:linear-gradient(to right,#ede9fe 0%,#ddd6fe 55%,#ede9fe 100%)}
+.bom-matcode-badge{
+  display:inline-block;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12px;font-weight:800;padding:3px 12px;border-radius:6px;
+  background:#4c1d95;color:#f5f3ff;letter-spacing:.08em;
+  box-shadow:0 1px 2px rgba(76,29,149,.25)}
+.bom-matcode-badge .xx{
+  color:#fbbf24;font-weight:900;letter-spacing:.14em}
+.bom-matcode-count{
+  margin-left:auto;font-size:11.5px;color:#5b21b6;font-weight:600;
+  background:rgba(124,58,237,.08);
+  padding:3px 10px;border-radius:999px;white-space:nowrap}
+
+/* ---- Level 3: Colour group -------------------------------- */
+.bom-color-list{
+  display:flex;flex-direction:column;
+  padding:8px 10px 10px 14px;gap:6px;background:#fff}
+.bom-color-group{
+  border:1px solid #e2e8f0;border-left:3px solid #94a3b8;
+  border-radius:6px;background:#f8fafc;overflow:hidden}
 .bom-color-header{
   display:flex;align-items:center;gap:10px;
-  padding:4px 0 6px;cursor:pointer;list-style:none}
+  padding:7px 12px;background:#f1f5f9;cursor:pointer;list-style:none;
+  user-select:none;border-bottom:1px solid #e2e8f0}
 .bom-color-header::-webkit-details-marker{display:none}
 .bom-color-header::before{
-  content:'▾';color:var(--muted);font-size:10px;transition:transform .15s}
-details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate(-90deg)}
-.color-code{
-  display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;
-  letter-spacing:.06em}
-.color-name{font-size:13px;color:var(--text);font-weight:500;flex:1}
-.color-count{font-size:11px;color:var(--muted)}
+  content:'▾';color:#64748b;font-size:10px;
+  width:10px;text-align:center;transition:transform .15s}
+details.bom-color-group:not([open]) > .bom-color-header::before{
+  transform:rotate(-90deg)}
+.bom-color-header:hover{background:#e2e8f0}
+.bom-color-header .color-name{
+  font-size:12.5px;color:#0f172a;font-weight:600;flex:1}
+.bom-color-header .color-count{
+  font-size:11px;color:#475569;font-weight:500;white-space:nowrap}
+.bom-color-header .color-matno{
+  display:inline-block;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;
+  background:#e2e8f0;color:#1e293b;letter-spacing:.04em}
 
-/* =========================================================
-   BOM ID group inside a color group
-   ========================================================= */
-.bom-id-list{display:flex;flex-direction:column;gap:6px;padding-left:8px}
-.bom-id-group{
-  border:1px solid #eef2f7;border-radius:8px;background:#fff;
-  overflow:hidden}
-.bom-id-header{
-  display:flex;align-items:center;gap:10px;
-  padding:6px 10px;background:#f8fafc;border-bottom:1px solid #eef2f7}
-.bom-id-badge{
+.color-code{
+  display:inline-block;
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;
-  background:#dbeafe;color:var(--brand);letter-spacing:.04em}
-.bom-id-stats{font-size:11.5px;color:var(--muted);flex:1}
+  letter-spacing:.06em}
 
-/* =========================================================
-   BOM ID group — collapsible compact batch chips
-   ========================================================= */
+/* ---- Level 4: BOM ID group -------------------------------- */
+.bom-id-list{
+  display:flex;flex-direction:column;
+  padding:6px 8px 8px;gap:6px;background:#fff}
+.bom-id-group{
+  border:1px solid #e5e7eb;border-left:3px solid #2563eb;
+  border-radius:6px;background:#fff;overflow:hidden}
+.bom-id-header{
+  display:flex;align-items:center;gap:10px;
+  padding:7px 12px;background:#f8fafc;border-bottom:1px solid #eef2f7}
+.bom-id-badge{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;font-weight:800;padding:2px 9px;border-radius:5px;
+  background:#dbeafe;color:#1d4ed8;letter-spacing:.05em}
+.bom-id-stats{font-size:11.5px;color:#64748b;flex:1}
+
+/* ---- Batch chips ----------------------------------------- */
 .bom-batch-toggle{
-  border-top:1px solid #eef2f7;
-  background:#fbfcfe}
+  border-top:1px solid #eef2f7;background:#fbfcfe}
 .bom-batch-toggle > summary{
-  cursor:pointer;
-  padding:6px 12px;
-  font-size:11.5px;
-  color:var(--muted);
-  list-style:none;
-  user-select:none}
+  cursor:pointer;padding:6px 12px;font-size:11.5px;color:#64748b;
+  list-style:none;user-select:none}
 .bom-batch-toggle > summary::-webkit-details-marker{display:none}
 .bom-batch-toggle > summary::before{
-  content:'▸';
-  display:inline-block;
-  width:12px;
-  color:var(--muted);
-  font-size:10px;
-  transition:transform .15s}
+  content:'▸';display:inline-block;width:12px;color:#94a3b8;
+  font-size:10px;transition:transform .15s}
 .bom-batch-toggle[open] > summary::before{content:'▾'}
-.bom-batch-toggle > summary:hover{color:var(--brand);background:#f1f5f9}
+.bom-batch-toggle > summary:hover{color:#2563eb;background:#f1f5f9}
 .bom-batch-toggle[open] > summary{
-  border-bottom:1px solid #eef2f7;
-  background:#f8fafc;
-  color:var(--text);font-weight:500}
-
-/* Compact wrapping chip list */
+  border-bottom:1px solid #eef2f7;background:#f8fafc;
+  color:#0f172a;font-weight:500}
 .bom-batch-list{
-  display:flex;
-  flex-wrap:wrap;
-  gap:4px 6px;
-  padding:8px 12px 10px;
-  background:#fff}
+  display:flex;flex-wrap:wrap;gap:4px 6px;
+  padding:8px 12px 10px;background:#fff}
 .bom-batch-chip{
   display:inline-block;
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-size:11px;
-  line-height:1.7;
-  padding:1px 9px;
-  background:#eef2f7;
-  color:#334155;
-  border:1px solid #e2e8f0;
-  border-radius:99px;
-  white-space:nowrap}
+  font-size:11px;line-height:1.7;padding:1px 9px;
+  background:#eef2f7;color:#334155;border:1px solid #e2e8f0;
+  border-radius:99px;white-space:nowrap}
 .bom-batch-chip:hover{
-  background:#e0e7ff;
-  border-color:#c7d2fe;
-  color:#3730a3}
+  background:#e0e7ff;border-color:#c7d2fe;color:#3730a3}
+
+/* Optional focus rings */
+.bom-matcode-group:hover{box-shadow:0 0 0 2px rgba(124,58,237,.12)}
+.bom-spec-group:hover{box-shadow:0 0 0 3px rgba(37,99,235,.10)}
 
 /* =========================================================
    Material List
@@ -441,20 +486,13 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
 
 /* Chip variant that carries qty + uom */
 .bom-batch-chip.wu-chip{
-  display:inline-flex;
-  align-items:baseline;
-  gap:6px}
+  display:inline-flex;align-items:baseline;gap:6px}
 .wu-chip-qty{
-  font-weight:700;
-  color:var(--text);
-  font-size:11.5px;
+  font-weight:700;color:var(--text);font-size:11.5px;
   font-variant-numeric:tabular-nums}
 .wu-chip-uom{
-  font-size:10.5px;
-  color:var(--muted);
-  text-transform:uppercase;
-  letter-spacing:.05em;
-  font-weight:500}
+  font-size:10.5px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.05em;font-weight:500}
 .bom-batch-chip.wu-chip:hover .wu-chip-qty{color:var(--brand)}
 
 /* =========================================================
@@ -570,6 +608,20 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
   color:#78350f;
   font-weight:600}
 
+/* Search-result additions for material-code family */
+.bom-search-matcode{
+  display:inline-block;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;font-weight:700;
+  padding:1px 8px;border-radius:5px;
+  background:#ede9fe;color:#5b21b6;
+  letter-spacing:.05em}
+.bom-search-matcode .xx{color:#a78bfa}
+.bom-search-matno{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;color:#475569;
+  background:#eef2f7;padding:1px 6px;border-radius:4px}
+
 /* =========================================================
    Production Monitoring
    ========================================================= */
@@ -667,20 +719,7 @@ details.bom-color-group:not([open]) > .bom-color-header::before{transform:rotate
 /* Make table header sticky for tall production tables */
 #prodBatchTable th,
 #prodVinTable th { position: sticky; top: 0; }
-function clearProduction() {
-  if (!STATE.production.loaded) return;
-  if (!confirm('Clear all loaded production tracking data?')) return;
-  STATE.production = {
-    records: [], batches: new Map(), header: null, loaded: false,
-    batchView: { search: '', filter: 'all' },
-    vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
-  };
-  PROD_BATCH_EXPANDED.clear();        // ← add this line
-  $('#prodProgressWrap').classList.add('hidden');
-  renderProductionStats();
-  renderProductionBatchTable();
-  renderProductionVinTable();
-}
+
 /* =========================================================
    Production — hierarchical batch tree
    ========================================================= */
@@ -745,9 +784,7 @@ details.prod-color-group:not([open]) > .prod-color-header::before { transform: r
 .prod-color-header .color-count { font-size: 11px; color: var(--muted); }
 .prod-color-header .color-count b { color: var(--text); }
 
-.prod-batch-list {
-  padding: 4px 0 0;
-}
+.prod-batch-list { padding: 4px 0 0; }
 .prod-batch-inner-table {
   width: 100%;
   border-collapse: collapse;
@@ -774,6 +811,7 @@ details.prod-color-group:not([open]) > .prod-color-header::before { transform: r
 .prod-batch-inner-table tr:last-child > td { border-bottom: 0; }
 .prod-batch-inner-table td.num,
 .prod-batch-inner-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
 /* =========================================================
    Production — compact KPI strip + capacity chart
    ========================================================= */
@@ -929,40 +967,6 @@ details.prod-color-group:not([open]) > .prod-color-header::before { transform: r
   border-color: var(--brand);
 }
 
-/* Date input styling (reused from chart) */
-.prod-chart-date {
-  padding: 4px 8px;
-  font-size: 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fff;
-  color: var(--text);
-  font-family: inherit;
-}
-.prod-chart-date:focus {
-  outline: none;
-  border-color: var(--brand);
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, .15);
-}
-.prod-chart-label {
-  font-size: 12px;
-  color: var(--muted);
-  font-weight: 500;
-}
-
-.prod-period-controls .btn.tiny {
-  padding: 5px 11px;
-  font-size: 12px;
-  font-weight: 500;
-}
-.prod-period-controls .btn.tiny.primary {
-  background: var(--brand);
-  color: #fff;
-  border-color: var(--brand);
-}
-.prod-period-controls .btn.tiny.primary:hover {
-  background: var(--brand-2);
-}
 #prodPeriodApply {
   padding: 5px 14px;
   font-weight: 600;
@@ -985,6 +989,7 @@ details.prod-color-group:not([open]) > .prod-color-header::before { transform: r
   0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
   50%      { box-shadow: 0 0 0 4px rgba(245, 158, 11, .28); }
 }
+
 /* =========================================================
    Production — line level (top of batch tree)
    ========================================================= */
@@ -1041,6 +1046,7 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   flex-direction: column;
   gap: 10px;
 }
+
 /* =========================================================
    Production — multi-select dropdowns (Line / Model)
    ========================================================= */
@@ -1175,6 +1181,7 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   border-color: var(--brand);
   box-shadow: 0 0 0 2px rgba(37, 99, 235, .15);
 }
+
 /* =========================================================
    Production — XML export
    ========================================================= */
@@ -1272,6 +1279,7 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   font-weight: 600;
   color: #7f1d1d;
 }
+
 /* =========================================================
    Inventory — batch hierarchy (Model → Colour → Batch)
    ========================================================= */
@@ -1310,38 +1318,6 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 .batch-tree .prod-batch-inner-table td.num,
 .batch-tree .prod-batch-inner-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
-.sheet-picker-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 380px;
-  overflow-y: auto;
-}
-.sheet-pick-item {
-  display: grid;
-  grid-template-columns: 20px 1fr auto;
-  gap: 10px;
-  align-items: center;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fafbff;
-  cursor: pointer;
-  font-size: 13px;
-}
-.sheet-pick-item:hover { background: #f1f5f9; }
-.sheet-pick-item input { margin: 0; }
-.sheet-pick-item .sheet-name {
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sheet-pick-item .sheet-dims {
-  font-size: 11.5px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
 /* =========================================================
    Sheet picker modal (multi-sheet Excel import)
    ========================================================= */
@@ -1391,6 +1367,10 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 .batch-tree .prod-batch-inner-table td .btn.tiny {
   display: inline-block;
 }
+
+/* =========================================================
+   Line chips
+   ========================================================= */
 .line-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1473,6 +1453,7 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   font-size: 10.5px;
   padding: 1px 7px;
 }
+
 /* =========================================================
    Persistent file handles — status bar
    ========================================================= */
@@ -1486,7 +1467,7 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   border-bottom: 1px solid var(--border);
   font-size: 12.5px;
   position: sticky;
-  top: 60px;                          /* just below the .topbar */
+  top: 60px;
   z-index: 40;
 }
 .stored-bar.hidden { display: none; }
@@ -1546,6 +1527,7 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   border-radius: 5px;
 }
 .sb-forget:hover { background: #fee2e2; color: var(--danger); }
+
 /* =========================================================
    Stored Files tab — table
    ========================================================= */
@@ -1637,6 +1619,7 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   border-radius: 5px;
 }
 .file-chip .fc-action:hover { background: #dbeafe; }
+
 /* =========================================================
    Material availability calculator
    ========================================================= */
@@ -1697,6 +1680,18 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 .stock-short-row > td { background: #fef2f2; }
 .stock-short-row:hover > td { background: #fee2e2; }
 .stock-short-row > td:first-child { box-shadow: inset 3px 0 0 0 var(--danger); }
+
+/* Optional: optgroup styling for the BOM variant dropdown */
+#stockBom optgroup {
+  font-weight: 700;
+  color: #5b21b6;
+  background: #faf5ff;
+}
+#stockBom option {
+  font-weight: 400;
+  color: var(--text);
+}
+
 /* =========================================================
    Material availability calculator — demand list
    ========================================================= */
@@ -1710,7 +1705,7 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 }
 .mrp-demand-item {
   display: grid;
-  grid-template-columns: 28px minmax(160px,1.4fr) 90px minmax(120px,1fr) 130px 90px 32px;
+  grid-template-columns: 28px minmax(140px,1.2fr) 90px 130px minmax(120px,1fr) 130px 80px 32px;
   gap: 10px;
   align-items: center;
   padding: 8px 12px;
@@ -1739,6 +1734,17 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   padding: 2px 8px;
   border-radius: 6px;
 }
+.mrp-demand-item .md-family {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: #ede9fe;
+  color: #5b21b6;
+  letter-spacing: .05em;
+}
+.mrp-demand-item .md-family .xx { color: #a78bfa; }
 .mrp-demand-item .md-color {
   color: var(--muted);
   font-size: 12px;
@@ -1774,113 +1780,20 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 }
 .mrp-demand-item .md-del:hover { background: #fee2e2; }
 
-@media (max-width: 900px) {
-  .mrp-demand-item {
-    grid-template-columns: 24px 1fr 70px 100px;
-  }
-  .mrp-demand-item .md-color,
-  .mrp-demand-item .md-parts { display: none; }
-}
 /* =========================================================
    Responsive
    ========================================================= */
 @media (max-width:900px){
   .scrap-form{grid-template-columns:1fr 1fr;}
-
-  /* =========================================================
-   BOM List — Material Code family level
-   ========================================================= */
-.bom-matcode-list {
-  display: flex;
-  flex-direction: column;
-}
-.bom-matcode-group {
-  border-top: 1px solid #f1f5f9;
-}
-.bom-matcode-group:first-child {
-  border-top: 0;
-}
-.bom-matcode-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 14px 8px 22px;
-  background: #f8fafc;
-  cursor: pointer;
-  list-style: none;
-  font-size: 12px;
-}
-.bom-matcode-header::-webkit-details-marker { display: none; }
-.bom-matcode-header::before {
-  content: '▾';
-  color: var(--muted);
-  font-size: 10px;
-  width: 10px;
-  text-align: center;
-  transition: transform .15s;
-}
-details.bom-matcode-group:not([open]) > .bom-matcode-header::before {
-  transform: rotate(-90deg);
-}
-.bom-matcode-header:hover { background: #eef2f7; }
-.bom-matcode-badge {
-  display: inline-block;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px;
-  font-weight: 700;
-  padding: 2px 10px;
-  border-radius: 6px;
-  background: #ede9fe;
-  color: #5b21b6;
-  letter-spacing: .06em;
-}
-.bom-matcode-badge .xx {
-  color: #a78bfa;
-  font-weight: 800;
-  letter-spacing: .12em;
-}
-.bom-matcode-count {
-  font-size: 11px;
-  color: var(--muted);
-  margin-left: auto;
-}
-
-/* Full material number shown next to the colour on the colour header */
-.color-matno {
-  display: inline-block;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 1px 8px;
-  border-radius: 5px;
-  background: #eef2f7;
-  color: #475569;
-  letter-spacing: .04em;
-}
-
-/* Search-result additions */
-.bom-search-matcode {
-  display: inline-block;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  font-weight: 700;
-  padding: 1px 8px;
-  border-radius: 5px;
-  background: #ede9fe;
-  color: #5b21b6;
-  letter-spacing: .05em;
-}
-.bom-search-matcode .xx { color: #a78bfa; }
-.bom-search-matno {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  color: #475569;
-  background: #eef2f7;
-  padding: 1px 6px;
-  border-radius: 4px;
-}
   .conv-row,.conv-head{grid-template-columns:1fr 1fr;}
   .file-item.bom-item{grid-template-columns:1fr;}
   .scrap-item{grid-template-columns:1fr 1fr;}
   .folder-path-row input{min-width:0;}
+
+  .mrp-demand-item {
+    grid-template-columns: 24px 1fr 70px 100px;
+  }
+  .mrp-demand-item .md-color,
+  .mrp-demand-item .md-family,
+  .mrp-demand-item .md-parts { display: none; }
 }
