@@ -6764,8 +6764,22 @@ function runBomDiff(specKey) {
       
       const uom = (p.uom || '').trim();
       const key = `${nrm}||${uom}`;
-      if (!map.has(key)) map.set(key, { pn: nrm, uom: uom, qty: 0, desc: p.nameEN || p.nameCN });
-      map.get(key).qty += (Number(p.qty) || 0);
+      
+      if (!map.has(key)) {
+        map.set(key, { pn: nrm, uom: uom, qty: 0, desc: p.nameEN || p.nameCN, mwos: new Set() });
+      }
+      
+      const entry = map.get(key);
+      entry.qty += (Number(p.qty) || 0);
+      
+      if (p.mwo && String(p.mwo).trim()) {
+        entry.mwos.add(String(p.mwo).trim());
+      }
+    }
+
+    /* Convert MWO Sets to readable strings */
+    for (const entry of map.values()) {
+      entry.mwoStr = Array.from(entry.mwos).sort().join(', ') || '—';
     }
     return map;
   };
@@ -6781,11 +6795,14 @@ function runBomDiff(specKey) {
     const b = mapB.get(key);
     
     if (a && !b) {
-      diffs.push({ status: 'missing_b', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: 0, desc: a.desc });
+      diffs.push({ status: 'missing_b', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: 0, desc: a.desc, mwoA: a.mwoStr, mwoB: '—', mwoDiff: false });
     } else if (b && !a) {
-      diffs.push({ status: 'missing_a', pn: b.pn, uom: b.uom, qtyA: 0, qtyB: b.qty, desc: b.desc });
+      diffs.push({ status: 'missing_a', pn: b.pn, uom: b.uom, qtyA: 0, qtyB: b.qty, desc: b.desc, mwoA: '—', mwoB: b.mwoStr, mwoDiff: false });
     } else if (a.qty !== b.qty) {
-      diffs.push({ status: 'qty_diff', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: b.qty, desc: a.desc || b.desc });
+      diffs.push({ status: 'qty_diff', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: b.qty, desc: a.desc || b.desc, mwoA: a.mwoStr, mwoB: b.mwoStr, mwoDiff: a.mwoStr !== b.mwoStr });
+    } else if (a.mwoStr !== b.mwoStr) {
+      /* If quantities match but MWOs differ, flag it for tracing */
+      diffs.push({ status: 'mwo_diff', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: b.qty, desc: a.desc || b.desc, mwoA: a.mwoStr, mwoB: b.mwoStr, mwoDiff: true });
     }
   }
 
@@ -6802,17 +6819,21 @@ function runBomDiff(specKey) {
         <th>Description</th>
         <th class="num">Qty (${idA})</th>
         <th class="num">Qty (${idB})</th>
+        <th>MWO (${idA})</th>
+        <th>MWO (${idB})</th>
       </tr></thead>
       <tbody>
         ${diffs.map(d => `
           <tr>
-            <td style="color:${d.status === 'qty_diff' ? 'var(--warn)' : 'var(--danger)'}; font-weight:600;">
-              ${d.status === 'missing_a' ? 'Only in ' + idB : d.status === 'missing_b' ? 'Only in ' + idA : 'Qty Mismatch'}
+            <td style="color:${d.status === 'qty_diff' || d.status === 'mwo_diff' ? 'var(--warn)' : 'var(--danger)'}; font-weight:600;">
+              ${d.status === 'missing_a' ? 'Only in ' + idB : d.status === 'missing_b' ? 'Only in ' + idA : d.status === 'qty_diff' ? 'Qty Mismatch' : 'MWO Mismatch'}
             </td>
             <td class="mono">${escapeHtml(d.pn)}</td>
             <td>${escapeHtml(d.desc || '')}</td>
             <td class="num ${d.status === 'missing_a' ? 'empty-cell' : ''}">${fmt(d.qtyA)} <span style="font-size:10px;color:#999">${escapeHtml(d.uom)}</span></td>
             <td class="num ${d.status === 'missing_b' ? 'empty-cell' : ''}">${fmt(d.qtyB)} <span style="font-size:10px;color:#999">${escapeHtml(d.uom)}</span></td>
+            <td class="mono" style="${d.mwoDiff ? 'color:var(--danger);font-weight:600;' : ''}">${escapeHtml(d.mwoA)}</td>
+            <td class="mono" style="${d.mwoDiff ? 'color:var(--danger);font-weight:600;' : ''}">${escapeHtml(d.mwoB)}</td>
           </tr>
         `).join('')}
       </tbody>
@@ -6821,15 +6842,6 @@ function runBomDiff(specKey) {
   
   res.innerHTML = `<div class="hint" style="margin:0 0 8px">Found <b>${diffs.length}</b> difference${diffs.length===1?'':'s'} between ${idA} and ${idB}:</div>` + html;
 }
-
-document.addEventListener('click', e => {
-  const btn = e.target.closest('button[data-role=compare-boms]');
-  if (btn) {
-    e.preventDefault();
-    e.stopPropagation();
-    openCompareBomModal(btn.dataset.speckey, btn.dataset.specname);
-  }
-});
 function runBomDiff(specKey) {
   const idA = document.getElementById('compareBomA').value;
   const idB = document.getElementById('compareBomB').value;
