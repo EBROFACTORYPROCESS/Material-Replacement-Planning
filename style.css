@@ -1795,3 +1795,63 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   .mrp-demand-item .md-family,
   .mrp-demand-item .md-parts { display: none; }
 }
+/* =========================================================
+   v1.6.0 — Vehicle-level BOM IDs
+   ========================================================= */
+
+/* ---- Toast ---- */
+.toast-wrap {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 400;
+  pointer-events: none;
+}
+.toast {
+  background: var(--brand);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.22);
+  max-width: 380px;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.toast.toast-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ---- Display BOM modal — colour selector ---- */
+.bdm-color-select-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-right: auto;
+}
+.bdm-color-select-wrap span { font-weight: 500; }
+.bdm-color-select-wrap select {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 13px;
+  color: var(--text);
+  font-family: inherit;
+}
+
+/* ---- BOM ID group's colour list — tighter padding ---- */
+.bom-id-group .bom-color-list {
+  padding: 6px 8px 8px;
+  background: #fff;
+}
