@@ -59,15 +59,12 @@ function suffixOfColourPart(partNo) {
 function bomSignatureNormalised(bom, isExteriorFn) {
   if (!bom || !bom.parts) return '';
   
-  /* 1. Aggregate duplicates by normalised part number + UoM */
   const aggregated = new Map();
-  
   for (const p of bom.parts) {
     const raw = String(p.partNo || '').trim();
     const nrm = (isColourPartNo(raw) && isExteriorFn(raw))
       ? prefixOfColourPart(raw) + 'XX'
       : raw;
-      
     const uom = (p.uom || '').trim();
     const key = `${nrm}||${uom}`;
     const qty = Number(p.qty) || 0;
@@ -79,7 +76,6 @@ function bomSignatureNormalised(bom, isExteriorFn) {
     }
   }
 
-  /* 2. Convert to array and sort */
   const tuples = Array.from(aggregated.values());
   tuples.sort((a, b) => {
     const c = a.pn.localeCompare(b.pn);
@@ -88,10 +84,8 @@ function bomSignatureNormalised(bom, isExteriorFn) {
     return a.uom.localeCompare(b.uom);
   });
 
-  /* 3. Join into final string */
   return tuples.map(t => `${t.pn}|${t.qty}|${t.uom}`).join(';');
 }
-
 /* Batch sort key — trailing YYYY MM <counter> from the batch ID. */
 function batchSortKey(batchId) {
   const s = String(batchId || '');
@@ -275,14 +269,11 @@ function reanalyseSpecBomIds(specKey) {
   const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
   if (!boms.length) return { specKey, changed: 0 };
 
-  const exteriorPrefixes = computeExteriorPrefixes(specKey);
-
-  /* Final signatures */
+  /* Final signatures — using Phase 1 (per-vehicle) logic */
   const sigByBom = new Map();
   for (const b of boms) {
-    const sig = bomSignatureNormalised(b, pn =>
-      isColourPartNo(pn) && exteriorPrefixes.has(prefixOfColourPart(pn))
-    );
+    const ext = colorCodeOf(b.vehicleMatNo);
+    const sig = bomSignatureNormalised(b, pn => suffixOfColourPart(pn) === ext);
     sigByBom.set(b, sig);
     b._normalisedSig = sig;
   }
@@ -1104,7 +1095,7 @@ function renderBomList() {
             ${specBomCount} BOM${specBomCount === 1 ? '' : 's'} ·
             ${specBatchCount} batch${specBatchCount === 1 ? '' : 'es'}
           </span>
-          ${specBomCount > 1 ? `<button class="btn tiny" data-role="compare-boms" data-speckey="${escapeHtml(sg.specKey)}" data-specname="${escapeHtml(sg.specName)}">Compare BOMs</button>` : ''}
+          ${specBomCount > 1 ? `<button class="btn tiny" data-role="compare-boms" data-speckey="${escapeHtml(sg.specKey)}" data-specname="${escapeHtml(sg.specName)}" style="margin-left:auto;margin-right:12px">Compare BOMs</button>` : ''}
         </summary>
         <div class="bom-matcode-list">${familyHtml}</div>
       </details>`;
@@ -2974,6 +2965,7 @@ function exportPlan() {
    DISPLAY BOM MODAL
    ========================================================= */
 function openBomDisplay(bomId, specKey, preferredColorCode) {
+  /* Scope strictly to the provided specKey */
   const matchingBoms = STATE.boms.filter(b => 
     b.bomId === bomId && specKeyOf(b.vehicleMatNo) === specKey
   );
@@ -6746,6 +6738,98 @@ function openCompareBomModal(specKey, specName) {
   setTimeout(() => runBomDiff(specKey), 10);
 }
 
+function runBomDiff(specKey) {
+  const idA = document.getElementById('compareBomA').value;
+  const idB = document.getElementById('compareBomB').value;
+  const res = document.getElementById('compareBomResults');
+
+  if (idA === idB) {
+    res.innerHTML = '<div class="hint">Please select two different BOMs.</div>';
+    return;
+  }
+
+  const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
+  const bomA = boms.find(b => b.bomId === idA);
+  const bomB = boms.find(b => b.bomId === idB);
+
+  if (!bomA || !bomB) return;
+
+  const getPartsMap = (bom) => {
+    const map = new Map();
+    for (const p of bom.parts) {
+      const raw = String(p.partNo || '').trim();
+      const ext = colorCodeOf(bom.vehicleMatNo);
+      /* Compare using the exact same normalization logic as Phase 1/2 */
+      const nrm = (isColourPartNo(raw) && suffixOfColourPart(raw) === ext) ? prefixOfColourPart(raw) + 'XX' : raw;
+      
+      const uom = (p.uom || '').trim();
+      const key = `${nrm}||${uom}`;
+      if (!map.has(key)) map.set(key, { pn: nrm, uom: uom, qty: 0, desc: p.nameEN || p.nameCN });
+      map.get(key).qty += (Number(p.qty) || 0);
+    }
+    return map;
+  };
+
+  const mapA = getPartsMap(bomA);
+  const mapB = getPartsMap(bomB);
+
+  const allKeys = new Set([...mapA.keys(), ...mapB.keys()]);
+  const diffs = [];
+
+  for (const key of allKeys) {
+    const a = mapA.get(key);
+    const b = mapB.get(key);
+    
+    if (a && !b) {
+      diffs.push({ status: 'missing_b', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: 0, desc: a.desc });
+    } else if (b && !a) {
+      diffs.push({ status: 'missing_a', pn: b.pn, uom: b.uom, qtyA: 0, qtyB: b.qty, desc: b.desc });
+    } else if (a.qty !== b.qty) {
+      diffs.push({ status: 'qty_diff', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: b.qty, desc: a.desc || b.desc });
+    }
+  }
+
+  if (!diffs.length) {
+    res.innerHTML = '<div class="hint" style="color:var(--ok)">✅ No differences found after aggregation. If they are still separate BOMs, check for hidden formatting issues.</div>';
+    return;
+  }
+
+  const html = `
+    <table class="compact" style="width:100%">
+      <thead><tr>
+        <th>Diff</th>
+        <th>Normalised Part</th>
+        <th>Description</th>
+        <th class="num">Qty (${idA})</th>
+        <th class="num">Qty (${idB})</th>
+      </tr></thead>
+      <tbody>
+        ${diffs.map(d => `
+          <tr>
+            <td style="color:${d.status === 'qty_diff' ? 'var(--warn)' : 'var(--danger)'}; font-weight:600;">
+              ${d.status === 'missing_a' ? 'Only in ' + idB : d.status === 'missing_b' ? 'Only in ' + idA : 'Qty Mismatch'}
+            </td>
+            <td class="mono">${escapeHtml(d.pn)}</td>
+            <td>${escapeHtml(d.desc || '')}</td>
+            <td class="num ${d.status === 'missing_a' ? 'empty-cell' : ''}">${fmt(d.qtyA)} <span style="font-size:10px;color:#999">${escapeHtml(d.uom)}</span></td>
+            <td class="num ${d.status === 'missing_b' ? 'empty-cell' : ''}">${fmt(d.qtyB)} <span style="font-size:10px;color:#999">${escapeHtml(d.uom)}</span></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+  
+  res.innerHTML = `<div class="hint" style="margin:0 0 8px">Found <b>${diffs.length}</b> difference${diffs.length===1?'':'s'} between ${idA} and ${idB}:</div>` + html;
+}
+
+document.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-role=compare-boms]');
+  if (btn) {
+    e.preventDefault();
+    e.stopPropagation();
+    openCompareBomModal(btn.dataset.speckey, btn.dataset.specname);
+  }
+});
 function runBomDiff(specKey) {
   const idA = document.getElementById('compareBomA').value;
   const idB = document.getElementById('compareBomB').value;
