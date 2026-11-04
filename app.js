@@ -7008,6 +7008,7 @@ async function showRestoreSessionBanner() {
    MATERIAL READINESS MODULE (Shipment vs Vehicle Allocation)
    ========================================================= */
 const LS_WH_MAPPING = 'mrp.providerWhMappings.v1';
+let _mrFolderFiles = [];
 
 STATE.materialReadiness = {
   packingList: [], // { shipmentBatch, containerId, partNo, totalQty, provider, warehouseId, allocatedQty }
@@ -7017,13 +7018,19 @@ STATE.materialReadiness = {
 };
 
 function initMaterialReadiness() {
-  /* 1. Inject Tab Button */
+  /* 1. Inject Tab Button (Right after Material List) */
   const tabs = document.querySelector('.tabs');
   const tabBtn = document.createElement('button');
   tabBtn.className = 'tab';
   tabBtn.dataset.tab = 'readiness';
   tabBtn.textContent = 'Material Readiness';
-  tabs.insertBefore(tabBtn, tabs.lastElementChild);
+  
+  const materialTab = document.querySelector('.tab[data-tab="bom"]');
+  if (materialTab) {
+    materialTab.insertAdjacentElement('afterend', tabBtn);
+  } else {
+    tabs.insertBefore(tabBtn, tabs.lastElementChild); // Fallback
+  }
 
   /* 2. Inject Panel HTML */
   const main = document.querySelector('main');
@@ -7032,20 +7039,24 @@ function initMaterialReadiness() {
   panel.id = 'panel-readiness';
   panel.innerHTML = `
     <div class="card">
-      <h2>1. Shipment Packing List</h2>
-      <p class="hint">Upload the packing list. You will be prompted to assign a warehouse to new shipments.</p>
+      <h2>1. Shipment Packing Lists</h2>
+      <p class="hint">Select a folder containing packing list files. Subfolders are scanned recursively for <code>.xlsx</code>, <code>.xls</code>, and <code>.csv</code>. You will be prompted to assign a warehouse to the shipments.</p>
       
       <div class="folder-loader">
         <div class="folder-path-row">
-          <input id="mrFilePath" type="text" readonly placeholder="No file loaded…" />
-          <button class="btn" id="mrFilePick">📁 Choose file</button>
-          <input type="file" id="mrInput" accept=".xlsx,.xls,.csv" hidden />
+          <input id="mrFolderPath" type="text" readonly placeholder="No folder selected…" />
+          <button class="btn" id="mrFolderPick">📁 Choose folder</button>
+          <button class="btn primary" id="mrFolderProcess" disabled>▶ Process files</button>
         </div>
+        <div class="folder-hint" id="mrFolderInfo">No folder selected yet.</div>
+        
+        <!-- hidden fallback picker -->
+        <input type="file" id="mrFolderFallback" webkitdirectory directory multiple hidden />
       </div>
 
       <div id="mrPendingWrap" class="hidden" style="margin-top:16px; border-top:1px dashed #e2e8f0; padding-top:16px;">
         <h3 style="font-size:14px; margin-bottom:10px;">Assign Warehouses</h3>
-        <div id="mrPendingList"></div>
+        <div id="mrPendingList" style="max-height:400px; overflow-y:auto; padding-right:8px;"></div>
         <div class="row-2" style="margin-top:12px;">
           <button class="btn primary" id="mrConfirmUpload">✓ Confirm & Load</button>
           <button class="btn ghost" id="mrCancelUpload">✕ Cancel</button>
@@ -7084,11 +7095,17 @@ function initMaterialReadiness() {
   /* 3. Bind Events */
   bindTabs(); // Re-bind tabs to include the new one
   
-  document.getElementById('mrFilePick').addEventListener('click', () => document.getElementById('mrInput').click());
-  document.getElementById('mrInput').addEventListener('change', handleMrFileUpload);
+  document.getElementById('mrFolderPick').addEventListener('click', pickMrFolder);
+  document.getElementById('mrFolderProcess').addEventListener('click', processMrFolder);
+  document.getElementById('mrFolderFallback').addEventListener('change', handleMrFolderFallback);
+  
   document.getElementById('mrConfirmUpload').addEventListener('click', confirmMrUpload);
   document.getElementById('mrCancelUpload').addEventListener('click', () => {
     STATE.materialReadiness.pendingUpload = [];
+    _mrFolderFiles = [];
+    document.getElementById('mrFolderPath').value = '';
+    document.getElementById('mrFolderInfo').textContent = 'No folder selected yet.';
+    document.getElementById('mrFolderProcess').disabled = true;
     document.getElementById('mrPendingWrap').classList.add('hidden');
   });
 
@@ -7103,76 +7120,157 @@ function initMaterialReadiness() {
 }
 
 /* =========================================================
-   PARSING & UPLOAD
+   FOLDER PICKING & PARSING
    ========================================================= */
-async function handleMrFileUpload(e) {
-  const f = e.target.files[0];
-  if (!f) return;
-  e.target.value = '';
-  
-  document.getElementById('mrFilePath').value = f.name;
-  
-  try {
-    const rows = await fileToRows(f);
-    if (!rows || !rows.length) throw new Error('Empty file');
-
-    const header = rows[0].map(h => String(h || '').replace(/\u00a0/g, ' ').trim().toLowerCase());
-    
-    // Auto-detect columns
-    const findCol = (hints) => {
-      for (const h of hints) {
-        const i = header.findIndex(x => x === h || x.includes(h));
-        if (i >= 0) return i;
-      }
-      return -1;
-    };
-
-    const cBatch   = findCol(['shipment batch', 'batch id', 'batch']);
-    const cCont    = findCol(['container', 'container id']);
-    const cPart    = findCol(['material code', 'part no', 'material number']);
-    const cQty     = findCol(['quantity', 'qty']);
-    const cProv    = findCol(['provider', 'supplier', 'vendor']);
-
-    if (cBatch < 0 || cCont < 0 || cPart < 0 || cQty < 0 || cProv < 0) {
-      throw new Error('Missing required columns. Ensure file has: Shipment Batch, Container, Material Code, Quantity, Provider');
-    }
-
-    const pending = [];
-    for (let i = 1; i < rows.length; i++) {
-      const r = rows[i];
-      if (!r || !r.length) continue;
-      const partNo = String(r[cPart] || '').trim();
-      if (!partNo) continue;
+async function pickMrFolder() {
+  if (typeof window.showDirectoryPicker === 'function') {
+    try {
+      const handle = await window.showDirectoryPicker({ mode: 'read' });
+      _mrFolderFiles = [];
+      document.getElementById('mrFolderPath').value = '/' + handle.name + '/';
+      document.getElementById('mrFolderInfo').textContent = 'Scanning folder…';
+      document.getElementById('mrFolderProcess').disabled = true;
       
-      pending.push({
-        shipmentBatch: String(r[cBatch] || '').trim(),
-        containerId:   String(r[cCont] || '').trim(),
-        partNo:        partNo,
-        totalQty:      Number(String(r[cQty]).replace(/[^0-9.]/g, '')) || 0,
-        provider:      String(r[cProv] || '').trim(),
-        warehouseId:   '',
-        allocatedQty:  0
-      });
+      await walkMrDirectory(handle, '');
+      
+      const n = _mrFolderFiles.length;
+      document.getElementById('mrFolderInfo').textContent = n 
+        ? `${n} packing list file${n===1?'':'s'} found — click “Process files”.`
+        : 'No valid files found.';
+      document.getElementById('mrFolderProcess').disabled = n === 0;
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      console.warn('showDirectoryPicker failed, falling back', e);
     }
+  }
+  document.getElementById('mrFolderFallback').click();
+}
 
-    if (!pending.length) throw new Error('No valid data rows found.');
-
-    STATE.materialReadiness.pendingUpload = pending;
-    renderMrPendingAssignments();
-
-  } catch (err) {
-    console.error(err);
-    alert('Failed to parse Packing List: ' + err.message);
-    document.getElementById('mrFilePath').value = '';
+async function walkMrDirectory(dirHandle, prefix) {
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === 'file') {
+      if (!/\.(xlsx|xls|csv)$/i.test(entry.name)) continue;
+      const file = await entry.getFile();
+      _mrFolderFiles.push({ file, path: prefix + entry.name });
+    } else if (entry.kind === 'directory') {
+      if (entry.name.startsWith('.') || entry.name.startsWith('~')) continue;
+      await walkMrDirectory(entry, prefix + entry.name + '/');
+    }
   }
 }
 
+function handleMrFolderFallback(e) {
+  const files = Array.from(e.target.files || []);
+  _mrFolderFiles = files
+    .filter(f => /\.(xlsx|xls|csv)$/i.test(f.name))
+    .map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
+  
+  if (_mrFolderFiles.length) {
+    const first = _mrFolderFiles[0].path;
+    const root  = first.split('/')[0];
+    document.getElementById('mrFolderPath').value = '/' + root + '/';
+    document.getElementById('mrFolderInfo').textContent = `${_mrFolderFiles.length} files found — click “Process files”.`;
+    document.getElementById('mrFolderProcess').disabled = false;
+  } else {
+    document.getElementById('mrFolderPath').value = '';
+    document.getElementById('mrFolderInfo').textContent = 'No valid files found.';
+    document.getElementById('mrFolderProcess').disabled = true;
+  }
+  e.target.value = '';
+}
+
+function parseMrRows(rows) {
+  if (!rows || !rows.length) return [];
+  
+  const header = rows[0].map(h => String(h || '').replace(/\u00a0/g, ' ').trim().toLowerCase());
+  const findCol = (hints) => {
+    for (const h of hints) {
+      const i = header.findIndex(x => x === h || x.includes(h));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+
+  const cBatch = findCol(['shipment batch', 'batch id', 'batch']);
+  const cCont  = findCol(['container', 'container id']);
+  const cPart  = findCol(['material code', 'part no', 'material number']);
+  const cQty   = findCol(['quantity', 'qty']);
+  const cProv  = findCol(['provider', 'supplier', 'vendor']);
+
+  if (cBatch < 0 || cCont < 0 || cPart < 0 || cQty < 0 || cProv < 0) {
+    console.warn('Missing required columns in file. Skipping.');
+    return [];
+  }
+
+  const out = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+    const partNo = String(r[cPart] || '').trim();
+    if (!partNo) continue;
+    
+    out.push({
+      shipmentBatch: String(r[cBatch] || '').trim(),
+      containerId:   String(r[cCont] || '').trim(),
+      partNo:        partNo,
+      totalQty:      Number(String(r[cQty]).replace(/[^0-9.]/g, '')) || 0,
+      provider:      String(r[cProv] || '').trim(),
+      warehouseId:   '',
+      allocatedQty:  0
+    });
+  }
+  return out;
+}
+
+async function processMrFolder() {
+  if (!_mrFolderFiles.length) return;
+  
+  const btn = document.getElementById('mrFolderProcess');
+  const info = document.getElementById('mrFolderInfo');
+  btn.disabled = true;
+  
+  let allItems = [];
+  let ok = 0, fail = 0;
+  
+  for (let i = 0; i < _mrFolderFiles.length; i++) {
+    const f = _mrFolderFiles[i];
+    info.textContent = `Processing ${i+1} / ${_mrFolderFiles.length} — ${f.path}`;
+    await yieldToUI();
+    
+    try {
+      const rows = await fileToRows(f.file);
+      const parsed = parseMrRows(rows);
+      if (parsed.length) {
+        allItems.push(...parsed);
+        ok++;
+      }
+    } catch (err) {
+      console.error(err);
+      fail++;
+    }
+  }
+  
+  if (allItems.length) {
+    STATE.materialReadiness.pendingUpload = allItems;
+    renderMrPendingAssignments();
+    info.textContent = `Loaded ${allItems.length} items from ${ok} file(s). ${fail} failed.`;
+  } else {
+    alert('No valid packing list items found in the selected folder.');
+    info.textContent = 'Processing complete. No valid data found.';
+    btn.disabled = false;
+  }
+}
+
+/* =========================================================
+   WAREHOUSE ASSIGNMENT
+   ========================================================= */
 function renderMrPendingAssignments() {
   const wrap = document.getElementById('mrPendingWrap');
   const list = document.getElementById('mrPendingList');
   const pending = STATE.materialReadiness.pendingUpload;
 
-  // Group by ShipmentBatch + Provider to ask for warehouse once
+  // Group by ShipmentBatch + Provider
   const groups = new Map();
   for (const p of pending) {
     const key = p.shipmentBatch + '||' + p.provider;
@@ -7203,6 +7301,7 @@ function renderMrPendingAssignments() {
   }).join('');
 
   wrap.classList.remove('hidden');
+  document.getElementById('mrFolderProcess').disabled = false;
 }
 
 function confirmMrUpload() {
@@ -7241,8 +7340,10 @@ function confirmMrUpload() {
   }
 
   STATE.materialReadiness.pendingUpload = [];
+  _mrFolderFiles = [];
   document.getElementById('mrPendingWrap').classList.add('hidden');
-  document.getElementById('mrFilePath').value = `Loaded successfully`;
+  document.getElementById('mrFolderPath').value = '';
+  document.getElementById('mrFolderInfo').textContent = 'Data loaded successfully. Select a new folder to load more.';
   
   renderMrLedger();
   populateMrVehicleSelect();
@@ -7601,7 +7702,6 @@ function exportMrLedger() {
    ========================================================= */
 function autoLinkReadiness() {
   alert('Auto-link logic requires you to confirm manual allocations first. Please use the "Link Shipment" buttons.');
-  // Note: Can be expanded in the future to automatically grab quantities FIFO.
 }
 
 /* Initialize the module on load */
