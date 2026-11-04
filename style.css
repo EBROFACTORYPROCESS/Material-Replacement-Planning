@@ -1849,7 +1849,57 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   color: var(--text);
   font-family: inherit;
 }
+/* =========================================================
+   Material Readiness Tab
+   ========================================================= */
+.mr-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+@media (max-width: 1200px) {
+  .mr-grid { grid-template-columns: 1fr; }
+}
 
+/* Warehouse Assignment Table */
+.mr-wh-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+.mr-wh-row select {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* Shortage visual warning */
+.mr-short-row > td {
+  background-color: #fef2f2 !important;
+  box-shadow: inset 3px 0 0 0 var(--danger);
+}
+
+/* Allocation Modal Row */
+.mr-alloc-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 100px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
+  border-bottom: 1px solid #eef2f7;
+}
+.mr-alloc-row input[type=number] {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
 /* ---- BOM ID group's colour list — tighter padding ---- */
 .bom-id-group .bom-color-list {
   padding: 6px 8px 8px;
