@@ -1269,141 +1269,142 @@ function renderBomTable() {
 
     if (!isOpen) return mainRow;
 
-   /* ---- Build spec → material family → colour → BOM ID → batches ---- */
-   /* ---- Build spec → family → BOM ID → colour → batch chips with qty ---- */
-const bomsForPart = Array.from(p.bomKeys)
-  .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
-  .filter(Boolean);
+    /* ---- Build spec → family → BOM ID → colour → batch chips with qty ---- */
+    const bomsForPart = Array.from(p.bomKeys)
+      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
+      .filter(Boolean);
 
-const specMap = new Map();
-for (const bom of bomsForPart) {
-  const sk  = specKeyOf(bom.vehicleMatNo);
-  const fm  = matFamilyOf(bom.vehicleMatNo);
-  const cc  = colorCodeOf(bom.vehicleMatNo);
-  const bid = bom.bomId || '(unassigned)';
+    const specMap = new Map();
+    for (const bom of bomsForPart) {
+      const sk  = specKeyOf(bom.vehicleMatNo);
+      const fm  = matFamilyOf(bom.vehicleMatNo);
+      const cc  = colorCodeOf(bom.vehicleMatNo);
+      const bid = bom.bomId || '(unassigned)';
 
-  if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, families: new Map(), boms: [] });
-  const sg = specMap.get(sk);
-  sg.boms.push(bom);
+      if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, families: new Map(), boms: [] });
+      const sg = specMap.get(sk);
+      sg.boms.push(bom);
 
-  if (!sg.families.has(fm)) sg.families.set(fm, { familyKey: fm, bomIds: new Map(), boms: [] });
-  const fg = sg.families.get(fm);
-  fg.boms.push(bom);
+      if (!sg.families.has(fm)) sg.families.set(fm, { familyKey: fm, bomIds: new Map(), boms: [] });
+      const fg = sg.families.get(fm);
+      fg.boms.push(bom);
 
-  if (!fg.bomIds.has(bid)) fg.bomIds.set(bid, { bomId: bid, colors: new Map(), boms: [] });
-  const bg = fg.bomIds.get(bid);
-  bg.boms.push(bom);
+      if (!fg.bomIds.has(bid)) fg.bomIds.set(bid, { bomId: bid, colors: new Map(), boms: [] });
+      const bg = fg.bomIds.get(bid);
+      bg.boms.push(bom);
 
-  if (!bg.colors.has(cc)) bg.colors.set(cc, { colorCode: cc, boms: [] });
-  bg.colors.get(cc).boms.push(bom);
-}
-for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
+      if (!bg.colors.has(cc)) bg.colors.set(cc, { colorCode: cc, boms: [] });
+      bg.colors.get(cc).boms.push(bom);
+    }
+    for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
 
-/* ---- Render using the BOM List hierarchy classes ---- */
-const specList = Array.from(specMap.values())
-  .sort((a, b) => a.specName.localeCompare(b.specName, undefined, { numeric: true }));
+    /* ---- Render using the BOM List hierarchy classes ---- */
+    const specList = Array.from(specMap.values())
+      .sort((a, b) => a.specName.localeCompare(b.specName, undefined, { numeric: true }));
 
-const specHtml = specList.map(sg => {
-  const specBomIds     = new Set(sg.boms.map(b => b.bomId));
-  const specBomCount   = specBomIds.size;
-  const specBatchCount = sg.boms.length;
-  const specFamCount   = sg.families.size;
+    const specHtml = specList.map(sg => {
+      const specBomIds     = new Set(sg.boms.map(b => b.bomId));
+      const specBomCount   = specBomIds.size;
+      const specBatchCount = sg.boms.length;
+      const specFamCount   = sg.families.size;
 
-  const familyList = Array.from(sg.families.values())
-    .sort((a, b) => a.familyKey.localeCompare(b.familyKey));
+      const familyList = Array.from(sg.families.values())
+        .sort((a, b) => a.familyKey.localeCompare(b.familyKey));
 
-  const familyHtml = familyList.map(fg => {
-    const famBomIds   = new Set(fg.boms.map(b => b.bomId));
-    const famBomCount = famBomIds.size;
-    const famBatchCnt = fg.boms.length;
+      const familyHtml = familyList.map(fg => {
+        const famBomIds   = new Set(fg.boms.map(b => b.bomId));
+        const famBomCount = famBomIds.size;
+        const famBatchCnt = fg.boms.length;
 
-    const bomIdList = Array.from(fg.bomIds.entries())
-      .sort((a, b) => {
-        const na = parseInt(String(a[0]).replace(/\D/g, ''), 10) || 0;
-        const nb = parseInt(String(b[0]).replace(/\D/g, ''), 10) || 0;
-        return na - nb;
-      });
+        const bomIdList = Array.from(fg.bomIds.entries())
+          .sort((a, b) => {
+            const na = parseInt(String(a[0]).replace(/\D/g, ''), 10) || 0;
+            const nb = parseInt(String(b[0]).replace(/\D/g, ''), 10) || 0;
+            return na - nb;
+          });
 
-    const bomHtml = bomIdList.map(([bomId, bg]) => {
-      const rep        = bg.boms[0];
-      const partCount  = rep.parts.length;
-      const colorCount = bg.colors.size;
-      const batchCount = bg.boms.length;
+        const bomHtml = bomIdList.map(([bomId, bg]) => {
+          const rep        = bg.boms[0];
+          const partCount  = rep.parts.length;
+          const colorCount = bg.colors.size;
+          const batchCount = bg.boms.length;
 
-      const colorHtml = Array.from(bg.colors.values())
-        .sort((a, b) => String(a.colorCode).localeCompare(String(b.colorCode)))
-        .map(cg => {
-          const colorName = deriveColorName(cg.boms, sg.specName);
-          const repMatNo  = cg.boms[0].vehicleMatNo || '';
-          const batchChips = cg.boms
-            .slice()
-            .sort((a, b) => String(a.batchId || '').localeCompare(String(b.batchId || '')))
-            .map(bom => {
-              const key = bomKeyOf(bom);
-              const qty = p.perBomQty[key] || 0;
-              const uom = p.uom || '';
+          const colorHtml = Array.from(bg.colors.values())
+            .sort((a, b) => String(a.colorCode).localeCompare(String(b.colorCode)))
+            .map(cg => {
+              const colorName = deriveColorName(cg.boms, sg.specName);
+              const repMatNo  = cg.boms[0].vehicleMatNo || '';
+              const batchChips = cg.boms
+                .slice()
+                .sort((a, b) => String(a.batchId || '').localeCompare(String(b.batchId || '')))
+                .map(bom => {
+                  const key = bomKeyOf(bom);
+                  const qty = p.perBomQty[key] || 0;
+                  const uom = p.uom || '';
+                  return `
+                    <span class="bom-batch-chip wu-chip" title="${escapeHtml(bom.batchId || '')}">
+                      ${escapeHtml(bom.batchId || '—')}
+                      <b class="wu-chip-qty">${fmt(qty)}</b>
+                      ${uom ? `<small class="wu-chip-uom">${escapeHtml(uom)}</small>` : ''}
+                    </span>`;
+                }).join('');
               return `
-                <span class="bom-batch-chip wu-chip" title="${escapeHtml(bom.batchId || '')}">
-                  ${escapeHtml(bom.batchId || '—')}
-                  <b class="wu-chip-qty">${fmt(qty)}</b>
-                  ${uom ? `<small class="wu-chip-uom">${escapeHtml(uom)}</small>` : ''}
-                </span>`;
+                <details class="bom-color-group" open>
+                  <summary class="bom-color-header">
+                    <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+                    ${colorName ? `<span class="color-name">${escapeHtml(colorName)}</span>` : ''}
+                    ${repMatNo ? `<span class="color-matno" title="Vehicle material number">${escapeHtml(repMatNo)}</span>` : ''}
+                    <span class="color-count">${cg.boms.length} batch${cg.boms.length === 1 ? '' : 'es'}</span>
+                  </summary>
+                  <div class="bom-batch-list">${batchChips}</div>
+                </details>`;
             }).join('');
+
           return `
-            <details class="bom-color-group" open>
-              <summary class="bom-color-header">
-                <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
-                ${colorName ? `<span class="color-name">${escapeHtml(colorName)}</span>` : ''}
-                ${repMatNo ? `<span class="color-matno" title="Vehicle material number">${escapeHtml(repMatNo)}</span>` : ''}
-                <span class="color-count">${cg.boms.length} batch${cg.boms.length === 1 ? '' : 'es'}</span>
-              </summary>
-              <div class="bom-batch-list">${batchChips}</div>
-            </details>`;
+            <div class="bom-id-group" data-bomid="${escapeHtml(bomId)}">
+              <div class="bom-id-header">
+                <span class="bom-id-badge">${escapeHtml(bomId)}</span>
+                <span class="bom-id-stats">
+                  ${colorCount} colour${colorCount === 1 ? '' : 's'} ·
+                  ${batchCount} batch${batchCount === 1 ? '' : 'es'} ·
+                  ${partCount} parts
+                </span>
+                <button class="btn tiny" data-role="wu-bom-display" data-bomid="${escapeHtml(bomId)}">
+                  Display BOM
+                </button>
+              </div>
+              <div class="bom-color-list">${colorHtml}</div>
+            </div>`;
         }).join('');
 
+        return `
+          <details class="bom-matcode-group" open>
+            <summary class="bom-matcode-header">
+              <span class="bom-matcode-badge">${matFamilyBadgeHtml(fg.familyKey)}</span>
+              <span class="bom-matcode-count">
+                ${famBomCount} BOM${famBomCount === 1 ? '' : 's'} ·
+                ${famBatchCnt} batch${famBatchCnt === 1 ? '' : 'es'}
+              </span>
+            </summary>
+            <div class="bom-id-list">${bomHtml}</div>
+          </details>`;
+      }).join('');
+
       return `
-        <div class="bom-id-group" data-bomid="${escapeHtml(bomId)}">
-          <div class="bom-id-header">
-            <span class="bom-id-badge">${escapeHtml(bomId)}</span>
-            <span class="bom-id-stats">
-              ${colorCount} colour${colorCount === 1 ? '' : 's'} ·
-              ${batchCount} batch${batchCount === 1 ? '' : 'es'} ·
-              ${partCount} parts
+        <details class="bom-spec-group" data-speckey="${escapeHtml(sg.specKey)}" open>
+          <summary class="bom-spec-header">
+            <span class="spec-name">${escapeHtml(sg.specName)}</span>
+            <span class="spec-count">
+              ${specFamCount} material code${specFamCount === 1 ? '' : 's'} ·
+              ${specBomCount} BOM${specBomCount === 1 ? '' : 's'} ·
+              ${specBatchCount} batch${specBatchCount === 1 ? '' : 'es'}
             </span>
-            <button class="btn tiny" data-role="wu-bom-display" data-bomid="${escapeHtml(bomId)}">
-              Display BOM
-            </button>
-          </div>
-          <div class="bom-color-list">${colorHtml}</div>
-        </div>`;
+            ${specBomCount > 1 ? `<button class="btn tiny" data-role="compare-boms" data-speckey="${escapeHtml(sg.specKey)}" data-specname="${escapeHtml(sg.specName)}" style="margin-left:auto;margin-right:12px">Compare BOMs</button>` : ''}
+          </summary>
+          <div class="bom-matcode-list">${familyHtml}</div>
+        </details>`;
     }).join('');
 
-    return `
-      <details class="bom-matcode-group" open>
-        <summary class="bom-matcode-header">
-          <span class="bom-matcode-badge">${matFamilyBadgeHtml(fg.familyKey)}</span>
-          <span class="bom-matcode-count">
-            ${famBomCount} BOM${famBomCount === 1 ? '' : 's'} ·
-            ${famBatchCnt} batch${famBatchCnt === 1 ? '' : 'es'}
-          </span>
-        </summary>
-        <div class="bom-id-list">${bomHtml}</div>
-      </details>`;
-  }).join('');
-
-  return `
-    <details class="bom-spec-group" open>
-      <summary class="bom-spec-header">
-        <span class="spec-name">${escapeHtml(sg.specName)}</span>
-        <span class="spec-count">
-          ${specFamCount} material code${specFamCount === 1 ? '' : 's'} ·
-          ${specBomCount} BOM${specBomCount === 1 ? '' : 's'} ·
-          ${specBatchCount} batch${specBatchCount === 1 ? '' : 'es'}
-        </span>
-      </summary>
-      <div class="bom-matcode-list">${familyHtml}</div>
-    </details>`;
-}).join('');
     return mainRow + `
       <tr class="where-used-row">
         <td colspan="4">
@@ -1441,7 +1442,6 @@ const specHtml = specList.map(sg => {
     });
   });
 }
-
 function populatePlanModels() {
   const sel = $('#planModel');
   sel.innerHTML = STATE.boms.length
