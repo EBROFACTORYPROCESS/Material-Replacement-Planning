@@ -7004,4 +7004,608 @@ async function showRestoreSessionBanner() {
     await renderStoredFilesTab();
   });
 }
+/* =========================================================
+   MATERIAL READINESS MODULE (Shipment vs Vehicle Allocation)
+   ========================================================= */
+const LS_WH_MAPPING = 'mrp.providerWhMappings.v1';
+
+STATE.materialReadiness = {
+  packingList: [], // { shipmentBatch, containerId, partNo, totalQty, provider, warehouseId, allocatedQty }
+  allocations: [], // { id, vehicleBatch, shipmentBatch, containerId, partNo, qty, date }
+  pendingUpload: [], // Temporarily holds parsed data before warehouse confirmation
+  selectedVehicleBatch: ''
+};
+
+function initMaterialReadiness() {
+  /* 1. Inject Tab Button */
+  const tabs = document.querySelector('.tabs');
+  const tabBtn = document.createElement('button');
+  tabBtn.className = 'tab';
+  tabBtn.dataset.tab = 'readiness';
+  tabBtn.textContent = 'Material Readiness';
+  tabs.insertBefore(tabBtn, tabs.lastElementChild);
+
+  /* 2. Inject Panel HTML */
+  const main = document.querySelector('main');
+  const panel = document.createElement('section');
+  panel.className = 'tab-panel';
+  panel.id = 'panel-readiness';
+  panel.innerHTML = `
+    <div class="card">
+      <h2>1. Shipment Packing List</h2>
+      <p class="hint">Upload the packing list. You will be prompted to assign a warehouse to new shipments.</p>
+      
+      <div class="folder-loader">
+        <div class="folder-path-row">
+          <input id="mrFilePath" type="text" readonly placeholder="No file loaded…" />
+          <button class="btn" id="mrFilePick">📁 Choose file</button>
+          <input type="file" id="mrInput" accept=".xlsx,.xls,.csv" hidden />
+        </div>
+      </div>
+
+      <div id="mrPendingWrap" class="hidden" style="margin-top:16px; border-top:1px dashed #e2e8f0; padding-top:16px;">
+        <h3 style="font-size:14px; margin-bottom:10px;">Assign Warehouses</h3>
+        <div id="mrPendingList"></div>
+        <div class="row-2" style="margin-top:12px;">
+          <button class="btn primary" id="mrConfirmUpload">✓ Confirm & Load</button>
+          <button class="btn ghost" id="mrCancelUpload">✕ Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2. Build Readiness</h2>
+      <div class="toolbar">
+        <select id="mrVehicleSelect" style="flex:1; max-width:300px;">
+          <option value="">— select vehicle batch —</option>
+        </select>
+        <button class="btn primary" id="mrCheckBtn">Check Readiness</button>
+        <button class="btn ghost" id="mrAutoCheckBtn">Auto-Link All</button>
+      </div>
+      <div class="stats" id="mrStats" style="margin-bottom:14px;"></div>
+      <div class="table-wrap" style="max-height:500px;">
+        <table id="mrTable"></table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3. Allocation Ledger (Traceability)</h2>
+      <div class="toolbar">
+        <input id="mrLedgerSearch" type="search" placeholder="Search by Vehicle Batch, Shipment Batch, or Part No..." />
+        <button class="btn" id="mrLedgerExport">⤓ Export Ledger</button>
+      </div>
+      <div class="table-wrap" style="max-height:500px;">
+        <table id="mrLedgerTable"></table>
+      </div>
+    </div>
+  `;
+  main.appendChild(panel);
+
+  /* 3. Bind Events */
+  bindTabs(); // Re-bind tabs to include the new one
+  
+  document.getElementById('mrFilePick').addEventListener('click', () => document.getElementById('mrInput').click());
+  document.getElementById('mrInput').addEventListener('change', handleMrFileUpload);
+  document.getElementById('mrConfirmUpload').addEventListener('click', confirmMrUpload);
+  document.getElementById('mrCancelUpload').addEventListener('click', () => {
+    STATE.materialReadiness.pendingUpload = [];
+    document.getElementById('mrPendingWrap').classList.add('hidden');
+  });
+
+  document.getElementById('mrCheckBtn').addEventListener('click', renderMrReadiness);
+  document.getElementById('mrAutoCheckBtn').addEventListener('click', autoLinkReadiness);
+  
+  document.getElementById('mrLedgerSearch').addEventListener('input', renderMrLedger);
+  document.getElementById('mrLedgerExport').addEventListener('click', exportMrLedger);
+
+  populateMrVehicleSelect();
+  renderMrLedger();
+}
+
+/* =========================================================
+   PARSING & UPLOAD
+   ========================================================= */
+async function handleMrFileUpload(e) {
+  const f = e.target.files[0];
+  if (!f) return;
+  e.target.value = '';
+  
+  document.getElementById('mrFilePath').value = f.name;
+  
+  try {
+    const rows = await fileToRows(f);
+    if (!rows || !rows.length) throw new Error('Empty file');
+
+    const header = rows[0].map(h => String(h || '').replace(/\u00a0/g, ' ').trim().toLowerCase());
+    
+    // Auto-detect columns
+    const findCol = (hints) => {
+      for (const h of hints) {
+        const i = header.findIndex(x => x === h || x.includes(h));
+        if (i >= 0) return i;
+      }
+      return -1;
+    };
+
+    const cBatch   = findCol(['shipment batch', 'batch id', 'batch']);
+    const cCont    = findCol(['container', 'container id']);
+    const cPart    = findCol(['material code', 'part no', 'material number']);
+    const cQty     = findCol(['quantity', 'qty']);
+    const cProv    = findCol(['provider', 'supplier', 'vendor']);
+
+    if (cBatch < 0 || cCont < 0 || cPart < 0 || cQty < 0 || cProv < 0) {
+      throw new Error('Missing required columns. Ensure file has: Shipment Batch, Container, Material Code, Quantity, Provider');
+    }
+
+    const pending = [];
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r || !r.length) continue;
+      const partNo = String(r[cPart] || '').trim();
+      if (!partNo) continue;
+      
+      pending.push({
+        shipmentBatch: String(r[cBatch] || '').trim(),
+        containerId:   String(r[cCont] || '').trim(),
+        partNo:        partNo,
+        totalQty:      Number(String(r[cQty]).replace(/[^0-9.]/g, '')) || 0,
+        provider:      String(r[cProv] || '').trim(),
+        warehouseId:   '',
+        allocatedQty:  0
+      });
+    }
+
+    if (!pending.length) throw new Error('No valid data rows found.');
+
+    STATE.materialReadiness.pendingUpload = pending;
+    renderMrPendingAssignments();
+
+  } catch (err) {
+    console.error(err);
+    alert('Failed to parse Packing List: ' + err.message);
+    document.getElementById('mrFilePath').value = '';
+  }
+}
+
+function renderMrPendingAssignments() {
+  const wrap = document.getElementById('mrPendingWrap');
+  const list = document.getElementById('mrPendingList');
+  const pending = STATE.materialReadiness.pendingUpload;
+
+  // Group by ShipmentBatch + Provider to ask for warehouse once
+  const groups = new Map();
+  for (const p of pending) {
+    const key = p.shipmentBatch + '||' + p.provider;
+    if (!groups.has(key)) groups.set(key, { shipmentBatch: p.shipmentBatch, provider: p.provider, count: 0 });
+    groups.get(key).count++;
+  }
+
+  // Load past mappings from local storage
+  let pastMappings = {};
+  try { pastMappings = JSON.parse(localStorage.getItem(LS_WH_MAPPING) || '{}'); } catch(e){}
+
+  const activeWhs = STATE.config.warehouses.filter(w => w.enabled);
+
+  list.innerHTML = Array.from(groups.values()).map(g => {
+    const savedWh = pastMappings[g.provider] || STATE.config.defaultWarehouseId || '';
+    return `
+      <div class="mr-wh-row">
+        <div>
+          <b class="mono">${escapeHtml(g.shipmentBatch)}</b> (${g.count} items) <br>
+          <small style="color:var(--muted)">Provider: ${escapeHtml(g.provider)}</small>
+        </div>
+        <select data-batch="${escapeHtml(g.shipmentBatch)}" data-provider="${escapeHtml(g.provider)}" class="mr-wh-select">
+          <option value="">— select warehouse —</option>
+          ${activeWhs.map(w => `<option value="${w.id}" ${w.id === savedWh ? 'selected' : ''}>${escapeHtml(w.name)}</option>`).join('')}
+        </select>
+      </div>
+    `;
+  }).join('');
+
+  wrap.classList.remove('hidden');
+}
+
+function confirmMrUpload() {
+  const selects = document.querySelectorAll('.mr-wh-select');
+  const assignments = new Map();
+  let valid = true;
+
+  selects.forEach(sel => {
+    if (!sel.value) { valid = false; sel.style.borderColor = 'var(--danger)'; }
+    else {
+      sel.style.borderColor = '';
+      const key = sel.dataset.batch + '||' + sel.dataset.provider;
+      assignments.set(key, sel.value);
+    }
+  });
+
+  if (!valid) {
+    alert('Please assign a warehouse to all shipments before confirming.');
+    return;
+  }
+
+  // Save mappings for the future
+  let pastMappings = {};
+  try { pastMappings = JSON.parse(localStorage.getItem(LS_WH_MAPPING) || '{}'); } catch(e){}
+  
+  for (const [key, whId] of assignments) {
+    const [batch, prov] = key.split('||');
+    pastMappings[prov] = whId;
+  }
+  localStorage.setItem(LS_WH_MAPPING, JSON.stringify(pastMappings));
+
+  // Apply to pending data and push to main ledger
+  for (const p of STATE.materialReadiness.pendingUpload) {
+    p.warehouseId = assignments.get(p.shipmentBatch + '||' + p.provider);
+    STATE.materialReadiness.packingList.push(p);
+  }
+
+  STATE.materialReadiness.pendingUpload = [];
+  document.getElementById('mrPendingWrap').classList.add('hidden');
+  document.getElementById('mrFilePath').value = `Loaded successfully`;
+  
+  renderMrLedger();
+  populateMrVehicleSelect();
+  if (STATE.materialReadiness.selectedVehicleBatch) renderMrReadiness();
+}
+
+/* =========================================================
+   READINESS CHECK
+   ========================================================= */
+function populateMrVehicleSelect() {
+  const sel = document.getElementById('mrVehicleSelect');
+  if (!sel) return;
+  const batches = STATE.batches || [];
+  sel.innerHTML = `<option value="">— select vehicle batch —</option>` + 
+    batches.map(b => `<option value="${escapeHtml(b.batch)}">${escapeHtml(b.batch)} (${escapeHtml(b.model)})</option>`).join('');
+}
+
+function renderMrReadiness() {
+  const batchId = document.getElementById('mrVehicleSelect').value;
+  STATE.materialReadiness.selectedVehicleBatch = batchId;
+  const tbl = document.getElementById('mrTable');
+  const stats = document.getElementById('mrStats');
+
+  if (!batchId) {
+    tbl.innerHTML = '';
+    stats.innerHTML = '';
+    return;
+  }
+
+  const batch = STATE.batches.find(b => b.batch === batchId);
+  if (!batch) return;
+
+  const bomKey = resolveBomKeyForBatch(batch);
+  const bom = STATE.boms.find(b => bomKeyOf(b) === bomKey);
+  
+  if (!bom) {
+    tbl.innerHTML = `<thead><tr><th>No BOM linked to this vehicle batch.</th></tr></thead>`;
+    stats.innerHTML = '';
+    return;
+  }
+
+  // 1. Calculate Requirements
+  const reqs = new Map();
+  for (const p of bom.parts) {
+    reqs.set(p.partNo, (reqs.get(p.partNo) || 0) + p.qty);
+  }
+
+  // 2. Compare against Shipment Ledger
+  const rows = [];
+  let totalReady = 0;
+  let totalShort = 0;
+
+  const packingList = STATE.materialReadiness.packingList || [];
+
+  for (const [partNo, reqQty] of reqs.entries()) {
+    const info = STATE.partIndex[partNo] || {};
+    
+    // Find available shipments for this part
+    const shipments = packingList.filter(s => s.partNo === partNo && (s.totalQty - s.allocatedQty) > 0);
+    const availQty = shipments.reduce((sum, s) => sum + (s.totalQty - s.allocatedQty), 0);
+    
+    const shortQty = Math.max(0, reqQty - availQty);
+    if (shortQty === 0) totalReady++;
+    else totalShort++;
+
+    rows.push({ partNo, info, reqQty, availQty, shortQty, shipments });
+  }
+
+  // Sort: Shortages first
+  rows.sort((a, b) => {
+    if (a.shortQty > 0 && b.shortQty === 0) return -1;
+    if (a.shortQty === 0 && b.shortQty > 0) return 1;
+    return a.partNo.localeCompare(b.partNo);
+  });
+
+  stats.innerHTML = `
+    <div class="stat">
+      <div class="label">Unique Materials</div>
+      <div class="value">${rows.length}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Fully Covered</div>
+      <div class="value" style="color:var(--ok)">${totalReady}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Shortages</div>
+      <div class="value" style="color:${totalShort ? 'var(--danger)' : 'inherit'}">${totalShort}</div>
+    </div>
+  `;
+
+  const head = `
+    <thead><tr>
+      <th>Material No.</th>
+      <th>Description</th>
+      <th class="num">Required</th>
+      <th class="num">Available</th>
+      <th class="num">Shortage</th>
+      <th class="num">Action</th>
+    </tr></thead>
+  `;
+
+  const body = rows.map(r => {
+    const isShort = r.shortQty > 0;
+    const btn = r.availQty > 0 
+      ? `<button class="btn tiny primary" data-part="${escapeHtml(r.partNo)}" data-req="${r.reqQty}" onclick="openMrAllocationModal('${escapeHtml(r.partNo)}', ${r.reqQty})">Link Shipment</button>`
+      : '<span class="hint">No Stock</span>';
+      
+    return `
+      <tr class="${isShort ? 'mr-short-row' : ''}">
+        <td class="mono"><b>${escapeHtml(r.partNo)}</b></td>
+        <td>${escapeHtml(r.info.nameEN || r.info.nameCN || '')}</td>
+        <td class="num">${fmt(r.reqQty)} <small>${escapeHtml(r.info.uom)}</small></td>
+        <td class="num" style="color:${r.availQty > 0 ? 'var(--ok)' : 'inherit'}">${fmt(r.availQty)}</td>
+        <td class="num" style="color:${isShort ? 'var(--danger)' : 'inherit'}; font-weight:${isShort ? '600' : '400'}">${isShort ? fmt(r.shortQty) : '—'}</td>
+        <td>${btn}</td>
+      </tr>
+    `;
+  }).join('');
+
+  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+/* =========================================================
+   MANUAL ALLOCATION MODAL
+   ========================================================= */
+function openMrAllocationModal(partNo, reqQty) {
+  const batchId = STATE.materialReadiness.selectedVehicleBatch;
+  if (!batchId) return;
+
+  const packingList = STATE.materialReadiness.packingList;
+  const availableShipments = packingList.filter(s => s.partNo === partNo && (s.totalQty - s.allocatedQty) > 0);
+
+  if (!availableShipments.length) return;
+
+  // Create Modal container
+  let modal = document.getElementById('mrAllocModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'mrAllocModal';
+    modal.className = 'modal-overlay hidden';
+    modal.innerHTML = `
+      <div class="modal-box" style="width:min(700px,100%)">
+        <div class="modal-header">
+          <div>
+            <h3>Link Shipment — ${escapeHtml(partNo)}</h3>
+            <div class="bdm-subtitle">Select which containers to pull from. Required: ${fmt(reqQty)}</div>
+          </div>
+          <button class="modal-close" onclick="closeMrAllocModal()">✕</button>
+        </div>
+        <div class="modal-body" style="padding:16px 20px;">
+          <div id="mrAllocList"></div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn primary" id="mrAllocConfirm">✓ Confirm Allocation</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  }
+
+  const list = document.getElementById('mrAllocList');
+  list.innerHTML = availableShipments.map((s, i) => {
+    const avail = s.totalQty - s.allocatedQty;
+    return `
+      <div class="mr-alloc-row" data-idx="${i}">
+        <div>
+          <b class="mono">${escapeHtml(s.shipmentBatch)}</b> / ${escapeHtml(s.containerId)} <br>
+          <small style="color:var(--muted)">${escapeHtml(s.provider)} (WH: ${escapeHtml(s.warehouseId)})</small>
+        </div>
+        <div class="num">Available: <b>${fmt(avail)}</b></div>
+        <div></div>
+        <div>
+          <input type="number" class="mr-alloc-input" data-idx="${i}" max="${avail}" min="0" value="0" />
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Store available shipments temporarily for the confirm button
+  modal._availableShipments = availableShipments;
+  modal._reqQty = reqQty;
+  modal._partNo = partNo;
+  modal._batchId = batchId;
+
+  document.getElementById('mrAllocConfirm').onclick = confirmMrAllocation;
+
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeMrAllocModal() {
+  const modal = document.getElementById('mrAllocModal');
+  if (modal) modal.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+function confirmMrAllocation() {
+  const modal = document.getElementById('mrAllocModal');
+  const inputs = document.querySelectorAll('.mr-alloc-input');
+  const available = modal._availableShipments;
+  const batchId = modal._batchId;
+  const partNo = modal._partNo;
+
+  let totalAllocated = 0;
+  const newAllocations = [];
+
+  for (const inp of inputs) {
+    const idx = Number(inp.dataset.idx);
+    const qty = Number(inp.value) || 0;
+    if (qty > 0) {
+      const ship = available[idx];
+      newAllocations.push({ ship, qty });
+      totalAllocated += qty;
+    }
+  }
+
+  if (totalAllocated === 0) {
+    alert('Please enter a quantity to allocate.');
+    return;
+  }
+
+  // Save to Ledger
+  for (const alloc of newAllocations) {
+    const ship = alloc.ship;
+    
+    // Update packed list available qty
+    const pIdx = STATE.materialReadiness.packingList.findIndex(x => x === ship);
+    if (pIdx >= 0) STATE.materialReadiness.packingList[pIdx].allocatedQty += alloc.qty;
+
+    // Add to allocation ledger
+    STATE.materialReadiness.allocations.push({
+      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
+      vehicleBatch: batchId,
+      shipmentBatch: ship.shipmentBatch,
+      containerId: ship.containerId,
+      partNo: partNo,
+      qty: alloc.qty,
+      provider: ship.provider,
+      warehouseId: ship.warehouseId,
+      date: new Date().toISOString()
+    });
+  }
+
+  closeMrAllocModal();
+  renderMrReadiness();
+  renderMrLedger();
+}
+
+/* =========================================================
+   LEDGER (TRACEABILITY)
+   ========================================================= */
+function renderMrLedger() {
+  const tbl = document.getElementById('mrLedgerTable');
+  if (!tbl) return;
+
+  const q = (document.getElementById('mrLedgerSearch').value || '').toLowerCase();
+  let allocs = STATE.materialReadiness.allocations || [];
+
+  if (q) {
+    allocs = allocs.filter(a => 
+      a.vehicleBatch.toLowerCase().includes(q) || 
+      a.shipmentBatch.toLowerCase().includes(q) ||
+      a.partNo.toLowerCase().includes(q)
+    );
+  }
+
+  // Sort newest first
+  allocs = allocs.slice().sort((a,b) => (b.date||'').localeCompare(a.date||''));
+
+  if (!allocs.length) {
+    tbl.innerHTML = '<thead><tr><th>No allocations found.</th></tr></thead>';
+    return;
+  }
+
+  const head = `
+    <thead><tr>
+      <th>Date</th>
+      <th>Vehicle Batch</th>
+      <th>Part No.</th>
+      <th>Qty Used</th>
+      <th>Shipment Batch</th>
+      <th>Container</th>
+      <th>Warehouse</th>
+      <th>Provider</th>
+      <th></th>
+    </tr></thead>
+  `;
+
+  const body = allocs.map(a => `
+    <tr>
+      <td>${fmtDate(new Date(a.date))}</td>
+      <td class="mono"><b>${escapeHtml(a.vehicleBatch)}</b></td>
+      <td class="mono">${escapeHtml(a.partNo)}</td>
+      <td class="num" style="font-weight:600;color:var(--brand)">${fmt(a.qty)}</td>
+      <td class="mono">${escapeHtml(a.shipmentBatch)}</td>
+      <td>${escapeHtml(a.containerId)}</td>
+      <td><span class="sf-badge kind">${escapeHtml(a.warehouseId)}</span></td>
+      <td>${escapeHtml(a.provider)}</td>
+      <td><button class="btn tiny danger" onclick="unallocateMr('${a.id}')" title="Remove Link">✕</button></td>
+    </tr>
+  `).join('');
+
+  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+function unallocateMr(allocId) {
+  if (!confirm('Remove this allocation? The parts will be returned to available stock.')) return;
+
+  const allocIdx = STATE.materialReadiness.allocations.findIndex(a => a.id === allocId);
+  if (allocIdx < 0) return;
+
+  const alloc = STATE.materialReadiness.allocations[allocIdx];
+
+  // Return qty to packing list
+  const ship = STATE.materialReadiness.packingList.find(s => 
+    s.shipmentBatch === alloc.shipmentBatch && 
+    s.containerId === alloc.containerId && 
+    s.partNo === alloc.partNo
+  );
+
+  if (ship) ship.allocatedQty = Math.max(0, ship.allocatedQty - alloc.qty);
+
+  // Remove from allocations
+  STATE.materialReadiness.allocations.splice(allocIdx, 1);
+
+  renderMrLedger();
+  if (STATE.materialReadiness.selectedVehicleBatch) renderMrReadiness();
+}
+
+/* =========================================================
+   EXPORT
+   ========================================================= */
+function exportMrLedger() {
+  const allocs = STATE.materialReadiness.allocations || [];
+  if (!allocs.length) { alert('No data to export.'); return; }
+
+  const aoa = [
+    ['Allocation Traceability Ledger'],
+    ['Date', 'Vehicle Batch', 'Part No.', 'Qty Used', 'Shipment Batch', 'Container', 'Warehouse', 'Provider']
+  ];
+
+  allocs.forEach(a => {
+    aoa.push([
+      fmtDate(new Date(a.date)), a.vehicleBatch, a.partNo, a.qty, 
+      a.shipmentBatch, a.containerId, a.warehouseId, a.provider
+    ]);
+  });
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Allocation Ledger');
+  downloadWorkbook(wb, `Material_Allocation_${dateStamp()}.xlsx`);
+}
+
+/* =========================================================
+   AUTO-LINK (Helper if needed later, currently manual as requested)
+   ========================================================= */
+function autoLinkReadiness() {
+  alert('Auto-link logic requires you to confirm manual allocations first. Please use the "Link Shipment" buttons.');
+  // Note: Can be expanded in the future to automatically grab quantities FIFO.
+}
+
+/* Initialize the module on load */
+window.addEventListener('DOMContentLoaded', () => {
+  setTimeout(initMaterialReadiness, 100); // Slight delay ensures base UI is ready
+});
 window.MRP = STATE;
