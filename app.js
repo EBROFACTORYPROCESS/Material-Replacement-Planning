@@ -1224,15 +1224,31 @@ function renderBomTable() {
   const q    = ($('#bomSearch').value || '').toLowerCase();
   const mode = $('#bomFilter').value;
 
-  const rows = Object.values(STATE.partIndex).filter(p => {
-    if (mode === 'common'   && !p.isCommon) return false;
-    if (mode === 'specific' &&  p.isCommon) return false;
-    if (q) {
-      const hay = `${p.partNo} ${p.nameEN} ${p.nameCN}`.toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    return true;
-  });
+  let rows = Object.values(STATE.partIndex);
+  let missingFromSearch = [];
+
+  // Handle Bulk Search Mode
+  if (STATE.bulkSearchList) {
+    const listSet = new Set(STATE.bulkSearchList);
+    rows = rows.filter(p => listSet.has(p.partNo));
+    
+    // Auto-expand all found parts
+    rows.forEach(p => WHERE_USED_OPEN.add(p.partNo));
+    
+    // Track missing items
+    missingFromSearch = STATE.bulkSearchList.filter(pn => !STATE.partIndex[pn]);
+  } else {
+    // Standard filter mode
+    rows = rows.filter(p => {
+      if (mode === 'common'   && !p.isCommon) return false;
+      if (mode === 'specific' &&  p.isCommon) return false;
+      if (q) {
+        const hay = `${p.partNo} ${p.nameEN} ${p.nameCN}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }
 
   if (!rows.length) {
     tbl.innerHTML = `<thead><tr><th>No material data</th></tr></thead>`;
@@ -1248,7 +1264,25 @@ function renderBomTable() {
       <th class="c-nameen">Material Description</th>
       <th class="c-action">Where Used</th>
     </tr></thead>`;
-
+  // Inject Bulk Search Controls into the table view
+  let bulkAlertHtml = '';
+  let bulkExportBtnHtml = '';
+  
+  if (STATE.bulkSearchList) {
+    bulkExportBtnHtml = `<button class="btn tiny primary" onclick="exportBulkWhereUsed()" style="margin-left:12px;">⤓ Export Search Results</button>`;
+    if (missingFromSearch.length > 0) {
+      bulkAlertHtml = `
+        <div class="hint" style="background:#fffbeb; border:1px solid #fde68a; padding:10px; border-radius:6px; margin-bottom:12px; color:#92400e;">
+          ⚠ <b>${missingFromSearch.length}</b> material(s) from your list were not found in master data: 
+          <span class="mono">${missingFromSearch.join(', ')}</span>
+        </div>`;
+    }
+    const clearBtn = `<button class="btn tiny ghost" onclick="document.getElementById('bulkSearchClear').click()" style="margin-left:8px;">✕ Clear Bulk Search</button>`;
+    bulkAlertHtml = `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; background:#f0fdf4; padding:10px; border:1px solid #bbf7d0; border-radius:6px;">
+      <span style="color:#166534; font-size:13px;">Showing <b>${rows.length}</b> results from your bulk list.</span>
+      <div>${bulkExportBtnHtml}${clearBtn}</div>
+    </div>` + bulkAlertHtml;
+  }
   const body = rows.map(p => {
     const isOpen = WHERE_USED_OPEN.has(p.partNo);
     const count  = p.bomKeys.size;
@@ -1418,7 +1452,7 @@ function renderBomTable() {
       </tr>`;
   }).join('');
 
-  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
+    tbl.innerHTML = bulkAlertHtml + head + `<tbody>${body || '<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--muted)">No materials found in master data.</td></tr>'}</tbody>`;
 
   /* Wire the Where Used expand/collapse button */
   tbl.querySelectorAll('.where-used-btn').forEach(btn => {
@@ -7707,5 +7741,209 @@ function autoLinkReadiness() {
 /* Initialize the module on load */
 window.addEventListener('DOMContentLoaded', () => {
   setTimeout(initMaterialReadiness, 100); // Slight delay ensures base UI is ready
+});
+/* =========================================================
+   BULK MATERIAL SEARCH & ADVANCED EXPORTS
+   ========================================================= */
+STATE.bulkSearchList = null; // null = inactive, Array = active search
+
+function initBulkSearch() {
+  const toolbar = document.querySelector('#panel-bom .toolbar');
+  if (!toolbar) return;
+
+  // Inject Buttons next to the existing Export button
+  const bulkBtn = document.createElement('button');
+  bulkBtn.className = 'btn primary';
+  bulkBtn.innerHTML = '📋 Bulk Search';
+  bulkBtn.onclick = openBulkSearchModal;
+
+  const masterBtn = document.createElement('button');
+  masterBtn.className = 'btn';
+  masterBtn.innerHTML = '⤓ Export Master List';
+  masterBtn.onclick = exportMasterWhereUsed;
+
+  toolbar.appendChild(bulkBtn);
+  toolbar.appendChild(masterBtn);
+}
+
+function openBulkSearchModal() {
+  let modal = document.getElementById('bulkSearchModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'bulkSearchModal';
+    modal.className = 'modal-overlay hidden';
+    modal.innerHTML = `
+      <div class="modal-box" style="width:min(600px,100%)">
+        <div class="modal-header">
+          <div>
+            <h3>Bulk Material Search</h3>
+            <div class="bdm-subtitle">Paste material numbers below. Separate by new lines or commas.</div>
+          </div>
+          <button class="modal-close" onclick="document.getElementById('bulkSearchModal').classList.add('hidden')">✕</button>
+        </div>
+        <div class="modal-body" style="padding:16px 20px;">
+          <textarea id="bulkSearchInput" style="width:100%; height:200px; padding:10px; border:1px solid var(--border); border-radius:8px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px;" placeholder="e.g.&#10;403003460AAAXX&#10;555000001AAAXX"></textarea>
+          <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+            <button class="btn ghost" id="bulkSearchClear">Clear</button>
+            <button class="btn primary" id="bulkSearchApply">Apply Search</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    document.getElementById('bulkSearchApply').onclick = () => {
+      const text = document.getElementById('bulkSearchInput').value;
+      // Split by newline or comma, trim spaces, remove empties
+      const parts = text.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+      
+      if (!parts.length) {
+        STATE.bulkSearchList = null;
+      } else {
+        STATE.bulkSearchList = Array.from(new Set(parts)); // Deduplicate
+      }
+      
+      // Close modal and trigger render
+      modal.classList.add('hidden');
+      
+      // Clear standard search and filter to avoid conflicts
+      document.getElementById('bomSearch').value = '';
+      document.getElementById('bomFilter').value = 'all';
+      
+      renderBomTable();
+    };
+
+    document.getElementById('bulkSearchClear').onclick = () => {
+      document.getElementById('bulkSearchInput').value = '';
+      STATE.bulkSearchList = null;
+      modal.classList.add('hidden');
+      renderBomTable();
+    };
+  }
+  
+  modal.classList.remove('hidden');
+  document.getElementById('bulkSearchInput').focus();
+}
+
+/* =========================================================
+   EXPORT 1: BULK SEARCH RESULTS (Flattened)
+   ========================================================= */
+function exportBulkWhereUsed() {
+  if (!STATE.bulkSearchList || !STATE.bulkSearchList.length) {
+    alert('No active bulk search list to export.');
+    return;
+  }
+
+  const aoa = [
+    ['Material No.', 'Description', 'Spec Name', 'Model', 'BOM ID', 'Color Code', 'Sales Batch', 'Qty per Vehicle', 'UoM']
+  ];
+
+  // Iterate in the exact order the user pasted them
+  for (const partNo of STATE.bulkSearchList) {
+    const p = STATE.partIndex[partNo];
+    
+    // If part is not found in master data
+    if (!p) {
+      aoa.push([partNo, '⚠ NOT FOUND IN MASTER DATA', '', '', '', '', '', '', '']);
+      continue;
+    }
+
+    const bomsForPart = Array.from(p.bomKeys)
+      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
+      .filter(Boolean);
+
+    if (!bomsForPart.length) {
+      aoa.push([partNo, p.nameEN || p.nameCN || '', 'No BOM data', '', '', '', '', '', '']);
+      continue;
+    }
+
+    // Flatten every BOM this part is used in
+    for (const bom of bomsForPart) {
+      const specKey = specKeyOf(bom.vehicleMatNo);
+      const specBoms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
+      const specName = deriveSpecName(specBoms);
+      const cc = colorCodeOf(bom.vehicleMatNo);
+      
+      const key = bomKeyOf(bom);
+      const qty = p.perBomQty[key] || 0;
+
+      aoa.push([
+        partNo,
+        p.nameEN || p.nameCN || '',
+        specName,
+        bom.vehicleDesc || '',
+        bom.bomId || '',
+        cc,
+        bom.batchId || '',
+        qty,
+        p.uom || ''
+      ]);
+    }
+  }
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Bulk Search Results');
+  downloadWorkbook(wb, `Bulk_WhereUsed_${dateStamp()}.xlsx`);
+}
+
+/* =========================================================
+   EXPORT 2: MASTER LIST (Flattened)
+   ========================================================= */
+function exportMasterWhereUsed() {
+  const rows = Object.values(STATE.partIndex);
+  if (!rows.length) {
+    alert('No material data loaded.');
+    return;
+  }
+
+  const aoa = [
+    ['Material No.', 'Description', 'UoM', 'Type', 'Spec Name', 'Model', 'BOM ID', 'Color Code', 'Sales Batch', 'Qty per Vehicle']
+  ];
+
+  // Sort parts alphabetically
+  rows.sort((a, b) => a.partNo.localeCompare(b.partNo, undefined, { numeric: true }));
+
+  for (const p of rows) {
+    const bomsForPart = Array.from(p.bomKeys)
+      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
+      .filter(Boolean);
+
+    if (!bomsForPart.length) {
+      aoa.push([p.partNo, p.nameEN || p.nameCN || '', p.uom, p.isCommon ? 'COMMON' : 'SPECIFIC', '', '', '', '', '', '']);
+      continue;
+    }
+
+    for (const bom of bomsForPart) {
+      const specKey = specKeyOf(bom.vehicleMatNo);
+      const specBoms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
+      const specName = deriveSpecName(specBoms);
+      const cc = colorCodeOf(bom.vehicleMatNo);
+      
+      const key = bomKeyOf(bom);
+      const qty = p.perBomQty[key] || 0;
+
+      aoa.push([
+        p.partNo,
+        p.nameEN || p.nameCN || '',
+        p.uom,
+        p.isCommon ? 'COMMON' : 'SPECIFIC',
+        specName,
+        bom.vehicleDesc || '',
+        bom.bomId || '',
+        cc,
+        bom.batchId || '',
+        qty
+      ]);
+    }
+  }
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Master Where Used');
+  downloadWorkbook(wb, `Master_WhereUsed_${dateStamp()}.xlsx`);
+}
+
+/* Initialize on load */
+window.addEventListener('DOMContentLoaded', () => {
+  setTimeout(initBulkSearch, 150);
 });
 window.MRP = STATE;
