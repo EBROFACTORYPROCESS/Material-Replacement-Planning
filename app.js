@@ -1277,7 +1277,7 @@ function renderBomTable() {
           <span class="mono">${missingFromSearch.join(', ')}</span>
         </div>`;
     }
-    const clearBtn = `<button class="btn tiny ghost" onclick="document.getElementById('bulkSearchClear').click()" style="margin-left:8px;">✕ Clear Bulk Search</button>`;
+    const clearBtn = `<button class="btn tiny ghost" onclick="clearBulkSearch()" style="margin-left:8px;">✕ Clear Bulk Search</button>`;
     bulkAlertHtml = `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; background:#f0fdf4; padding:10px; border:1px solid #bbf7d0; border-radius:6px;">
       <span style="color:#166534; font-size:13px;">Showing <b>${rows.length}</b> results from your bulk list.</span>
       <div>${bulkExportBtnHtml}${clearBtn}</div>
@@ -7784,7 +7784,7 @@ function openBulkSearchModal() {
         <div class="modal-body" style="padding:16px 20px;">
           <textarea id="bulkSearchInput" style="width:100%; height:200px; padding:10px; border:1px solid var(--border); border-radius:8px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px;" placeholder="e.g.&#10;403003460AAAXX&#10;555000001AAAXX"></textarea>
           <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
-            <button class="btn ghost" id="bulkSearchClear">Clear</button>
+            <button class="btn ghost" id="bulkSearchClear" onclick="clearBulkSearch()">Clear & Reset</button>
             <button class="btn primary" id="bulkSearchApply">Apply Search</button>
           </div>
         </div>
@@ -7794,16 +7794,14 @@ function openBulkSearchModal() {
 
     document.getElementById('bulkSearchApply').onclick = () => {
       const text = document.getElementById('bulkSearchInput').value;
-      // Split by newline or comma, trim spaces, remove empties
       const parts = text.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
       
       if (!parts.length) {
-        STATE.bulkSearchList = null;
-      } else {
-        STATE.bulkSearchList = Array.from(new Set(parts)); // Deduplicate
+        clearBulkSearch();
+        return;
       }
       
-      // Close modal and trigger render
+      STATE.bulkSearchList = Array.from(new Set(parts)); // Deduplicate
       modal.classList.add('hidden');
       
       // Clear standard search and filter to avoid conflicts
@@ -7812,19 +7810,31 @@ function openBulkSearchModal() {
       
       renderBomTable();
     };
-
-    document.getElementById('bulkSearchClear').onclick = () => {
-      document.getElementById('bulkSearchInput').value = '';
-      STATE.bulkSearchList = null;
-      modal.classList.add('hidden');
-      renderBomTable();
-    };
   }
   
   modal.classList.remove('hidden');
   document.getElementById('bulkSearchInput').focus();
 }
 
+/* NEW: Global clear function */
+function clearBulkSearch() {
+  // 1. Clear state variables
+  STATE.bulkSearchList = null;
+  WHERE_USED_OPEN.clear(); // Collapse all auto-expanded rows
+  
+  // 2. Clear UI inputs
+  const searchInp = document.getElementById('bulkSearchInput');
+  if (searchInp) searchInp.value = '';
+  document.getElementById('bomSearch').value = '';
+  document.getElementById('bomFilter').value = 'all';
+  
+  // 3. Hide modal
+  const modal = document.getElementById('bulkSearchModal');
+  if (modal) modal.classList.add('hidden');
+  
+  // 4. Re-render the clean full list
+  renderBomTable();
+}
 /* =========================================================
    EXPORT 1: BULK SEARCH RESULTS (Flattened)
    ========================================================= */
