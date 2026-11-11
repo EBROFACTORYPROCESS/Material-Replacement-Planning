@@ -5680,7 +5680,13 @@ const STORED_SLOTS = {
                     pickFn: 'pickProductionFile',   reloadFn: 'reloadProductionFromHandle' },
   exportFolder:   { label: 'XML export folder',         kind: 'directory', mode: 'readwrite',
                     tab: 'production', chipEl: '#fileChip-exportFolder',
-                    pickFn: 'pickExportFolder',     reloadFn: 'reloadExportFolderFromHandle' }
+                    pickFn: 'pickExportFolder',     reloadFn: 'reloadExportFolderFromHandle' },
+   scrapFile:    {  label: 'Scrap Log File', kind: 'file', mode: 'read',
+                    tab: 'scrap', chipEl: '#fileChip-scrapFile',
+                    pickFn: 'pickScrapFile', reloadFn: 'reloadScrapFileFromHandle' },
+  scrapImageFolder: { label: 'Scrap Image Folder', kind: 'directory', mode: 'read',
+                      tab: 'scrap', chipEl: '#fileChip-scrapImageFolder',
+                      pickFn: 'pickScrapImageFolder', reloadFn: 'reloadScrapImageFolderFromHandle' }
 };
 
 function openFileDB() {
@@ -8378,6 +8384,36 @@ function bindScrapAnalysis() {
 window.addEventListener('DOMContentLoaded', () => {
   bindScrapAnalysis();
 });
+/* ---------- Scrap File Pickers & Reloads ---------- */
+async function pickScrapFile() {
+  if (typeof window.showOpenFilePicker !== 'function') { $('#scrapLogInput').click(); return; }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: 'Scrap Log', accept: { 
+        'text/csv': ['.csv', '.tsv', '.txt'],
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+        'application/vnd.ms-excel': ['.xls']
+      }}]
+    });
+    await saveFileHandle('scrapFile', handle);
+    await reloadScrapFileFromHandle(handle);
+    renderAllFileChips(); renderStoredFilesTab();
+  } catch (e) {
+    if (e.name !== 'AbortError') { console.error(e); alert('Failed to pick file: ' + e.message); }
+  }
+}
+
+async function reloadScrapFileFromHandle(handle) {
+  if (!handle) return;
+  let perm = await handle.queryPermission({ mode: 'read' });
+  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
+  if (perm !== 'granted') return;
+  
+  const f = await handle.getFile();
+  const info = $('#scrapLogInfo'); if (info) info.textContent = `Loading ${f.name}…`;
+  await handleScrapLogFiles([f]);
+}
+
 async function pickScrapImageFolder() {
   if (typeof window.showDirectoryPicker !== 'function') {
     alert('Folder picking requires Chrome, Edge, or a Chromium-based browser.');
@@ -8385,14 +8421,21 @@ async function pickScrapImageFolder() {
   }
   try {
     const handle = await window.showDirectoryPicker({ mode: 'read' });
-    STATE.scrapAnalysis.imageFolderHandle = handle;
-    $('#scrapImagePath').value = '/' + handle.name + '/';
-    renderScrapAnalysis(); // Re-render so links turn blue
+    await saveFileHandle('scrapImageFolder', handle);
+    await reloadScrapImageFolderFromHandle(handle);
+    renderAllFileChips(); renderStoredFilesTab();
   } catch (e) {
-    if (e.name !== 'AbortError') {
-      console.error(e);
-      alert('Failed to select folder: ' + e.message);
-    }
+    if (e.name !== 'AbortError') { console.error(e); alert('Failed to select folder: ' + e.message); }
   }
+}
+
+async function reloadScrapImageFolderFromHandle(handle) {
+  if (!handle) return;
+  let perm = await handle.queryPermission({ mode: 'read' });
+  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
+  if (perm !== 'granted') return;
+  
+  STATE.scrapAnalysis.imageFolderHandle = handle;
+  renderScrapAnalysis(); // Re-render so links turn blue
 }
 window.MRP = STATE;
