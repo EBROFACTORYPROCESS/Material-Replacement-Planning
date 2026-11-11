@@ -8328,5 +8328,21 @@ function bindScrapAnalysis() {
 window.addEventListener('DOMContentLoaded', () => {
   bindScrapAnalysis();
 });
-
+async function pickScrapImageFolder() {
+  if (typeof window.showDirectoryPicker !== 'function') {
+    alert('Folder picking requires Chrome, Edge, or a Chromium-based browser.');
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'read' });
+    STATE.scrapAnalysis.imageFolderHandle = handle;
+    $('#scrapImagePath').value = '/' + handle.name + '/';
+    renderScrapAnalysis(); // Re-render so links turn blue
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      console.error(e);
+      alert('Failed to select folder: ' + e.message);
+    }
+  }
+}
 window.MRP = STATE;
