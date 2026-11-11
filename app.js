@@ -8097,7 +8097,7 @@ async function handleScrapLogFiles(files) {
 function renderScrapAnalysis() {
   const q = ($('#scrapSearch').value || '').toLowerCase();
   const catFilter = $('#scrapCategoryFilter').value;
-  const basePath = ($('#scrapImageBasePath').value || '').trim();
+  const hasFolder = !!STATE.scrapAnalysis.imageFolderHandle;
 
   let filtered = STATE.scrapAnalysis.records.filter(r => {
     if (catFilter !== 'all' && r.category !== catFilter) return false;
@@ -8153,10 +8153,8 @@ function renderScrapAnalysis() {
   tbody.innerHTML = filtered.slice(0, 1000).map(r => {
     // 1. Handle Hyperlink for File/Image
     let fileCell = escapeHtml(r.file || '—');
-    if (r.file && basePath) {
-      const separator = basePath.endsWith('/') || basePath.endsWith('\\') ? '' : '/';
-      const fullUrl = basePath + separator + r.file;
-      fileCell = `<a href="#" class="image-link" data-src="${escapeHtml(fullUrl)}" title="Click to preview: ${escapeHtml(r.file)}">${escapeHtml(shorten(r.file, 20))}</a>`;
+    if (r.file && hasFolder) {
+      fileCell = `<a href="#" class="image-link" data-file="${escapeHtml(r.file)}" title="Click to preview: ${escapeHtml(r.file)}">${escapeHtml(shorten(r.file, 25))}</a>`;
     }
 
     // 2. Cross-reference Description with Material List
@@ -8180,14 +8178,40 @@ function renderScrapAnalysis() {
     `;
   }).join('') + (filtered.length > 1000 ? `<tr><td colspan="9" style="text-align:center;color:var(--muted)">Showing 1000 of ${filtered.length} records</td></tr>` : '');
 
-  // 3. Wire up Image Preview Modal
+  // 3. Wire up Image Preview Modal (Async Fetch from Folder)
   tbody.querySelectorAll('.image-link').forEach(link => {
-    link.addEventListener('click', e => {
+    link.addEventListener('click', async e => {
       e.preventDefault();
-      const src = link.dataset.src;
-      $('#imagePreviewSrc').src = src;
-      $('#imagePreviewTitle').textContent = link.textContent;
-      $('#imagePreviewModal').classList.remove('hidden');
+      const fileName = link.dataset.file;
+      const handle = STATE.scrapAnalysis.imageFolderHandle;
+      
+      if (!handle) return;
+
+      try {
+        // Check permission if needed
+        let perm = await handle.queryPermission({ mode: 'read' });
+        if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
+        if (perm !== 'granted') return;
+
+        // Fetch the file from the directory
+        const fileHandle = await handle.getFileHandle(fileName);
+        const file = await fileHandle.getFile();
+        
+        // Create a temporary URL for the browser to display
+        const url = URL.createObjectURL(file);
+
+        // Revoke old URL to prevent memory leaks
+        if (window._scrapImgUrl) URL.revokeObjectURL(window._scrapImgUrl);
+        window._scrapImgUrl = url;
+
+        $('#imagePreviewSrc').src = url;
+        $('#imagePreviewTitle').textContent = fileName;
+        $('#imagePreviewModal').classList.remove('hidden');
+
+      } catch (err) {
+        console.error(err);
+        alert(`Could not load image: ${fileName}\n\nMake sure the file exists in the selected folder.`);
+      }
     });
   });
 
