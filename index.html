@@ -319,13 +319,11 @@
       <input id="scrapLogPath" name="scrapLogPath" type="text" readonly placeholder="No scrap file loaded…" />
       <button class="btn" id="scrapLogPick">📁 Choose file</button>
       <button class="btn ghost" id="scrapLogClear">✕ Clear</button>
+    <div class="folder-path-row" style="margin-top: 12px; border-top: 1px dashed #e2e8f0; padding-top: 12px;">
+      <input id="scrapImagePath" name="scrapImagePath" type="text" readonly placeholder="No image folder selected…" />
+      <button class="btn" id="scrapImagePick">📁 Choose Image Folder</button>
     </div>
-        <div class="mrp-stock-row" style="margin-top: 8px;">
-      <input id="scrapImageBasePath" name="scrapImageBasePath" type="text" placeholder="e.g., https://your-server.com/images/ or file:///C:/Images/" style="min-width: 400px;" />
-    </div>
-    
-    <div class="folder-hint" style="margin-top: 4px;">Base repository path for the images. Links will be Base Path + File Name.</div>
-    <div class="folder-hint" id="scrapLogInfo">No file loaded.</div>
+    <div class="folder-hint" style="margin-top: 4px;">Select the folder where the scrap evidence pictures are stored.</div>
 
     <details class="folder-fallback" style="margin-top:10px">
       <summary>…or drop the file here</summary>
