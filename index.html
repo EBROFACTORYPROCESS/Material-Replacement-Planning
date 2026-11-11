@@ -7,6 +7,8 @@
 <title>MRP Planner</title>
 <link rel="stylesheet" href="style.css" />
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 <header class="topbar">
@@ -18,6 +20,7 @@
     <button class="tab active" data-tab="bomlist">BOM List</button>
     <button class="tab" data-tab="bom">Material List</button>
     <button class="tab" data-tab="production">Production Monitoring</button>
+    <button class="tab" data-tab="scrap">Scrap Analysis</button>
     <button class="tab" data-tab="inventory">Inventory &amp; Stock</button>
     <button class="tab" data-tab="comparison">Plan vs Execution</button>
     <button class="tab" data-tab="planning">Production Planning</button>
@@ -307,6 +310,85 @@
     
     <div class="xml-error-log hidden" id="xmlErrorLog"></div>
   </section>
+
+  <!-- ============ TAB: SCRAP ANALYSIS ============ -->
+<section class="tab-panel" id="panel-scrap">
+  <div class="card">
+    <h2>Scrap Log Loader</h2>
+    <p class="hint">
+      Load your scrap extraction file (CSV or TSV). The parser evaluates data quality and extracts key metrics.
+    </p>
+    
+    <div class="mrp-stock-row">
+      <input id="scrapLogPath" type="text" readonly placeholder="No scrap file loaded…" />
+      <button class="btn" id="scrapLogPick">📁 Choose file</button>
+      <button class="btn ghost" id="scrapLogClear">✕ Clear</button>
+    </div>
+    <div class="folder-hint" id="scrapLogInfo">No file loaded.</div>
+
+    <details class="folder-fallback" style="margin-top:10px">
+      <summary>…or drop the file here</summary>
+      <div class="dropzone" id="scrapLogDrop" style="margin-top:12px">
+        <input type="file" id="scrapLogInput" accept=".csv,.tsv,.txt" />
+        <div class="dz-inner">
+          <strong>Drop scrap log here</strong>
+          <span>CSV or TSV format</span>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>Data Quality & KPIs</h2>
+    <div class="stats" id="scrapKpiStats">
+      <div class="hint" style="margin:0">Load a scrap file to see analytics.</div>
+    </div>
+    
+    <div class="scrap-charts-grid">
+      <div class="chart-container">
+        <h3>Top 10 Scrapped Materials</h3>
+        <canvas id="scrapChartParts"></canvas>
+      </div>
+      <div class="chart-container">
+        <h3>Scrap by Category</h3>
+        <canvas id="scrapChartCategory"></canvas>
+      </div>
+      <div class="chart-container">
+        <h3>Scrap Volume Over Time</h3>
+        <canvas id="scrapChartTrend"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Detailed Scrap Log</h2>
+    <div class="toolbar">
+      <input id="scrapSearch" type="search" placeholder="Search part / reason / operator…" />
+      <select id="scrapCategoryFilter">
+        <option value="all">All Categories</option>
+      </select>
+      <button class="btn" id="scrapExport">⤓ Export Excel</button>
+    </div>
+    <div class="table-wrap">
+      <table id="scrapTable" class="compact">
+        <thead>
+          <tr>
+            <th>File/Image</th>
+            <th>Category</th>
+            <th>Ticket ID</th>
+            <th>Part No.</th>
+            <th>Qty</th>
+            <th>Reason Code</th>
+            <th>Date</th>
+            <th>Operator</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+  
   <!-- ============ TAB: INVENTORY ============ -->
   <section class="tab-panel" id="panel-inventory">
     <div class="card">
