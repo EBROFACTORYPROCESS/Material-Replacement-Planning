@@ -7956,4 +7956,323 @@ function exportMasterWhereUsed() {
 window.addEventListener('DOMContentLoaded', () => {
   setTimeout(initBulkSearch, 150);
 });
+
+/* =========================================================
+   SCRAP ANALYSIS MODULE
+   ========================================================= */
+STATE.scrapAnalysis = {
+  records: [],
+  filteredRecords: [],
+  fileName: '',
+  charts: {} // Holds Chart.js instances so we can destroy them on reload
+};
+
+function parseScrapDate(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (!s || s.toLowerCase() === 'not signed') return null;
+  
+  // Handle formats like "13/9/26", "8/9/2026", "8/9/26-6"
+  const clean = s.split('-')[0].trim(); 
+  let parts = clean.split('/');
+  if (parts.length === 3) {
+    let d = parseInt(parts[0], 10);
+    let m = parseInt(parts[1], 10) - 1;
+    let y = parseInt(parts[2], 10);
+    if (y < 100) y += 2000; // 26 -> 2026
+    const dt = new Date(y, m, d);
+    return isNaN(dt) ? null : dt;
+  }
+  const dt = new Date(clean);
+  return isNaN(dt) ? null : dt;
+}
+
+async function handleScrapLogFiles(files) {
+  const f = files[0];
+  if (!f) return;
+
+  try {
+    const text = await readFileAsText(f);
+    // Split by lines, handling both CSV and TSV
+    const isTab = text.indexOf('\t') > -1;
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    
+    const records = [];
+    let shiftWarnings = 0;
+
+    // Skip header row if it contains "header.ticket_category"
+    const startIdx = (lines[0] && lines[0].includes('header.ticket_category')) ? 1 : 0;
+
+    for (let i = startIdx; i < lines.length; i++) {
+      const line = lines[i];
+      const cols = isTab ? line.split('\t') : parseCSVLine(line);
+      if (cols.length < 7) continue; // Too short, skip
+
+      // The sample data shows inconsistent shifting. 
+      // We map by position but apply heuristics to find the Qty and Date.
+      const file = cols[0] || '';
+      const category = cols[1] || '';
+      const ticketId = cols[2] || '';
+      const partNo = cols[3] || '';
+      const desc = cols[4] || '';
+      
+      // Heuristic: Qty is almost always a number, usually in col 6
+      let qty = Number(String(cols[6]).replace(/[^0-9.-]/g, ''));
+      if (isNaN(qty)) qty = 1;
+
+      // Heuristic: Date is usually col 9, but can be col 10 if shifted
+      let rawDate = cols[9] || '';
+      let parsedDate = parseScrapDate(rawDate);
+      if (!parsedDate && cols[10]) {
+        parsedDate = parseScrapDate(cols[10]);
+        if (parsedDate) rawDate = cols[10]; // shift detected
+      }
+      
+      if (!parsedDate) shiftWarnings++; // Count missing dates as data quality issue
+
+      // Reason/Motivo is usually col 8
+      const reason = cols[8] || cols[5] || 'Unknown'; 
+
+      records.push({
+        file,
+        category,
+        ticketId,
+        partNo,
+        desc,
+        qty,
+        reason,
+        date: parsedDate ? isoDate(parsedDate) : '',
+        rawDate,
+        operator: cols[11] || ''
+      });
+    }
+
+    STATE.scrapAnalysis.records = records;
+    STATE.scrapAnalysis.fileName = f.name;
+
+    // Update UI
+    $('#scrapLogPath').value = f.name;
+    $('#scrapLogInfo').innerHTML = `Loaded — ${records.length} records · <span class="${shiftWarnings ? 'quality-warn' : ''}">${shiftWarnings} date anomalies detected.</span>`;
+    
+    // Populate category filter
+    const cats = new Set(records.map(r => r.category).filter(Boolean));
+    $('#scrapCategoryFilter').innerHTML = '<option value="all">All Categories</option>' + 
+      Array.from(cats).map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+
+    $('#scrapSearch').value = '';
+    renderScrapAnalysis();
+
+  } catch (e) {
+    console.error(e);
+    alert('Failed to parse scrap file: ' + e.message);
+  }
+}
+
+function renderScrapAnalysis() {
+  const q = ($('#scrapSearch').value || '').toLowerCase();
+  const catFilter = $('#scrapCategoryFilter').value;
+
+  let filtered = STATE.scrapAnalysis.records.filter(r => {
+    if (catFilter !== 'all' && r.category !== catFilter) return false;
+    if (q) {
+      const hay = `${r.partNo} ${r.reason} ${r.operator} ${r.ticketId}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  STATE.scrapAnalysis.filteredRecords = filtered;
+
+  // --- KPIs ---
+  const totalQty = filtered.reduce((s, r) => s + (r.qty || 0), 0);
+  const uniqueParts = new Set(filtered.map(r => r.partNo).filter(Boolean)).size;
+  const topReasonCount = {};
+  filtered.forEach(r => {
+    if (r.reason) topReasonCount[r.reason] = (topReasonCount[r.reason] || 0) + 1;
+  });
+  let topReason = '—', maxReason = 0;
+  for (const [k, v] of Object.entries(topReasonCount)) {
+    if (v > maxReason) { maxReason = v; topReason = k; }
+  }
+  
+  const missingDates = filtered.filter(r => !r.date).length;
+  const qualityPct = filtered.length ? Math.round(((filtered.length - missingDates) / filtered.length) * 100) : 100;
+
+  $('#scrapKpiStats').innerHTML = `
+    <div class="stat">
+      <div class="label">Total Scrap Qty</div>
+      <div class="value">${fmt(totalQty)}</div>
+      <div class="sub">across ${fmt(filtered.length)} records</div>
+    </div>
+    <div class="stat">
+      <div class="label">Unique Parts</div>
+      <div class="value">${fmt(uniqueParts)}</div>
+      <div class="sub">materials scrapped</div>
+    </div>
+    <div class="stat">
+      <div class="label">Top Reason</div>
+      <div class="value" style="font-size:16px">${escapeHtml(shorten(topReason, 20))}</div>
+      <div class="sub">${fmt(maxReason)} occurrences</div>
+    </div>
+    <div class="stat">
+      <div class="label">Data Quality</div>
+      <div class="value" style="color:${qualityPct < 80 ? 'var(--danger)' : 'var(--ok)'}">${qualityPct}%</div>
+      <div class="sub">${missingDates} rows missing valid dates</div>
+    </div>
+  `;
+
+  // --- Table ---
+  const tbody = $('#scrapTable tbody');
+  tbody.innerHTML = filtered.slice(0, 1000).map(r => `
+    <tr>
+      <td class="mono" title="${escapeHtml(r.file)}">${escapeHtml(shorten(r.file, 20))}</td>
+      <td>${escapeHtml(r.category)}</td>
+      <td class="mono">${escapeHtml(r.ticketId || '—')}</td>
+      <td class="mono"><b>${escapeHtml(r.partNo || '—')}</b></td>
+      <td class="num">${fmt(r.qty)}</td>
+      <td>${escapeHtml(r.reason)}</td>
+      <td style="color:${r.date ? 'inherit' : 'var(--danger)'}">${r.date ? fmtDate(new Date(r.date)) : escapeHtml(r.rawDate || '—')}</td>
+      <td>${escapeHtml(r.operator || '—')}</td>
+    </tr>
+  `).join('') + (filtered.length > 1000 ? `<tr><td colspan="8" style="text-align:center;color:var(--muted)">Showing 1000 of ${filtered.length} records</td></tr>` : '');
+
+  renderScrapCharts(filtered);
+}
+
+function renderScrapCharts(records) {
+  const chartColors = ['#2563eb', '#3b82f6', '#60a5fa', '#93c5fd', '#bfdbfe', '#dbeafe'];
+  
+  // Destroy existing charts to prevent canvas memory leaks
+  if (STATE.scrapAnalysis.charts.parts) STATE.scrapAnalysis.charts.parts.destroy();
+  if (STATE.scrapAnalysis.charts.category) STATE.scrapAnalysis.charts.category.destroy();
+  if (STATE.scrapAnalysis.charts.trend) STATE.scrapAnalysis.charts.trend.destroy();
+
+  // 1. Top 10 Parts
+  const partAgg = {};
+  records.forEach(r => { if (r.partNo) partAgg[r.partNo] = (partAgg[r.partNo] || 0) + r.qty; });
+  const topParts = Object.entries(partAgg).sort((a,b) => b[1] - a[1]).slice(0, 10);
+
+  STATE.scrapAnalysis.charts.parts = new Chart($('#scrapChartParts'), {
+    type: 'bar',
+    data: {
+      labels: topParts.map(p => p[0]),
+      datasets: [{ label: 'Qty Scrapped', data: topParts.map(p => p[1]), backgroundColor: '#2563eb' }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+  });
+
+  // 2. Category Breakdown
+  const catAgg = {};
+  records.forEach(r => { if (r.category) catAgg[r.category] = (catAgg[r.category] || 0) + r.qty; });
+  const cats = Object.entries(catAgg);
+
+  STATE.scrapAnalysis.charts.category = new Chart($('#scrapChartCategory'), {
+    type: 'doughnut',
+    data: {
+      labels: cats.map(c => c[0]),
+      datasets: [{ data: cats.map(c => c[1]), backgroundColor: chartColors }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
+  });
+
+  // 3. Trend Over Time
+  const trendAgg = {};
+  records.forEach(r => {
+    if (r.date) trendAgg[r.date] = (trendAgg[r.date] || 0) + r.qty;
+  });
+  const sortedDates = Object.keys(trendAgg).sort();
+
+  STATE.scrapAnalysis.charts.trend = new Chart($('#scrapChartTrend'), {
+    type: 'line',
+    data: {
+      labels: sortedDates.map(d => d.split('-').reverse().join('/')),
+      datasets: [{
+        label: 'Scrap Volume',
+        data: sortedDates.map(d => trendAgg[d]),
+        borderColor: '#dc2626',
+        backgroundColor: 'rgba(220, 38, 38, 0.1)',
+        fill: true,
+        tension: 0.3
+      }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+  });
+}
+
+function exportScrapAnalysis() {
+  const rows = STATE.scrapAnalysis.filteredRecords;
+  if (!rows.length) { alert('No data to export.'); return; }
+  
+  const aoa = [['File/Image', 'Category', 'Ticket ID', 'Part No', 'Description', 'Qty', 'Reason Code', 'Date', 'Operator']];
+  rows.forEach(r => {
+    aoa.push([r.file, r.category, r.ticketId, r.partNo, r.desc, r.qty, r.reason, r.date, r.operator]);
+  });
+  
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Scrap Analysis');
+  downloadWorkbook(wb, `Scrap_Analysis_${dateStamp()}.xlsx`);
+}
+
+function bindScrapAnalysis() {
+  // File Picker
+  $('#scrapLogPick')?.addEventListener('click', async () => {
+    if (typeof window.showOpenFilePicker !== 'function') { $('#scrapLogInput').click(); return; }
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: 'Scrap Log', accept: { 'text/csv': ['.csv', '.tsv', '.txt'] } }]
+      });
+      const f = await handle.getFile();
+      await handleScrapLogFiles([f]);
+    } catch (e) {
+      if (e.name !== 'AbortError') { console.error(e); alert('Failed to open file: ' + e.message); }
+    }
+  });
+
+  $('#scrapLogInput')?.addEventListener('change', e => {
+    const f = e.target.files?.[0];
+    if (f) handleScrapLogFiles([f]);
+    e.target.value = '';
+  });
+
+  // Drag & Drop
+  const dz = $('#scrapLogDrop');
+  if (dz) {
+    ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
+      e.preventDefault(); dz.classList.add('drag');
+    }));
+    ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
+      e.preventDefault(); dz.classList.remove('drag');
+    }));
+    dz.addEventListener('drop', e => {
+      const f = e.dataTransfer.files?.[0];
+      if (f) handleScrapLogFiles([f]);
+    });
+  }
+
+  // Clear
+  $('#scrapLogClear')?.addEventListener('click', () => {
+    STATE.scrapAnalysis.records = [];
+    STATE.scrapAnalysis.fileName = '';
+    $('#scrapLogPath').value = '';
+    $('#scrapLogInfo').textContent = 'No file loaded.';
+    $('#scrapSearch').value = '';
+    $('#scrapCategoryFilter').innerHTML = '<option value="all">All Categories</option>';
+    
+    renderScrapAnalysis(); // Will clear charts and table
+    $('#scrapKpiStats').innerHTML = '<div class="hint" style="margin:0">Load a scrap file to see analytics.</div>';
+  });
+
+  // Filters
+  $('#scrapSearch')?.addEventListener('input', renderScrapAnalysis);
+  $('#scrapCategoryFilter')?.addEventListener('change', renderScrapAnalysis);
+  
+  // Export
+  $('#scrapExport')?.addEventListener('click', exportScrapAnalysis);
+}
+
+// Initialize bindings on boot
+window.addEventListener('DOMContentLoaded', () => {
+  bindScrapAnalysis();
+});
+
 window.MRP = STATE;
