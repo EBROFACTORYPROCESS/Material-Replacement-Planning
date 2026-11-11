@@ -1905,3 +1905,42 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   padding: 6px 8px 8px;
   background: #fff;
 }
+/* =========================================================
+   Scrap Analysis
+   ========================================================= */
+.scrap-charts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-top: 20px;
+}
+.scrap-charts-grid .chart-container:last-child {
+  grid-column: 1 / -1;
+  height: 250px;
+}
+.chart-container {
+  position: relative;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 15px;
+  height: 300px;
+}
+.chart-container h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.chart-container canvas {
+  max-height: 240px;
+}
+.quality-warn {
+  color: var(--danger);
+  font-weight: 600;
+}
+@media (max-width: 900px) {
+  .scrap-charts-grid { grid-template-columns: 1fr; }
+  .scrap-charts-grid .chart-container:last-child { grid-column: auto; }
+}
