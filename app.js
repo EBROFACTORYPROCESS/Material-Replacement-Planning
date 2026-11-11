@@ -8290,7 +8290,31 @@ function exportScrapAnalysis() {
   XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Scrap Analysis');
   downloadWorkbook(wb, `Scrap_Analysis_${dateStamp()}.xlsx`);
 }
+function closeImageModal() {
+  const modal = $('#imagePreviewModal');
+  const img = $('#imagePreviewSrc');
+  if (modal) modal.classList.add('hidden');
+  if (img) img.src = ''; // Clears the image to free memory
+}
 
+// Global listener: catches clicks on the close button OR the dark background
+document.addEventListener('click', e => {
+  const modal = $('#imagePreviewModal');
+  if (!modal || modal.classList.contains('hidden')) return;
+  
+  // If user clicks the ✕ button or the dark overlay outside the image
+  if (e.target.id === 'imagePreviewClose' || e.target.id === 'imagePreviewModal') {
+    closeImageModal();
+  }
+});
+
+// Global listener: closes on Escape key
+document.addEventListener('keydown', e => {
+  const modal = $('#imagePreviewModal');
+  if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
+    closeImageModal();
+  }
+});
 function bindScrapAnalysis() {
   // File Picker
   $('#scrapLogPick')?.addEventListener('click', async () => {
