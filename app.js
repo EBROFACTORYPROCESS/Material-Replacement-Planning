@@ -7992,16 +7992,21 @@ async function handleScrapLogFiles(files) {
   if (!f) return;
 
   try {
-    // 1. Read the file using SheetJS (handles CSV, TSV, XLSX, and auto-detects UTF-8/UTF-16)
+    // 1. Read the file using SheetJS (handles CSV, TSV, XLSX, and auto-detects encoding)
     const sheets = await fileToSheetRows(f);
 
-    // 2. Prompt for sheet selection if multiple exist
+    if (!sheets || !sheets.length) {
+      alert('The file appears to be empty.');
+      return;
+    }
+
+    // 2. Trigger the Pop-up Sheet Picker if there is more than 1 sheet
     let sheetsToProcess;
     if (sheets.length === 1) {
       sheetsToProcess = sheets;
     } else {
       const picked = await promptSheetSelection(sheets, f.name);
-      if (!picked) return; // User cancelled
+      if (!picked || !picked.length) return; // User cancelled
       sheetsToProcess = picked;
     }
 
@@ -8040,13 +8045,13 @@ async function handleScrapLogFiles(files) {
           parsedDate = parseScrapDate(r[10]);
           if (parsedDate) rawDate = r[10]; // shift detected
         }
-        if (!parsedDate && file) shiftWarnings++; // Ignore empty lines, but flag missing dates
+        if (!parsedDate && file) shiftWarnings++; 
 
         // 7. Reason & Operator
         const reason   = String(r[8] || r[5] || 'Unknown').trim();
         const operator = String(r[11] || '').trim();
 
-        // Only add if it looks like a real row (has a file, part number, or ticket)
+        // Only add if it looks like a real row
         if (file || partNo || ticketId) {
           records.push({
             file,
