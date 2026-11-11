@@ -7992,59 +7992,81 @@ async function handleScrapLogFiles(files) {
   if (!f) return;
 
   try {
-    const text = await readFileAsText(f);
-    // Split by lines, handling both CSV and TSV
-    const isTab = text.indexOf('\t') > -1;
-    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
-    
+    // 1. Read the file using SheetJS (handles CSV, TSV, XLSX, and auto-detects UTF-8/UTF-16)
+    const sheets = await fileToSheetRows(f);
+
+    // 2. Prompt for sheet selection if multiple exist
+    let sheetsToProcess;
+    if (sheets.length === 1) {
+      sheetsToProcess = sheets;
+    } else {
+      const picked = await promptSheetSelection(sheets, f.name);
+      if (!picked) return; // User cancelled
+      sheetsToProcess = picked;
+    }
+
     const records = [];
     let shiftWarnings = 0;
 
-    // Skip header row if it contains "header.ticket_category"
-    const startIdx = (lines[0] && lines[0].includes('header.ticket_category')) ? 1 : 0;
+    for (const sheet of sheetsToProcess) {
+      const rows = sheet.rows;
+      if (!rows || !rows.length) continue;
 
-    for (let i = startIdx; i < lines.length; i++) {
-      const line = lines[i];
-      const cols = isTab ? line.split('\t') : parseCSVLine(line);
-      if (cols.length < 7) continue; // Too short, skip
+      // 3. Detect header row
+      const firstRow = rows[0].map(c => String(c || '').toLowerCase());
+      const hasHeader = firstRow.some(c => c.includes('ticket') || c.includes('category') || c.includes('cantidad') || c.includes('file'));
+      const startIdx = hasHeader ? 1 : 0;
 
-      // The sample data shows inconsistent shifting. 
-      // We map by position but apply heuristics to find the Qty and Date.
-      const file = cols[0] || '';
-      const category = cols[1] || '';
-      const ticketId = cols[2] || '';
-      const partNo = cols[3] || '';
-      const desc = cols[4] || '';
-      
-      // Heuristic: Qty is almost always a number, usually in col 6
-      let qty = Number(String(cols[6]).replace(/[^0-9.-]/g, ''));
-      if (isNaN(qty)) qty = 1;
+      for (let i = startIdx; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r || !r.length) continue;
 
-      // Heuristic: Date is usually col 9, but can be col 10 if shifted
-      let rawDate = cols[9] || '';
-      let parsedDate = parseScrapDate(rawDate);
-      if (!parsedDate && cols[10]) {
-        parsedDate = parseScrapDate(cols[10]);
-        if (parsedDate) rawDate = cols[10]; // shift detected
+        // 4. Map standard columns based on your sample data
+        const file     = String(r[0] || '').trim();
+        const category = String(r[1] || '').trim();
+        const ticketId = String(r[2] || '').trim();
+        const partNo   = String(r[3] || '').trim();
+        const desc     = String(r[4] || '').trim();
+        
+        // 5. Qty extraction (usually col 6, fallback to col 5)
+        let qty = Number(String(r[6]).replace(/[^0-9.-]/g, ''));
+        if (isNaN(qty) || qty === 0) qty = Number(String(r[5]).replace(/[^0-9.-]/g, ''));
+        if (isNaN(qty)) qty = 1;
+
+        // 6. Date extraction (usually col 9, fallback to col 10 if shifted)
+        let rawDate = r[9] || '';
+        let parsedDate = parseScrapDate(rawDate);
+        if (!parsedDate && r[10]) {
+          parsedDate = parseScrapDate(r[10]);
+          if (parsedDate) rawDate = r[10]; // shift detected
+        }
+        if (!parsedDate && file) shiftWarnings++; // Ignore empty lines, but flag missing dates
+
+        // 7. Reason & Operator
+        const reason   = String(r[8] || r[5] || 'Unknown').trim();
+        const operator = String(r[11] || '').trim();
+
+        // Only add if it looks like a real row (has a file, part number, or ticket)
+        if (file || partNo || ticketId) {
+          records.push({
+            file,
+            category,
+            ticketId,
+            partNo,
+            desc,
+            qty,
+            reason,
+            date: parsedDate ? isoDate(parsedDate) : '',
+            rawDate,
+            operator
+          });
+        }
       }
-      
-      if (!parsedDate) shiftWarnings++; // Count missing dates as data quality issue
+    }
 
-      // Reason/Motivo is usually col 8
-      const reason = cols[8] || cols[5] || 'Unknown'; 
-
-      records.push({
-        file,
-        category,
-        ticketId,
-        partNo,
-        desc,
-        qty,
-        reason,
-        date: parsedDate ? isoDate(parsedDate) : '',
-        rawDate,
-        operator: cols[11] || ''
-      });
+    if (!records.length) {
+      alert('No valid scrap records found in the selected sheet(s).');
+      return;
     }
 
     STATE.scrapAnalysis.records = records;
@@ -8067,7 +8089,6 @@ async function handleScrapLogFiles(files) {
     alert('Failed to parse scrap file: ' + e.message);
   }
 }
-
 function renderScrapAnalysis() {
   const q = ($('#scrapSearch').value || '').toLowerCase();
   const catFilter = $('#scrapCategoryFilter').value;
