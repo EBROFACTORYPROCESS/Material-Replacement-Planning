@@ -7998,21 +7998,14 @@ async function handleScrapLogFiles(files) {
   if (!f) return;
 
   try {
-    // 1. Read the file using SheetJS (handles CSV, TSV, XLSX, and auto-detects encoding)
     const sheets = await fileToSheetRows(f);
-
-    if (!sheets || !sheets.length) {
-      alert('The file appears to be empty.');
-      return;
-    }
-
-    // 2. Trigger the Pop-up Sheet Picker if there is more than 1 sheet
     let sheetsToProcess;
+    
     if (sheets.length === 1) {
       sheetsToProcess = sheets;
     } else {
       const picked = await promptSheetSelection(sheets, f.name);
-      if (!picked || !picked.length) return; // User cancelled
+      if (!picked || !picked.length) return;
       sheetsToProcess = picked;
     }
 
@@ -8023,7 +8016,6 @@ async function handleScrapLogFiles(files) {
       const rows = sheet.rows;
       if (!rows || !rows.length) continue;
 
-      // 3. Detect header row
       const firstRow = rows[0].map(c => String(c || '').toLowerCase());
       const hasHeader = firstRow.some(c => c.includes('ticket') || c.includes('category') || c.includes('cantidad') || c.includes('file'));
       const startIdx = hasHeader ? 1 : 0;
@@ -8032,44 +8024,31 @@ async function handleScrapLogFiles(files) {
         const r = rows[i];
         if (!r || !r.length) continue;
 
-        // 4. Map standard columns based on your sample data
         const file     = String(r[0] || '').trim();
         const category = String(r[1] || '').trim();
         const ticketId = String(r[2] || '').trim();
         const partNo   = String(r[3] || '').trim();
         const desc     = String(r[4] || '').trim();
         
-        // 5. Qty extraction (usually col 6, fallback to col 5)
         let qty = Number(String(r[6]).replace(/[^0-9.-]/g, ''));
         if (isNaN(qty) || qty === 0) qty = Number(String(r[5]).replace(/[^0-9.-]/g, ''));
         if (isNaN(qty)) qty = 1;
 
-        // 6. Date extraction (usually col 9, fallback to col 10 if shifted)
         let rawDate = r[9] || '';
         let parsedDate = parseScrapDate(rawDate);
         if (!parsedDate && r[10]) {
           parsedDate = parseScrapDate(r[10]);
-          if (parsedDate) rawDate = r[10]; // shift detected
+          if (parsedDate) rawDate = r[10]; 
         }
         if (!parsedDate && file) shiftWarnings++; 
 
-        // 7. Reason & Operator
         const reason   = String(r[8] || r[5] || 'Unknown').trim();
         const operator = String(r[11] || '').trim();
 
-        // Only add if it looks like a real row
         if (file || partNo || ticketId) {
           records.push({
-            file,
-            category,
-            ticketId,
-            partNo,
-            desc,
-            qty,
-            reason,
-            date: parsedDate ? isoDate(parsedDate) : '',
-            rawDate,
-            operator
+            file, category, ticketId, partNo, desc, qty, reason,
+            date: parsedDate ? isoDate(parsedDate) : '', rawDate, operator
           });
         }
       }
@@ -8083,11 +8062,9 @@ async function handleScrapLogFiles(files) {
     STATE.scrapAnalysis.records = records;
     STATE.scrapAnalysis.fileName = f.name;
 
-    // Update UI
-    $('#scrapLogPath').value = f.name;
-    $('#scrapLogInfo').innerHTML = `Loaded — ${records.length} records · <span class="${shiftWarnings ? 'quality-warn' : ''}">${shiftWarnings} date anomalies detected.</span>`;
+    const info = $('#scrapLogInfo');
+    if (info) info.innerHTML = `Loaded — ${records.length} records · <span class="${shiftWarnings ? 'quality-warn' : ''}">${shiftWarnings} date anomalies detected.</span>`;
     
-    // Populate category filter
     const cats = new Set(records.map(r => r.category).filter(Boolean));
     $('#scrapCategoryFilter').innerHTML = '<option value="all">All Categories</option>' + 
       Array.from(cats).map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
@@ -8322,27 +8299,13 @@ document.addEventListener('keydown', e => {
   }
 });
 function bindScrapAnalysis() {
-  // File Picker
-  $('#scrapLogPick')?.addEventListener('click', async () => {
-    if (typeof window.showOpenFilePicker !== 'function') { $('#scrapLogInput').click(); return; }
-    try {
-      const [handle] = await window.showOpenFilePicker({
-        types: [{ description: 'Scrap Log', accept: { 'text/csv': ['.csv', '.tsv', '.txt'] } }]
-      });
-      const f = await handle.getFile();
-      await handleScrapLogFiles([f]);
-    } catch (e) {
-      if (e.name !== 'AbortError') { console.error(e); alert('Failed to open file: ' + e.message); }
-    }
-  });
-  $('#scrapImagePick')?.addEventListener('click', pickScrapImageFolder);
-  $('#scrapLogInput')?.addEventListener('change', e => {
+  // Fallback for Dropzone
+  $('#scrapLogInput')?.addEventListener('change', async e => {
     const f = e.target.files?.[0];
-    if (f) handleScrapLogFiles([f]);
+    if (f) await handleScrapLogFiles([f]);
     e.target.value = '';
   });
 
-  // Drag & Drop
   const dz = $('#scrapLogDrop');
   if (dz) {
     ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
@@ -8351,39 +8314,17 @@ function bindScrapAnalysis() {
     ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
       e.preventDefault(); dz.classList.remove('drag');
     }));
-    dz.addEventListener('drop', e => {
+    dz.addEventListener('drop', async e => {
       const f = e.dataTransfer.files?.[0];
-      if (f) handleScrapLogFiles([f]);
+      if (f) await handleScrapLogFiles([f]);
     });
   }
 
-  // Clear
-  $('#scrapLogClear')?.addEventListener('click', () => {
-    STATE.scrapAnalysis.records = [];
-    STATE.scrapAnalysis.fileName = '';
-    $('#scrapLogPath').value = '';
-    $('#scrapLogInfo').textContent = 'No file loaded.';
-    $('#scrapSearch').value = '';
-    $('#scrapCategoryFilter').innerHTML = '<option value="all">All Categories</option>';
-    
-    renderScrapAnalysis(); // Will clear charts and table
-    $('#scrapKpiStats').innerHTML = '<div class="hint" style="margin:0">Load a scrap file to see analytics.</div>';
-    STATE.scrapAnalysis.imageFolderHandle = null;
-    $('#scrapImagePath').value = ''; 
-  });
-
-  // Filters
+  // Filters & Exports
   $('#scrapSearch')?.addEventListener('input', renderScrapAnalysis);
   $('#scrapCategoryFilter')?.addEventListener('change', renderScrapAnalysis);
-  
-  // Export
   $('#scrapExport')?.addEventListener('click', exportScrapAnalysis);
 }
-
-// Initialize bindings on boot
-window.addEventListener('DOMContentLoaded', () => {
-  bindScrapAnalysis();
-});
 /* ---------- Scrap File Pickers & Reloads ---------- */
 async function pickScrapFile() {
   if (typeof window.showOpenFilePicker !== 'function') { $('#scrapLogInput').click(); return; }
