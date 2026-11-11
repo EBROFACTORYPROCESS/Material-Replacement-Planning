@@ -8097,6 +8097,7 @@ async function handleScrapLogFiles(files) {
 function renderScrapAnalysis() {
   const q = ($('#scrapSearch').value || '').toLowerCase();
   const catFilter = $('#scrapCategoryFilter').value;
+  const basePath = ($('#scrapImageBasePath').value || '').trim();
 
   let filtered = STATE.scrapAnalysis.records.filter(r => {
     if (catFilter !== 'all' && r.category !== catFilter) return false;
@@ -8149,22 +8150,49 @@ function renderScrapAnalysis() {
 
   // --- Table ---
   const tbody = $('#scrapTable tbody');
-  tbody.innerHTML = filtered.slice(0, 1000).map(r => `
-    <tr>
-      <td class="mono" title="${escapeHtml(r.file)}">${escapeHtml(shorten(r.file, 20))}</td>
-      <td>${escapeHtml(r.category)}</td>
-      <td class="mono">${escapeHtml(r.ticketId || '—')}</td>
-      <td class="mono"><b>${escapeHtml(r.partNo || '—')}</b></td>
-      <td class="num">${fmt(r.qty)}</td>
-      <td>${escapeHtml(r.reason)}</td>
-      <td style="color:${r.date ? 'inherit' : 'var(--danger)'}">${r.date ? fmtDate(new Date(r.date)) : escapeHtml(r.rawDate || '—')}</td>
-      <td>${escapeHtml(r.operator || '—')}</td>
-    </tr>
-  `).join('') + (filtered.length > 1000 ? `<tr><td colspan="8" style="text-align:center;color:var(--muted)">Showing 1000 of ${filtered.length} records</td></tr>` : '');
+  tbody.innerHTML = filtered.slice(0, 1000).map(r => {
+    // 1. Handle Hyperlink for File/Image
+    let fileCell = escapeHtml(r.file || '—');
+    if (r.file && basePath) {
+      const separator = basePath.endsWith('/') || basePath.endsWith('\\') ? '' : '/';
+      const fullUrl = basePath + separator + r.file;
+      fileCell = `<a href="#" class="image-link" data-src="${escapeHtml(fullUrl)}" title="Click to preview: ${escapeHtml(r.file)}">${escapeHtml(shorten(r.file, 20))}</a>`;
+    }
+
+    // 2. Cross-reference Description with Material List
+    let desc = 'Data not found in Material list.';
+    if (r.partNo && STATE.partIndex[r.partNo]) {
+      desc = STATE.partIndex[r.partNo].nameEN || STATE.partIndex[r.partNo].nameCN || desc;
+    }
+
+    return `
+      <tr>
+        <td class="mono">${fileCell}</td>
+        <td>${escapeHtml(r.category)}</td>
+        <td class="mono">${escapeHtml(r.ticketId || '—')}</td>
+        <td class="mono"><b>${escapeHtml(r.partNo || '—')}</b></td>
+        <td>${escapeHtml(desc)}</td>
+        <td class="num">${fmt(r.qty)}</td>
+        <td>${escapeHtml(r.reason)}</td>
+        <td style="color:${r.date ? 'inherit' : 'var(--danger)'}">${r.date ? fmtDate(new Date(r.date)) : escapeHtml(r.rawDate || '—')}</td>
+        <td>${escapeHtml(r.operator || '—')}</td>
+      </tr>
+    `;
+  }).join('') + (filtered.length > 1000 ? `<tr><td colspan="9" style="text-align:center;color:var(--muted)">Showing 1000 of ${filtered.length} records</td></tr>` : '');
+
+  // 3. Wire up Image Preview Modal
+  tbody.querySelectorAll('.image-link').forEach(link => {
+    link.addEventListener('click', e => {
+      e.preventDefault();
+      const src = link.dataset.src;
+      $('#imagePreviewSrc').src = src;
+      $('#imagePreviewTitle').textContent = link.textContent;
+      $('#imagePreviewModal').classList.remove('hidden');
+    });
+  });
 
   renderScrapCharts(filtered);
 }
-
 function renderScrapCharts(records) {
   const chartColors = ['#2563eb', '#3b82f6', '#60a5fa', '#93c5fd', '#bfdbfe', '#dbeafe'];
   
