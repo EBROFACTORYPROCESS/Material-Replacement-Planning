@@ -320,6 +320,11 @@
       <button class="btn" id="scrapLogPick">📁 Choose file</button>
       <button class="btn ghost" id="scrapLogClear">✕ Clear</button>
     </div>
+        <div class="mrp-stock-row" style="margin-top: 8px;">
+      <input id="scrapImageBasePath" name="scrapImageBasePath" type="text" placeholder="e.g., https://your-server.com/images/ or file:///C:/Images/" style="min-width: 400px;" />
+    </div>
+    
+    <div class="folder-hint" style="margin-top: 4px;">Base repository path for the images. Links will be Base Path + File Name.</div>
     <div class="folder-hint" id="scrapLogInfo">No file loaded.</div>
 
     <details class="folder-fallback" style="margin-top:10px">
@@ -373,6 +378,7 @@
             <th>Category</th>
             <th>Ticket ID</th>
             <th>Part No.</th>
+            <th>Description</th> <!-- NEW COLUMN -->
             <th>Qty</th>
             <th>Reason Code</th>
             <th>Date</th>
@@ -669,7 +675,18 @@
     <div class="modal-body bdm-body"></div>
   </div>
 </div>
-
+<!-- ============ Image Preview Modal ============ -->
+<div id="imagePreviewModal" class="modal-overlay hidden">
+  <div class="modal-box" style="width:min(1000px,95%); height:90vh; background:#1e293b;">
+    <div class="modal-header" style="background:#0f172a; border-bottom:1px solid #334155;">
+      <h3 id="imagePreviewTitle" style="color:#fff; margin:0; font-size:14px;">Image Preview</h3>
+      <button class="modal-close" id="imagePreviewClose" style="color:#94a3b8;">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex; align-items:center; justify-content:center; background:#0f172a; padding:0;">
+      <img id="imagePreviewSrc" src="" style="max-width:100%; max-height:100%; object-fit:contain;" alt="Scrap Evidence" />
+    </div>
+  </div>
+</div>
 <!-- ============ Sheet picker modal ============ -->
 <div id="sheetPickerModal" class="modal-overlay hidden">
   <div class="modal-box" style="width:min(560px,100%)">
