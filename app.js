@@ -8305,7 +8305,7 @@ function bindScrapAnalysis() {
       if (e.name !== 'AbortError') { console.error(e); alert('Failed to open file: ' + e.message); }
     }
   });
-
+  $('#scrapImagePick')?.addEventListener('click', pickScrapImageFolder);
   $('#scrapLogInput')?.addEventListener('change', e => {
     const f = e.target.files?.[0];
     if (f) handleScrapLogFiles([f]);
@@ -8338,6 +8338,8 @@ function bindScrapAnalysis() {
     
     renderScrapAnalysis(); // Will clear charts and table
     $('#scrapKpiStats').innerHTML = '<div class="hint" style="margin:0">Load a scrap file to see analytics.</div>';
+    STATE.scrapAnalysis.imageFolderHandle = null;
+    $('#scrapImagePath').value = ''; 
   });
 
   // Filters
