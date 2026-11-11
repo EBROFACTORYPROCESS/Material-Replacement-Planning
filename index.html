@@ -315,23 +315,18 @@
       Load your scrap extraction file (CSV or TSV). The parser evaluates data quality and extracts key metrics.
     </p>
     
-    <div class="mrp-stock-row">
-      <input id="scrapLogPath" name="scrapLogPath" type="text" readonly placeholder="No scrap file loaded…" />
-      <button class="btn" id="scrapLogPick">📁 Choose file</button>
-      <button class="btn ghost" id="scrapLogClear">✕ Clear</button>
-    <div class="folder-path-row" style="margin-top: 12px; border-top: 1px dashed #e2e8f0; padding-top: 12px;">
-      <input id="scrapImagePath" name="scrapImagePath" type="text" readonly placeholder="No image folder selected…" />
-      <button class="btn" id="scrapImagePick">📁 Choose Image Folder</button>
-    </div>
-    <div class="folder-hint" style="margin-top: 4px;">Select the folder where the scrap evidence pictures are stored.</div>
+    <div class="file-chip-container" id="fileChip-scrapFile"></div>
+    <div class="file-chip-container" id="fileChip-scrapImageFolder"></div>
+    
+    <div class="folder-hint" id="scrapLogInfo">No scrap file loaded.</div>
 
     <details class="folder-fallback" style="margin-top:10px">
       <summary>…or drop the file here</summary>
       <div class="dropzone" id="scrapLogDrop" style="margin-top:12px">
-        <input type="file" id="scrapLogInput" name="scrapLogInput" accept=".csv,.tsv,.txt" />
+        <input type="file" id="scrapLogInput" name="scrapLogInput" accept=".csv,.tsv,.xlsx,.xls,.txt" />
         <div class="dz-inner">
           <strong>Drop scrap log here</strong>
-          <span>CSV or TSV format</span>
+          <span>CSV, Excel or TSV format</span>
         </div>
       </div>
     </details>
