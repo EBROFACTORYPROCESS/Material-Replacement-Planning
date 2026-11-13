@@ -356,23 +356,50 @@
 
   <div class="card">
     <h2>Detailed Scrap Log</h2>
+    
+    <!-- Date Range Filter -->
+    <div class="prod-period-controls" id="scrapPeriodControls" style="margin-bottom: 16px;">
+      <div class="prod-period-row">
+        <button class="btn tiny scrap-period-btn" data-range="today">Today</button>
+        <button class="btn tiny scrap-period-btn" data-range="thisWeek">This Week</button>
+        <button class="btn tiny scrap-period-btn" data-range="thisMonth">This Month</button>
+        <button class="btn tiny scrap-period-btn" data-range="thisYear">This Year</button>
+        <span class="prod-period-spacer"></span>
+        <button class="btn tiny scrap-period-btn scrap-period-btn-all" data-range="all">Full Range</button>
+      </div>
+      <div class="prod-period-row prod-period-dates">
+        <span class="prod-chart-label">From:</span>
+        <input type="date" id="scrapPeriodFrom" name="scrapPeriodFrom" class="prod-chart-date" />
+        <span class="prod-chart-label">To:</span>
+        <input type="date" id="scrapPeriodTo" name="scrapPeriodTo" class="prod-chart-date" />
+        <span class="prod-period-spacer"></span>
+        <button class="btn tiny primary" id="scrapPeriodApply" disabled>✓ Apply</button>
+      </div>
+      <div class="hint" id="scrapPeriodHint" style="margin:6px 0 0"></div>
+    </div>
+
     <div class="toolbar">
       <input id="scrapSearch" name="scrapSearch" type="search" placeholder="Search part / reason / operator…" />
       <select id="scrapCategoryFilter" name="scrapCategoryFilter">
         <option value="all">All Categories</option>
       </select>
+      <button class="btn ghost" id="scrapClearFilters">✕ Clear all filters &amp; sorts</button>
       <button class="btn" id="scrapExport">⤓ Export Excel</button>
     </div>
+    
+    <p class="hint" style="margin:-4px 0 12px">Click any column header ▾ to sort or filter that column. Filters on each column stack together.</p>
+    
     <div class="table-wrap">
       <table id="scrapTable" class="compact">
         <thead>
           <tr>
-            <th>File/Image</th>
-            <th>Date</th>
-            <th>Category</th>
-            <th>Part No.</th>
-            <th>Qty</th>
-            <th>Reason</th>
+            <th class="col-head" style="width: 180px;">File/Image</th>
+            <th class="col-head" style="width: 100px;" data-col="date">Date <button class="filter-btn" data-col="date">▾</button></th>
+            <th class="col-head" style="width: 150px;" data-col="category">Category <button class="filter-btn" data-col="category">▾</button></th>
+            <th class="col-head" style="width: 140px;" data-col="partNo">Part No. <button class="filter-btn" data-col="partNo">▾</button></th>
+            <th class="col-head" style="width: auto;" data-col="desc">Description <button class="filter-btn" data-col="desc">▾</button></th>
+            <th class="col-head" style="width: 70px;" data-col="qty">Qty <button class="filter-btn" data-col="qty">▾</button></th>
+            <th class="col-head" style="width: 120px;" data-col="reason">Reason <button class="filter-btn" data-col="reason">▾</button></th>
           </tr>
         </thead>
         <tbody></tbody>
