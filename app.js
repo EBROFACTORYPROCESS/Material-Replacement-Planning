@@ -8047,8 +8047,19 @@ async function handleScrapLogFiles(files) {
 
         if (file || partNo || ticketId) {
           records.push({
-            file, category, ticketId, partNo, desc, qty, reason,
-            date: parsedDate ? isoDate(parsedDate) : '', rawDate, operator
+            file,
+            category,
+            ticketId,
+            partNo,
+            desc,           // section_1.codigo_componente
+            reason1: String(r[5] || '').trim(), // section_1.codigo_rechaz
+            qty,
+            area: String(r[7] || '').trim(),    // section_1.origen_area_zona
+            reason2: String(r[8] || '').trim(), // section_2.motivo_rechace
+            rawDate: String(r[9] || '').trim(),
+            date: parsedDate ? isoDate(parsedDate) : '',
+            obs: String(r[10] || '').trim(),
+            operator: String(r[11] || '').trim()
           });
         }
       }
