@@ -8316,40 +8316,37 @@ async function pickScrapImageFolder() {
     if (e.name !== 'AbortError') { console.error(e); alert('Failed to select folder: ' + e.message); }
   }
 }
-async function openScrapDetail(index) {
+function openScrapDetail(index) {
   if (index < 0 || index >= STATE.scrapAnalysis.records.length) return;
-  _editingScrapIndex = index;
   const r = STATE.scrapAnalysis.records[index];
 
-  // 1. Populate Form
-  const form = $('#scrapDetailForm');
-  form.category.value = r.category || '';
-  form.ticketId.value = r.ticketId || '';
-  form.partNo.value = r.partNo || '';
-  form.desc.value = r.desc || '';
-  form.reason1.value = r.reason1 || '';
-  form.qty.value = r.qty || '';
-  form.area.value = r.area || '';
-  form.reason2.value = r.reason2 || '';
-  form.rawDate.value = r.rawDate || '';
-  form.obs.value = r.obs || '';
-  form.operator.value = r.operator || '';
+  // Populate Read-Only Inputs
+  $('#sd_category').value = r.category || '—';
+  $('#sd_ticketId').value = r.ticketId || '—';
+  $('#sd_partNo').value = r.partNo || '—';
+  $('#sd_desc').value = r.desc || '—';
+  $('#sd_reason1').value = r.reason1 || '—';
+  $('#sd_qty').value = r.qty || '0';
+  $('#sd_area').value = r.area || '—';
+  $('#sd_reason2').value = r.reason2 || '—';
+  $('#sd_rawDate').value = r.rawDate || '—';
+  $('#sd_obs').value = r.obs || '—';
+  $('#sd_operator').value = r.operator || '—';
 
-  // 2. Setup Modal UI
-  $('#sdTitle').textContent = `Edit: ${r.file || 'Scrap Record'}`;
+  $('#sdTitle').textContent = `Details: ${r.file || 'Scrap Record'}`;
   $('#sdSubtitle').textContent = `Ticket: ${r.ticketId || 'N/A'}`;
+  
   $('#sdImage').style.display = 'none';
   $('#sdImageLoading').style.display = 'block';
+  $('#sdImageLoading').style.color = 'var(--muted)';
+  $('#sdImageLoading').textContent = 'Loading Image...';
   $('#scrapDetailModal').classList.remove('hidden');
 
-  // 3. Load Image (if folder exists)
+  // Load Image
   const handle = STATE.scrapAnalysis.imageFolderHandle;
   if (handle && r.file) {
-    try {
-      const fileHandle = await handle.getFileHandle(r.file);
-      const file = await fileHandle.getFile();
+    handle.getFileHandle(r.file).then(fileHandle => fileHandle.getFile()).then(file => {
       const url = URL.createObjectURL(file);
-      
       if (window._scrapImgUrl) URL.revokeObjectURL(window._scrapImgUrl);
       window._scrapImgUrl = url;
       
@@ -8359,10 +8356,10 @@ async function openScrapDetail(index) {
         $('#sdImageLoading').style.display = 'none';
         img.style.display = 'block';
       };
-    } catch (err) {
+    }).catch(err => {
       $('#sdImageLoading').textContent = 'Image not found in selected folder.';
       $('#sdImageLoading').style.color = 'var(--danger)';
-    }
+    });
   } else {
     $('#sdImageLoading').textContent = 'No Image Folder Selected.';
   }
@@ -8374,46 +8371,18 @@ function closeScrapDetail() {
     URL.revokeObjectURL(window._scrapImgUrl);
     window._scrapImgUrl = null;
   }
-  _editingScrapIndex = -1;
 }
 
-// Bind Modal Actions inside bindScrapAnalysis()
-function bindScrapDetailModal() {
-  $('#sdClose').addEventListener('click', closeScrapDetail);
-  $('#sdCancel').addEventListener('click', closeScrapDetail);
+// Global Event Delegation for the buttons
+document.addEventListener('click', e => {
+  const modal = $('#scrapDetailModal');
+  if (!modal || modal.classList.contains('hidden')) return;
 
-  // Reset button
-  $('#sdReset').addEventListener('click', () => {
-    if (_editingScrapIndex >= 0) openScrapDetail(_editingScrapIndex); // reloads from state
-  });
-
-  // Save button
-  $('#sdSave').addEventListener('click', () => {
-    if (_editingScrapIndex < 0) return;
-    const form = $('#scrapDetailForm');
-    const r = STATE.scrapAnalysis.records[_editingScrapIndex];
-
-    // Read values from form
-    r.category = form.category.value;
-    r.ticketId = form.ticketId.value;
-    r.partNo = form.partNo.value;
-    r.desc = form.desc.value;
-    r.reason1 = form.reason1.value;
-    r.qty = Number(form.qty.value) || 0;
-    r.area = form.area.value;
-    r.reason2 = form.reason2.value;
-    r.rawDate = form.rawDate.value;
-    r.obs = form.obs.value;
-    r.operator = form.operator.value;
-
-    // Re-calculate parsed date
-    const parsed = parseScrapDate(r.rawDate);
-    r.date = parsed ? isoDate(parsed) : '';
-
+  // Close if clicking the X, Cancel/Close button, or the dark background
+  if (e.target.id === 'sdClose' || e.target.id === 'sdCancel' || e.target.id === 'scrapDetailModal') {
     closeScrapDetail();
-    renderScrapAnalysis(); // Refresh table
-  });
-}
+  }
+});
 async function reloadScrapImageFolderFromHandle(handle) {
   if (!handle) return;
   let perm = await handle.queryPermission({ mode: 'read' });
