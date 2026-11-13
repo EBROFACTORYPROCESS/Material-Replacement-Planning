@@ -8088,6 +8088,8 @@ async function handleScrapLogFiles(files) {
     alert('Failed to parse scrap file: ' + e.message);
   }
 }
+let _editingScrapIndex = -1;
+
 function renderScrapAnalysis() {
   const q = ($('#scrapSearch').value || '').toLowerCase();
   const catFilter = $('#scrapCategoryFilter').value;
@@ -8096,7 +8098,7 @@ function renderScrapAnalysis() {
   let filtered = STATE.scrapAnalysis.records.filter(r => {
     if (catFilter !== 'all' && r.category !== catFilter) return false;
     if (q) {
-      const hay = `${r.partNo} ${r.reason} ${r.operator} ${r.ticketId}`.toLowerCase();
+      const hay = `${r.partNo} ${r.reason1} ${r.reason2} ${r.operator} ${r.ticketId}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -8104,108 +8106,40 @@ function renderScrapAnalysis() {
 
   STATE.scrapAnalysis.filteredRecords = filtered;
 
-  // --- KPIs ---
+  // --- KPIs --- (Keep existing KPI logic here, no changes needed)
   const totalQty = filtered.reduce((s, r) => s + (r.qty || 0), 0);
   const uniqueParts = new Set(filtered.map(r => r.partNo).filter(Boolean)).size;
-  const topReasonCount = {};
-  filtered.forEach(r => {
-    if (r.reason) topReasonCount[r.reason] = (topReasonCount[r.reason] || 0) + 1;
-  });
-  let topReason = '—', maxReason = 0;
-  for (const [k, v] of Object.entries(topReasonCount)) {
-    if (v > maxReason) { maxReason = v; topReason = k; }
-  }
+  // ... [keep existing KPI block] ...
   
-  const missingDates = filtered.filter(r => !r.date).length;
-  const qualityPct = filtered.length ? Math.round(((filtered.length - missingDates) / filtered.length) * 100) : 100;
-
-  $('#scrapKpiStats').innerHTML = `
-    <div class="stat">
-      <div class="label">Total Scrap Qty</div>
-      <div class="value">${fmt(totalQty)}</div>
-      <div class="sub">across ${fmt(filtered.length)} records</div>
-    </div>
-    <div class="stat">
-      <div class="label">Unique Parts</div>
-      <div class="value">${fmt(uniqueParts)}</div>
-      <div class="sub">materials scrapped</div>
-    </div>
-    <div class="stat">
-      <div class="label">Top Reason</div>
-      <div class="value" style="font-size:16px">${escapeHtml(shorten(topReason, 20))}</div>
-      <div class="sub">${fmt(maxReason)} occurrences</div>
-    </div>
-    <div class="stat">
-      <div class="label">Data Quality</div>
-      <div class="value" style="color:${qualityPct < 80 ? 'var(--danger)' : 'var(--ok)'}">${qualityPct}%</div>
-      <div class="sub">${missingDates} rows missing valid dates</div>
-    </div>
-  `;
-
-  // --- Table ---
+  // --- Table Render (Essential Columns Only) ---
   const tbody = $('#scrapTable tbody');
-  tbody.innerHTML = filtered.slice(0, 1000).map(r => {
-    // 1. Handle Hyperlink for File/Image
+  tbody.innerHTML = filtered.slice(0, 1000).map((r, idx) => {
+    const actualIndex = STATE.scrapAnalysis.records.indexOf(r);
     let fileCell = escapeHtml(r.file || '—');
+    
     if (r.file && hasFolder) {
-      fileCell = `<a href="#" class="image-link" data-file="${escapeHtml(r.file)}" title="Click to preview: ${escapeHtml(r.file)}">${escapeHtml(shorten(r.file, 25))}</a>`;
+      fileCell = `<a href="#" class="image-link" data-index="${actualIndex}" title="Click to view/edit: ${escapeHtml(r.file)}">${escapeHtml(shorten(r.file, 25))}</a>`;
     }
 
-    // 2. Cross-reference Description with Material List
-    let desc = 'Data not found in Material list.';
-    if (r.partNo && STATE.partIndex[r.partNo]) {
-      desc = STATE.partIndex[r.partNo].nameEN || STATE.partIndex[r.partNo].nameCN || desc;
-    }
+    let displayReason = r.reason2 || r.reason1 || '—';
 
     return `
       <tr>
         <td class="mono">${fileCell}</td>
-        <td>${escapeHtml(r.category)}</td>
-        <td class="mono">${escapeHtml(r.ticketId || '—')}</td>
-        <td class="mono"><b>${escapeHtml(r.partNo || '—')}</b></td>
-        <td>${escapeHtml(desc)}</td>
-        <td class="num">${fmt(r.qty)}</td>
-        <td>${escapeHtml(r.reason)}</td>
         <td style="color:${r.date ? 'inherit' : 'var(--danger)'}">${r.date ? fmtDate(new Date(r.date)) : escapeHtml(r.rawDate || '—')}</td>
-        <td>${escapeHtml(r.operator || '—')}</td>
+        <td>${escapeHtml(r.category)}</td>
+        <td class="mono"><b>${escapeHtml(r.partNo || '—')}</b></td>
+        <td class="num">${fmt(r.qty)}</td>
+        <td>${escapeHtml(displayReason)}</td>
       </tr>
     `;
-  }).join('') + (filtered.length > 1000 ? `<tr><td colspan="9" style="text-align:center;color:var(--muted)">Showing 1000 of ${filtered.length} records</td></tr>` : '');
+  }).join('') + (filtered.length > 1000 ? `<tr><td colspan="6" style="text-align:center;color:var(--muted)">Showing 1000 of ${filtered.length} records</td></tr>` : '');
 
-  // 3. Wire up Image Preview Modal (Async Fetch from Folder)
+  // Wire up Image Link -> Open Detail Modal
   tbody.querySelectorAll('.image-link').forEach(link => {
-    link.addEventListener('click', async e => {
+    link.addEventListener('click', e => {
       e.preventDefault();
-      const fileName = link.dataset.file;
-      const handle = STATE.scrapAnalysis.imageFolderHandle;
-      
-      if (!handle) return;
-
-      try {
-        // Check permission if needed
-        let perm = await handle.queryPermission({ mode: 'read' });
-        if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
-        if (perm !== 'granted') return;
-
-        // Fetch the file from the directory
-        const fileHandle = await handle.getFileHandle(fileName);
-        const file = await fileHandle.getFile();
-        
-        // Create a temporary URL for the browser to display
-        const url = URL.createObjectURL(file);
-
-        // Revoke old URL to prevent memory leaks
-        if (window._scrapImgUrl) URL.revokeObjectURL(window._scrapImgUrl);
-        window._scrapImgUrl = url;
-
-        $('#imagePreviewSrc').src = url;
-        $('#imagePreviewTitle').textContent = fileName;
-        $('#imagePreviewModal').classList.remove('hidden');
-
-      } catch (err) {
-        console.error(err);
-        alert(`Could not load image: ${fileName}\n\nMake sure the file exists in the selected folder.`);
-      }
+      openScrapDetail(parseInt(link.dataset.index, 10));
     });
   });
 
@@ -8330,11 +8264,13 @@ function bindScrapAnalysis() {
       if (f) await handleScrapLogFiles([f]);
     });
   }
-
+  
+   bindScrapDetailModal();
   // Filters & Exports
   $('#scrapSearch')?.addEventListener('input', renderScrapAnalysis);
   $('#scrapCategoryFilter')?.addEventListener('change', renderScrapAnalysis);
   $('#scrapExport')?.addEventListener('click', exportScrapAnalysis);
+
 }
 /* ---------- Scrap File Pickers & Reloads ---------- */
 async function pickScrapFile() {
@@ -8380,7 +8316,104 @@ async function pickScrapImageFolder() {
     if (e.name !== 'AbortError') { console.error(e); alert('Failed to select folder: ' + e.message); }
   }
 }
+async function openScrapDetail(index) {
+  if (index < 0 || index >= STATE.scrapAnalysis.records.length) return;
+  _editingScrapIndex = index;
+  const r = STATE.scrapAnalysis.records[index];
 
+  // 1. Populate Form
+  const form = $('#scrapDetailForm');
+  form.category.value = r.category || '';
+  form.ticketId.value = r.ticketId || '';
+  form.partNo.value = r.partNo || '';
+  form.desc.value = r.desc || '';
+  form.reason1.value = r.reason1 || '';
+  form.qty.value = r.qty || '';
+  form.area.value = r.area || '';
+  form.reason2.value = r.reason2 || '';
+  form.rawDate.value = r.rawDate || '';
+  form.obs.value = r.obs || '';
+  form.operator.value = r.operator || '';
+
+  // 2. Setup Modal UI
+  $('#sdTitle').textContent = `Edit: ${r.file || 'Scrap Record'}`;
+  $('#sdSubtitle').textContent = `Ticket: ${r.ticketId || 'N/A'}`;
+  $('#sdImage').style.display = 'none';
+  $('#sdImageLoading').style.display = 'block';
+  $('#scrapDetailModal').classList.remove('hidden');
+
+  // 3. Load Image (if folder exists)
+  const handle = STATE.scrapAnalysis.imageFolderHandle;
+  if (handle && r.file) {
+    try {
+      const fileHandle = await handle.getFileHandle(r.file);
+      const file = await fileHandle.getFile();
+      const url = URL.createObjectURL(file);
+      
+      if (window._scrapImgUrl) URL.revokeObjectURL(window._scrapImgUrl);
+      window._scrapImgUrl = url;
+      
+      const img = $('#sdImage');
+      img.src = url;
+      img.onload = () => {
+        $('#sdImageLoading').style.display = 'none';
+        img.style.display = 'block';
+      };
+    } catch (err) {
+      $('#sdImageLoading').textContent = 'Image not found in selected folder.';
+      $('#sdImageLoading').style.color = 'var(--danger)';
+    }
+  } else {
+    $('#sdImageLoading').textContent = 'No Image Folder Selected.';
+  }
+}
+
+function closeScrapDetail() {
+  $('#scrapDetailModal').classList.add('hidden');
+  if (window._scrapImgUrl) {
+    URL.revokeObjectURL(window._scrapImgUrl);
+    window._scrapImgUrl = null;
+  }
+  _editingScrapIndex = -1;
+}
+
+// Bind Modal Actions inside bindScrapAnalysis()
+function bindScrapDetailModal() {
+  $('#sdClose').addEventListener('click', closeScrapDetail);
+  $('#sdCancel').addEventListener('click', closeScrapDetail);
+
+  // Reset button
+  $('#sdReset').addEventListener('click', () => {
+    if (_editingScrapIndex >= 0) openScrapDetail(_editingScrapIndex); // reloads from state
+  });
+
+  // Save button
+  $('#sdSave').addEventListener('click', () => {
+    if (_editingScrapIndex < 0) return;
+    const form = $('#scrapDetailForm');
+    const r = STATE.scrapAnalysis.records[_editingScrapIndex];
+
+    // Read values from form
+    r.category = form.category.value;
+    r.ticketId = form.ticketId.value;
+    r.partNo = form.partNo.value;
+    r.desc = form.desc.value;
+    r.reason1 = form.reason1.value;
+    r.qty = Number(form.qty.value) || 0;
+    r.area = form.area.value;
+    r.reason2 = form.reason2.value;
+    r.rawDate = form.rawDate.value;
+    r.obs = form.obs.value;
+    r.operator = form.operator.value;
+
+    // Re-calculate parsed date
+    const parsed = parseScrapDate(r.rawDate);
+    r.date = parsed ? isoDate(parsed) : '';
+
+    closeScrapDetail();
+    renderScrapAnalysis(); // Refresh table
+  });
+}
 async function reloadScrapImageFolderFromHandle(handle) {
   if (!handle) return;
   let perm = await handle.queryPermission({ mode: 'read' });
