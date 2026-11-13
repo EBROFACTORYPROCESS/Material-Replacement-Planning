@@ -1976,3 +1976,15 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
 .sd-input.mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+/* Read-only display inputs */
+.sd-input[readonly] {
+  background-color: #f8fafc;
+  color: #334155;
+  border-color: #e2e8f0;
+  cursor: default;
+}
+.sd-input[readonly]:focus {
+  outline: none;
+  box-shadow: none;
+  border-color: #e2e8f0;
+}
