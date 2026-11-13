@@ -1944,3 +1944,35 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   .scrap-charts-grid { grid-template-columns: 1fr; }
   .scrap-charts-grid .chart-container:last-child { grid-column: auto; }
 }
+/* Scrap Detail Modal Form */
+.form-group {
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.form-group label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  font-weight: 600;
+}
+.sd-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  background: #fff;
+  color: var(--text);
+}
+.sd-input:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, .15);
+}
+.sd-input.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
