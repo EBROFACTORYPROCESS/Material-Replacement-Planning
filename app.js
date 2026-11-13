@@ -8182,22 +8182,25 @@ function renderScrapAnalysis() {
   // --- Table Render ---
   const tbody = $('#scrapTable tbody');
   
-  // Update Headers UI (Sort marks)
-  $('#scrapTable th').each(function() {
-    const th = $(this);
-    const colId = th.data('col');
+  // Update Headers UI (Sort marks) - VANILLA JS REPLACEMENT
+  const ths = $$('#scrapTable th');
+  ths.forEach(th => {
+    const colId = th.dataset.col;
     if (!colId) return;
     
     // Remove existing marks
-    th.find('.sort-mark').remove();
-    th.removeClass('sorted filtered');
+    th.querySelectorAll('.sort-mark').forEach(el => el.remove());
+    th.classList.remove('sorted', 'filtered');
     
     if (STATE.scrapAnalysis.sorts[colId]) {
-      th.addClass('sorted');
+      th.classList.add('sorted');
       const mark = STATE.scrapAnalysis.sorts[colId] === 'asc' ? '▲' : '▼';
-      th.append(`<span class="sort-mark">${mark}</span>`);
+      const span = document.createElement('span');
+      span.className = 'sort-mark';
+      span.textContent = mark;
+      th.appendChild(span);
     }
-    if (STATE.scrapAnalysis.filters[colId]) th.addClass('filtered');
+    if (STATE.scrapAnalysis.filters[colId]) th.classList.add('filtered');
   });
 
   tbody.innerHTML = filtered.slice(0, 1000).map((r, idx) => {
