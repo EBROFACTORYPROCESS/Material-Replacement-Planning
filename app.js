@@ -7970,7 +7970,13 @@ STATE.scrapAnalysis = {
   records: [],
   filteredRecords: [],
   fileName: '',
-  charts: {} // Holds Chart.js instances so we can destroy them on reload
+  imageFolderHandle: null,
+  charts: {},
+  // NEW: Filtering and Sorting
+  period: { from: '', to: '' },
+  pendingPeriod: { from: '', to: '' },
+  sorts: {},
+  filters: {}
 };
 
 function parseScrapDate(raw) {
@@ -8094,25 +8100,100 @@ function renderScrapAnalysis() {
   const q = ($('#scrapSearch').value || '').toLowerCase();
   const catFilter = $('#scrapCategoryFilter').value;
   const hasFolder = !!STATE.scrapAnalysis.imageFolderHandle;
+  const p = STATE.scrapAnalysis.period;
 
+  // 1. Base Filtering (Search + Dropdown + Date Range)
   let filtered = STATE.scrapAnalysis.records.filter(r => {
     if (catFilter !== 'all' && r.category !== catFilter) return false;
+    if (p.from && (!r.date || r.date < p.from)) return false;
+    if (p.to && (!r.date || r.date > p.to)) return false;
+    
     if (q) {
-      const hay = `${r.partNo} ${r.reason1} ${r.reason2} ${r.operator} ${r.ticketId}`.toLowerCase();
+      const hay = `${r.partNo} ${r.reason1} ${r.reason2} ${r.operator} ${r.ticketId} ${r.desc}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   });
 
+  // 2. Column Sorting
+  const sortCol = Object.keys(STATE.scrapAnalysis.sorts)[0] || '';
+  const sortDir = sortCol && STATE.scrapAnalysis.sorts[sortCol] === 'desc' ? -1 : 1;
+  if (sortCol) {
+    filtered.sort((a, b) => {
+      let valA = a[sortCol];
+      let valB = b[sortCol];
+      
+      // Special handling for Description (needs Material List lookup)
+      if (sortCol === 'desc') {
+        valA = getScrapDescription(a);
+        valB = getScrapDescription(b);
+      }
+      if (sortCol === 'reason') {
+        valA = a.reason2 || a.reason1 || '';
+        valB = b.reason2 || b.reason1 || '';
+      }
+
+      if (sortCol === 'qty') return ((Number(valA) || 0) - (Number(valB) || 0)) * sortDir;
+      return String(valA || '').localeCompare(String(valB || ''), undefined, { numeric: true }) * sortDir;
+    });
+  }
+
+  // 3. Column Filters (from popup)
+  for (const [colId, allowedSet] of Object.entries(STATE.scrapAnalysis.filters)) {
+    if (!allowedSet) continue;
+    filtered = filtered.filter(r => {
+      let val = r[colId];
+      if (colId === 'desc') val = getScrapDescription(r);
+      if (colId === 'reason') val = r.reason2 || r.reason1 || '';
+      return allowedSet.has(String(val || ''));
+    });
+  }
+
   STATE.scrapAnalysis.filteredRecords = filtered;
 
-  // --- KPIs --- (Keep existing KPI logic here, no changes needed)
+  // --- KPIs (Same as before) ---
   const totalQty = filtered.reduce((s, r) => s + (r.qty || 0), 0);
   const uniqueParts = new Set(filtered.map(r => r.partNo).filter(Boolean)).size;
-  // ... [keep existing KPI block] ...
-  
-  // --- Table Render (Essential Columns Only) ---
+  const topReasonCount = {};
+  filtered.forEach(r => {
+    const reason = r.reason2 || r.reason1;
+    if (reason) topReasonCount[reason] = (topReasonCount[reason] || 0) + 1;
+  });
+  let topReason = '—', maxReason = 0;
+  for (const [k, v] of Object.entries(topReasonCount)) {
+    if (v > maxReason) { maxReason = v; topReason = k; }
+  }
+  const missingDates = filtered.filter(r => !r.date).length;
+  const qualityPct = filtered.length ? Math.round(((filtered.length - missingDates) / filtered.length) * 100) : 100;
+
+  $('#scrapKpiStats').innerHTML = `
+    <div class="stat"><div class="label">Total Scrap Qty</div><div class="value">${fmt(totalQty)}</div><div class="sub">across ${fmt(filtered.length)} records</div></div>
+    <div class="stat"><div class="label">Unique Parts</div><div class="value">${fmt(uniqueParts)}</div><div class="sub">materials scrapped</div></div>
+    <div class="stat"><div class="label">Top Reason</div><div class="value" style="font-size:16px">${escapeHtml(shorten(topReason, 20))}</div><div class="sub">${fmt(maxReason)} occurrences</div></div>
+    <div class="stat"><div class="label">Data Quality</div><div class="value" style="color:${qualityPct < 80 ? 'var(--danger)' : 'var(--ok)'}">${qualityPct}%</div><div class="sub">${missingDates} rows missing valid dates</div></div>
+  `;
+
+  // --- Table Render ---
   const tbody = $('#scrapTable tbody');
+  
+  // Update Headers UI (Sort marks)
+  $('#scrapTable th').each(function() {
+    const th = $(this);
+    const colId = th.data('col');
+    if (!colId) return;
+    
+    // Remove existing marks
+    th.find('.sort-mark').remove();
+    th.removeClass('sorted filtered');
+    
+    if (STATE.scrapAnalysis.sorts[colId]) {
+      th.addClass('sorted');
+      const mark = STATE.scrapAnalysis.sorts[colId] === 'asc' ? '▲' : '▼';
+      th.append(`<span class="sort-mark">${mark}</span>`);
+    }
+    if (STATE.scrapAnalysis.filters[colId]) th.addClass('filtered');
+  });
+
   tbody.innerHTML = filtered.slice(0, 1000).map((r, idx) => {
     const actualIndex = STATE.scrapAnalysis.records.indexOf(r);
     let fileCell = escapeHtml(r.file || '—');
@@ -8121,7 +8202,8 @@ function renderScrapAnalysis() {
       fileCell = `<a href="#" class="image-link" data-index="${actualIndex}" title="Click to view/edit: ${escapeHtml(r.file)}">${escapeHtml(shorten(r.file, 25))}</a>`;
     }
 
-    let displayReason = r.reason2 || r.reason1 || '—';
+    const descText = getScrapDescription(r);
+    const reasonText = r.reason2 || r.reason1 || '—';
 
     return `
       <tr>
@@ -8129,13 +8211,14 @@ function renderScrapAnalysis() {
         <td style="color:${r.date ? 'inherit' : 'var(--danger)'}">${r.date ? fmtDate(new Date(r.date)) : escapeHtml(r.rawDate || '—')}</td>
         <td>${escapeHtml(r.category)}</td>
         <td class="mono"><b>${escapeHtml(r.partNo || '—')}</b></td>
+        <td>${escapeHtml(descText)}</td>
         <td class="num">${fmt(r.qty)}</td>
-        <td>${escapeHtml(displayReason)}</td>
+        <td>${escapeHtml(reasonText)}</td>
       </tr>
     `;
-  }).join('') + (filtered.length > 1000 ? `<tr><td colspan="6" style="text-align:center;color:var(--muted)">Showing 1000 of ${filtered.length} records</td></tr>` : '');
+  }).join('') + (filtered.length > 1000 ? `<tr><td colspan="7" style="text-align:center;color:var(--muted)">Showing 1000 of ${filtered.length} records</td></tr>` : '');
 
-  // Wire up Image Link -> Open Detail Modal
+  // Wire up Image Link
   tbody.querySelectorAll('.image-link').forEach(link => {
     link.addEventListener('click', e => {
       e.preventDefault();
@@ -8144,6 +8227,14 @@ function renderScrapAnalysis() {
   });
 
   renderScrapCharts(filtered);
+}
+
+function getScrapDescription(r) {
+  if (r.partNo && STATE.partIndex[r.partNo]) {
+    const info = STATE.partIndex[r.partNo];
+    return info.nameEN || info.nameCN || r.desc || 'Not found in Material List';
+  }
+  return r.desc || 'Not found in Material List';
 }
 function renderScrapCharts(records) {
   const chartColors = ['#2563eb', '#3b82f6', '#60a5fa', '#93c5fd', '#bfdbfe', '#dbeafe'];
@@ -8263,7 +8354,198 @@ function bindScrapAnalysis() {
       const f = e.dataTransfer.files?.[0];
       if (f) await handleScrapLogFiles([f]);
     });
-  }
+  const updateScrapApplyBtn = () => {
+    const a = STATE.scrapAnalysis.period;
+    const p = STATE.scrapAnalysis.pendingPeriod;
+    const isDirty = a.from !== p.from || a.to !== p.to;
+    $('#scrapPeriodApply').prop('disabled', !isDirty).toggleClass('pending', isDirty);
+  };
+
+  $('#scrapPeriodFrom').on('change', function() {
+    STATE.scrapAnalysis.pendingPeriod.from = this.value;
+    updateScrapApplyBtn();
+  });
+  $('#scrapPeriodTo').on('change', function() {
+    STATE.scrapAnalysis.pendingPeriod.to = this.value;
+    updateScrapApplyBtn();
+  });
+
+  $('#scrapPeriodApply').on('click', () => {
+    STATE.scrapAnalysis.period = { ...STATE.scrapAnalysis.pendingPeriod };
+    renderScrapAnalysis();
+    updateScrapApplyBtn();
+  });
+
+  $('#scrapPeriodControls').on('click', 'button[data-range]', function() {
+    const range = $(this).data('range');
+    let from = '', to = '';
+    const t = new Date(); t.setHours(0,0,0,0);
+    
+    if (range === 'today') {
+      from = to = isoDate(t);
+    } else if (range === 'thisWeek') {
+      const day = t.getDay() || 7;
+      const mon = new Date(t); mon.setDate(t.getDate() - (day - 1));
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+      from = isoDate(mon); to = isoDate(sun);
+    } else if (range === 'thisMonth') {
+      const first = new Date(t.getFullYear(), t.getMonth(), 1);
+      const last = new Date(t.getFullYear(), t.getMonth() + 1, 0);
+      from = isoDate(first); to = isoDate(last);
+    } else if (range === 'thisYear') {
+      from = `${t.getFullYear()}-01-01`; to = `${t.getFullYear()}-12-31`;
+    } else if (range === 'all') {
+      // Find min/max dates in data
+      const dates = STATE.scrapAnalysis.records.map(r => r.date).filter(Boolean).sort();
+      from = dates[0] || '';
+      to = dates[dates.length - 1] || '';
+    }
+
+    $('#scrapPeriodFrom').val(from);
+    $('#scrapPeriodTo').val(to);
+    STATE.scrapAnalysis.pendingPeriod = { from, to };
+    
+    $('#scrapPeriodControls button[data-range]').removeClass('primary');
+    $(this).addClass('primary');
+    updateScrapApplyBtn();
+  });
+
+  // --- Column Filter/Sort Popup Logic ---
+  $('#scrapTable').on('click', '.filter-btn', function(e) {
+    e.stopPropagation();
+    const colId = $(this).data('col');
+    const anchor = $(this)[0];
+    openScrapFilterPopup(colId, anchor);
+  });
+
+  $('#scrapClearFilters').on('click', () => {
+    STATE.scrapAnalysis.filters = {};
+    STATE.scrapAnalysis.sorts = {};
+    $('#scrapSearch').val('');
+    $('#scrapCategoryFilter').val('all');
+    renderScrapAnalysis();
+  });
+
+  // Ensure global close works for scrap popup too
+  $(document).on('click', e => {
+    if (!$(e.target).closest('.filter-btn').length && !$(e.target).closest('#filterPopup').length) {
+      $('#filterPopup').addClass('hidden').html('');
+    }
+  });
+}
+
+// Custom Popup for Scrap Table
+function openScrapFilterPopup(colId, anchor) {
+  const popup = $('#filterPopup');
+  popup.data('col', colId);
+  
+  const existingFilter = STATE.scrapAnalysis.filters[colId];
+  popup.data('workingSet', existingFilter ? new Set(existingFilter) : null);
+  popup.data('search', '');
+  
+  // Get unique values for this column
+  const uniqueVals = new Set();
+  STATE.scrapAnalysis.records.forEach(r => {
+    let v = r[colId];
+    if (colId === 'desc') v = getScrapDescription(r);
+    if (colId === 'reason') v = r.reason2 || r.reason1 || '';
+    uniqueVals.add(String(v || ''));
+  });
+  
+  const allValues = Array.from(uniqueVals).sort().map(v => ({ key: v, label: v || '—' }));
+
+  paintScrapPopup(colId, allValues, anchor);
+}
+
+function paintScrapPopup(colId, allValues, anchor) {
+  const popup = $('#filterPopup');
+  const currentSort = STATE.scrapAnalysis.sorts[colId];
+  const search = (popup.data('search') || '').toLowerCase();
+  const working = popup.data('workingSet');
+  
+  const visible = allValues.filter(v => !search || v.label.toLowerCase().includes(search));
+
+  const valuesHtml = visible.length ? visible.map(v => {
+    const checked = working === null ? true : working.has(v.key);
+    return `<label class="fp-value">
+      <input type="checkbox" data-key="${escapeHtml(v.key)}" ${checked ? 'checked' : ''}/>
+      <span title="${escapeHtml(v.label)}">${escapeHtml(v.label)}</span>
+    </label>`;
+  }).join('') : `<div class="hint" style="margin:6px">No values</div>`;
+
+  popup.html(`
+    <div class="fp-sort">
+      <button data-sort="asc" class="${currentSort==='asc'?'primary':''}">↑ Sort A → Z</button>
+      <button data-sort="desc" class="${currentSort==='desc'?'primary':''}">↓ Sort Z → A</button>
+      ${currentSort ? `<button data-sort="none" class="ghost">✕ Clear sort</button>` : ''}
+    </div>
+    <div class="fp-search">
+      <input type="text" id="fpSearchInput" placeholder="Search values…" value="${escapeHtml(popup.data('search')||'')}"/>
+    </div>
+    <div class="fp-values" id="fpValues">${valuesHtml}</div>
+    <div class="fp-actions">
+      <button data-act="all">All</button>
+      <button data-act="none">None</button>
+      <button data-act="apply" class="primary">Apply</button>
+    </div>
+  `);
+
+  // Position
+  const r = anchor.getBoundingClientRect();
+  let left = r.right - 270;
+  if (left < 8) left = 8;
+  let top = r.bottom + 6;
+  if (top + 420 > window.innerHeight - 8) top = Math.max(8, r.top - 426);
+  popup.css({ left, top }).removeClass('hidden');
+
+  // Wire events
+  popup.find('.fp-sort button').on('click', function() {
+    const s = $(this).data('sort');
+    if (s === 'none') delete STATE.scrapAnalysis.sorts[colId];
+    else STATE.scrapAnalysis.sorts[colId] = s;
+    popup.addClass('hidden');
+    renderScrapAnalysis();
+  });
+
+  const si = popup.find('#fpSearchInput');
+  si.on('input', function() {
+    popup.data('search', this.value);
+    const currentChecked = new Set();
+    popup.find('.fp-value input:checked').each(function() { currentChecked.add($(this).data('key')); });
+    const currentAll = popup.find('.fp-value input').length;
+    popup.data('workingSet', currentChecked.size === currentAll ? null : currentChecked);
+    paintScrapPopup(colId, allValues, anchor);
+    popup.find('#fpSearchInput').focus();
+  });
+
+  popup.find('.fp-value input').on('change', function(e) {
+    e.stopPropagation();
+    let ws = popup.data('workingSet');
+    if (ws === null) ws = new Set(allValues.map(v => v.key));
+    if (this.checked) ws.add($(this).data('key'));
+    else ws.delete($(this).data('key'));
+    popup.data('workingSet', ws);
+  });
+
+  popup.find('.fp-value').on('click', e => e.stopPropagation());
+
+  popup.find('.fp-actions button').on('click', function() {
+    const act = $(this).data('act');
+    if (act === 'all') {
+      popup.data('workingSet', null);
+      popup.find('.fp-value input').prop('checked', true);
+    } else if (act === 'none') {
+      popup.data('workingSet', new Set());
+      popup.find('.fp-value input').prop('checked', false);
+    } else if (act === 'apply') {
+      const ws = popup.data('workingSet');
+      if (ws === null) delete STATE.scrapAnalysis.filters[colId];
+      else STATE.scrapAnalysis.filters[colId] = new Set(ws);
+      popup.addClass('hidden');
+      renderScrapAnalysis();
+    }
+  });
+}
   
    bindScrapDetailModal();
   // Filters & Exports
