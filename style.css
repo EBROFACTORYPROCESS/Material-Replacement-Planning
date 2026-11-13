@@ -1988,3 +1988,31 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   box-shadow: none;
   border-color: #e2e8f0;
 }
+/* =========================================================
+   Scrap Analysis Table Layout
+   ========================================================= */
+#scrapTable th, #scrapTable td {
+  padding: 8px 10px;
+}
+#scrapTable th.col-head {
+  position: relative;
+  padding-right: 22px;
+}
+#scrapTable td:nth-child(1) { /* File */
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#scrapTable td:nth-child(5) { /* Description */
+  white-space: normal !important; /* Allow wrapping */
+  line-height: 1.4;
+  font-size: 12px;
+}
+/* Ensure the filter button sits nicely */
+#scrapTable .filter-btn {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  background: transparent; border: 0; cursor: pointer; color: #94a3b8;
+  font-size: 11px; padding: 1px 3px; line-height: 1; border-radius: 4px;
+}
+#scrapTable .filter-btn:hover { background: #e2e8f0; color: var(--brand); }
+#scrapTable .col-head.filtered .filter-btn { color: var(--brand); background: #dbeafe; }
+#scrapTable .col-head.sorted .filter-btn { color: var(--brand); }
+#scrapTable .sort-mark { margin-left: 4px; color: var(--brand); font-size: 10px; }
