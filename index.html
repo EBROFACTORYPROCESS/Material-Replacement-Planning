@@ -666,13 +666,13 @@
   </div>
 </div>
 <!-- ============ Image Preview Modal ============ -->
-<!-- ============ Scrap Detail Modal ============ -->
+<!-- ============ Scrap Detail Modal (Read-Only) ============ -->
 <div id="scrapDetailModal" class="modal-overlay hidden">
   <div class="modal-box" style="width: 95vw; height: 92vh; max-width: 1400px; display: flex; flex-direction: column;">
     
     <div class="modal-header">
       <div>
-        <h3 id="sdTitle" style="margin:0; font-size:16px;">Edit Scrap Record</h3>
+        <h3 id="sdTitle" style="margin:0; font-size:16px;">Scrap Record Details</h3>
         <div id="sdSubtitle" class="bdm-subtitle" style="margin-top:4px;"></div>
       </div>
       <button class="modal-close" id="sdClose">✕</button>
@@ -685,74 +685,64 @@
         <img id="sdImage" src="" style="max-width:100%; max-height:100%; object-fit:contain; display:none;" />
       </div>
 
-      <!-- RIGHT: FORM -->
+      <!-- RIGHT: READ-ONLY DATA -->
       <div style="flex: 0.8; max-width: 500px; overflow-y:auto; padding:20px; background:#fff;">
-        <form id="scrapDetailForm">
-          
-          <h4 style="margin: 0 0 10px; color:var(--brand); border-bottom:1px solid #e2e8f0; padding-bottom:4px;">Header</h4>
-          <div class="form-group">
-            <label>Category</label>
-            <select name="category" class="sd-input">
-              <option value="Process Scrap Parts">Process Scrap Parts</option>
-              <option value="Supplier Claim Parts">Supplier Claim Parts</option>
-              <option value="">Unknown</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Ticket ID</label>
-            <input type="text" name="ticketId" class="sd-input" />
-          </div>
+        
+        <h4 style="margin: 0 0 10px; color:var(--brand); border-bottom:1px solid #e2e8f0; padding-bottom:4px;">Header</h4>
+        <div class="form-group">
+          <label>Category</label>
+          <input type="text" id="sd_category" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Ticket ID</label>
+          <input type="text" id="sd_ticketId" class="sd-input" readonly tabindex="-1" />
+        </div>
 
-          <h4 style="margin: 20px 0 10px; color:var(--brand); border-bottom:1px solid #e2e8f0; padding-bottom:4px;">Section 1</h4>
-          <div class="form-group">
-            <label>Codigo Conjunto (Part No)</label>
-            <input type="text" name="partNo" class="sd-input mono" />
-          </div>
-          <div class="form-group">
-            <label>Codigo Componente (Description)</label>
-            <input type="text" name="desc" class="sd-input" />
-          </div>
-          <div class="form-group">
-            <label>Codigo Rechaz</label>
-            <input type="text" name="reason1" class="sd-input" />
-          </div>
-          <div class="form-group">
-            <label>Cantidad (Qty)</label>
-            <input type="number" name="qty" step="0.01" class="sd-input" />
-          </div>
-          <div class="form-group">
-            <label>Origen Area Zona</label>
-            <input type="text" name="area" class="sd-input" />
-          </div>
+        <h4 style="margin: 20px 0 10px; color:var(--brand); border-bottom:1px solid #e2e8f0; padding-bottom:4px;">Section 1</h4>
+        <div class="form-group">
+          <label>Codigo Conjunto (Part No)</label>
+          <input type="text" id="sd_partNo" class="sd-input mono" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Codigo Componente (Description)</label>
+          <input type="text" id="sd_desc" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Codigo Rechaz</label>
+          <input type="text" id="sd_reason1" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Cantidad (Qty)</label>
+          <input type="text" id="sd_qty" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Origen Area Zona</label>
+          <input type="text" id="sd_area" class="sd-input" readonly tabindex="-1" />
+        </div>
 
-          <h4 style="margin: 20px 0 10px; color:var(--brand); border-bottom:1px solid #e2e8f0; padding-bottom:4px;">Section 2</h4>
-          <div class="form-group">
-            <label>Motivo Rechace (Reason 2)</label>
-            <input type="text" name="reason2" class="sd-input" />
-          </div>
-          <div class="form-group">
-            <label>Fecha (Date)</label>
-            <input type="text" name="rawDate" class="sd-input" placeholder="e.g. 8/9/2026" />
-          </div>
-          <div class="form-group">
-            <label>Observaciones</label>
-            <textarea name="obs" class="sd-input" rows="3"></textarea>
-          </div>
-          <div class="form-group">
-            <label>Operario (Operator)</label>
-            <input type="text" name="operator" class="sd-input" />
-          </div>
+        <h4 style="margin: 20px 0 10px; color:var(--brand); border-bottom:1px solid #e2e8f0; padding-bottom:4px;">Section 2</h4>
+        <div class="form-group">
+          <label>Motivo Rechace (Reason 2)</label>
+          <input type="text" id="sd_reason2" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Fecha (Date)</label>
+          <input type="text" id="sd_rawDate" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Observaciones</label>
+          <textarea id="sd_obs" class="sd-input" rows="3" readonly tabindex="-1"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Operario (Operator)</label>
+          <input type="text" id="sd_operator" class="sd-input" readonly tabindex="-1" />
+        </div>
 
-        </form>
       </div>
     </div>
 
-    <div class="modal-actions" style="justify-content: space-between; border-top: 1px solid var(--border); border-bottom: none;">
-      <button class="btn ghost" id="sdReset" type="button">↺ Reset Changes</button>
-      <div style="display:flex; gap:10px;">
-        <button class="btn" id="sdCancel" type="button">Cancel</button>
-        <button class="btn primary" id="sdSave" type="button">💾 Save Changes</button>
-      </div>
+    <div class="modal-actions" style="justify-content: flex-end; border-top: 1px solid var(--border); border-bottom: none;">
+      <button class="btn primary" id="sdCancel" type="button">Close</button>
     </div>
   </div>
 </div>
