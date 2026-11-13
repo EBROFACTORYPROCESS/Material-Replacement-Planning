@@ -8077,6 +8077,12 @@ async function handleScrapLogFiles(files) {
     }
 
     STATE.scrapAnalysis.records = records;
+    // Reset filters & set full date range
+    STATE.scrapAnalysis.filters = {};
+    STATE.scrapAnalysis.sorts = {};
+    if ($('#scrapPeriodControls').length) {
+      $('#scrapPeriodControls button[data-range="all"]').click();
+    }
     STATE.scrapAnalysis.fileName = f.name;
 
     const info = $('#scrapLogInfo');
