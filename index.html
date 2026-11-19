@@ -1,57 +1,802 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BPO - Business Process Orchestrator</title>
-    <link rel="stylesheet" href="style.css?v=1">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
-    <style>
-        #app-loading {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            font-size: 1.2rem;
-            color: #1e3c72;
-            flex-direction: column;
-            gap: 1rem;
-        }
-        .spinner {
-            width: 40px;
-            height: 40px;
-            border: 4px solid #e2e8f0;
-            border-top: 4px solid #2a5298;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-    </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:,"> 
+<title>MRP Planner</title>
+<link rel="stylesheet" href="style.css" />
+<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <div id="app-loading">
-        <div class="spinner"></div>
-        <div>⏳ Loading latest data...</div>
-        <div style="font-size:0.8rem;color:#94a3b8;">The first load might take a few seconds</div>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <h1>MRP Planner</h1>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-tab="bomlist">BOM List</button>
+    <button class="tab" data-tab="bom">Material List</button>
+    <button class="tab" data-tab="production">Production Monitoring</button>
+    <button class="tab" data-tab="scrap">Scrap Analysis</button>
+    <button class="tab" data-tab="inventory">Inventory &amp; Stock</button>
+    <button class="tab" data-tab="comparison">Plan vs Execution</button>
+    <button class="tab" data-tab="planning">Production Planning</button>
+    <button class="tab" data-tab="files">Stored Files</button>
+    <button class="tab" data-tab="settings">Settings</button>
+  </nav>
+  <div class="meta"><span id="todayBadge"></span></div>
+</header>
+
+<main>
+  <!-- ============ TAB: BOM LIST (loader + tree) ============ -->
+  <section class="tab-panel active" id="panel-bomlist">
+    <div class="card">
+      <h2>1. Load BOM folder</h2>
+      <div class="file-chip-container" id="fileChip-bomFolder"></div>
+      <p class="hint">Pick the folder that contains your BOM files. Subfolders are scanned recursively for <code>.xlsx</code>, <code>.xls</code>, and <code>.csv</code>. Each file may contain many vehicle+colour+batch combinations — they’re grouped automatically. Files must contain columns for <b>Vehicle Matl. Num.</b> (A), <b>Vehicle Desc.</b> (B), <b>batch</b> (E), <b>Part NO.</b> (J), <b>Part Name(EN)</b> (K), <b>Qty</b> (T), and <b>UOM</b> (U).</p>
+
+      <div class="folder-loader">
+        <div class="folder-path-row">
+          <input id="bomFolderPath" name="bomFolderPath" type="text" readonly placeholder="No folder selected…" />
+          <button class="btn" id="bomFolderPick">📁 Choose folder</button>
+          <button class="btn primary" id="bomFolderProcess" disabled>▶ Process files</button>
+        </div>
+        <div class="folder-hint" id="bomFolderInfo">No folder selected yet.</div>
+
+        <!-- hidden fallback picker for browsers without File System Access API -->
+        <input type="file" id="bomFolderFallback" name="bomFolderFallback" webkitdirectory directory multiple hidden />
+
+        <div class="progress-wrap hidden" id="bomProgressWrap">
+          <div class="progress-bar"><div class="progress-fill" id="bomProgressFill"></div></div>
+        
+          <div class="progress-header">
+            <span class="progress-label" id="bomProgressLabel">Preparing…</span>
+            <button class="btn tiny hidden" id="bomProgressToggle">▸ Display batch list</button>
+          </div>
+          <div class="progress-file-list hidden" id="bomProgressList"></div>
+        </div>
+      </div>
+
+      <details class="folder-fallback">
+        <summary>…or drop individual files here</summary>
+        <div class="dropzone" id="bomDrop" style="margin-top:12px">
+          <input type="file" id="bomInput" name="bomInput" multiple accept=".xlsx,.xls,.csv" />
+          <div class="dz-inner">
+            <strong>Drop BOM files here</strong>
+            <span>or click to browse</span>
+          </div>
+        </div>
+      </details>
     </div>
 
-    <div id="app-root" style="display:none;"></div>
+    <div class="card">
+      <h2>2. BOM List</h2>
+      <p class="hint">Browse every loaded BOM by <b>Vehicle Spec → Colour → BOM ID → Sales Batches</b>. Type a Sales Batch ID below to jump straight to its BOM.</p>
 
-    <!-- ============================================================
-         CDN Libraries - Correct URLs
-         ============================================================ -->
-    <!-- LZString - CORRECT URL -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js"></script>
+      <div class="toolbar">
+        <input id="bomListSearch" name="bomListSearch" type="search" placeholder="Search by material code, colour, BOM or Sales Batch…" />
+        <button class="btn ghost" id="bomListExpandAll">▾ Expand all</button>
+        <button class="btn ghost" id="bomListCollapseAll">▸ Collapse all</button>
+      </div>
+
+      <div id="bomListSearchResult" class="bom-search-result hidden"></div>
+
+      <div id="bomList" class="file-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: MATERIAL LIST ============ -->
+  <section class="tab-panel" id="panel-bom">
+    <div class="card">
+      <h2>Material List</h2>
+      <div class="toolbar">
+        <input id="bomSearch" name="bomSearch" type="search" placeholder="Search material no / description…" />
+        <select id="bomFilter" name="bomFilter">
+          <option value="all">All materials</option>
+          <option value="common">Common materials only</option>
+          <option value="specific">Model-specific only</option>
+        </select>
+        <button class="btn" id="exportBom">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="bomTable" class="compact"></table></div>
+    </div>
+  </section>
+  
+  <!-- ============ TAB: PRODUCTION MONITORING ============ -->
+  <section class="tab-panel" id="panel-production">
+    <div class="card">
+      <p class="hint">
+        Select the production tracking file. The path is stored locally so on next visit the file reloads
+        without re-picking. Large files (~50 MB, hundreds of thousands of VINs) are parsed in chunks.
+      </p>
+      
+      <div class="folder-loader">
+        <div class="folder-path-row">
+          <input id="prodFilePath" name="prodFilePath" type="text" readonly placeholder="No file selected…" />
+          <button class="btn" id="prodFilePick">📁 Choose file</button>
+          <button class="btn primary" id="prodFileProcess" disabled>▶ Process file</button>
+        </div>
+        <div class="folder-hint" id="prodFileInfo">No file selected yet.</div>
+      
+        <div class="progress-wrap hidden" id="prodProgressWrap">
+          <div class="progress-bar"><div class="progress-fill" id="prodProgressFill"></div></div>
+          <div class="progress-header">
+            <span class="progress-label" id="prodProgressLabel">Preparing…</span>
+          </div>
+        </div>
+      </div>
+      <details class="folder-fallback">
+        <summary>…or drop the file here</summary>
+        <div class="dropzone" id="prodDrop" style="margin-top:12px">
+          <input type="file" id="prodInput" name="prodInput" accept=".csv,.tsv,.txt" />
+          <div class="dz-inner">
+            <strong>Drop production tracking CSV here</strong>
+            <span>or click to browse</span>
+          </div>
+        </div>
+      </details>
+      <div class="card">
+      <h2>2. Monitoring Period</h2>
+      <p class="hint">Set the time window — all KPIs, batches, VIN tables and the capacity chart are filtered to this range. A VIN is in scope if any of its milestones falls inside the period.</p>
     
-    <!-- jsondiffpatch - Using a reliable CDN -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsondiffpatch/0.4.1/jsondiffpatch.umd.min.js"></script>
+     <div class="prod-period-controls" id="prodPeriodControls">
+      <div class="prod-period-row">
+        <button class="btn tiny prod-period-btn" data-range="today">Today</button>
+        <button class="btn tiny prod-period-btn" data-range="thisWeek">This Week</button>
+        <button class="btn tiny prod-period-btn" data-range="thisMonth">This Month</button>
+        <button class="btn tiny prod-period-btn" data-range="thisYear">This Year</button>
+        <span class="prod-period-spacer"></span>
+        <button class="btn tiny prod-period-btn prod-period-btn-all" data-range="all">Full Range</button>
+      </div>
+
+      <div class="prod-period-row">
+        <button class="btn tiny prod-period-btn" data-range="yesterday">Yesterday</button>
+        <button class="btn tiny prod-period-btn" data-range="lastWeek">Last Week</button>
+        <button class="btn tiny prod-period-btn" data-range="lastMonth">Last Month</button>
+        <button class="btn tiny prod-period-btn" data-range="lastYear">Last Year</button>
+      </div>
+
+      <div class="prod-period-row prod-period-selects">
+        <span class="prod-chart-label">Line:</span>
+        <div class="prod-ms" id="prodLineMS">
+          <button class="prod-ms-btn" type="button">
+            <span class="prod-ms-label">All Lines</span>
+            <span class="prod-ms-caret">▾</span>
+          </button>
+          <div class="prod-ms-panel hidden">
+            <div class="prod-ms-header">
+              <button type="button" data-act="all">All</button>
+              <button type="button" data-act="none">None</button>
+            </div>
+            <div class="prod-ms-values" id="prodLineValues"></div>
+          </div>
+        </div>
+
+        <span class="prod-chart-label" style="margin-left:14px">Model:</span>
+        <div class="prod-ms" id="prodModelMS">
+          <button class="prod-ms-btn" type="button">
+            <span class="prod-ms-label">All Models</span>
+            <span class="prod-ms-caret">▾</span>
+          </button>
+          <div class="prod-ms-panel hidden">
+            <div class="prod-ms-search">
+              <input type="text" id="prodModelSearch" name="prodModelSearch" placeholder="Search model…" />
+            </div>
+            <div class="prod-ms-header">
+              <button type="button" data-act="all">All</button>
+              <button type="button" data-act="none">None</button>
+            </div>
+            <div class="prod-ms-values" id="prodModelValues"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prod-period-row prod-period-dates">
+        <span class="prod-chart-label">Apply on:</span>
+        <select id="prodPeriodStage" name="prodPeriodStage" class="prod-period-select">
+          <option value="">Any milestone</option>
+          <option value="devanning">005 De-vanning</option>
+          <option value="trimIn">020 Trim-in</option>
+          <option value="offLine">030 Off-line OK</option>
+          <option value="buyOff">Buy-off OK</option>
+          <option value="compoundIn">Compound Gate-in</option>
+          <option value="compoundOut">Compound Gate-out OK</option>
+        </select>
+      
+        <span class="prod-chart-label" style="margin-left:14px">From:</span>
+        <input type="date" id="prodPeriodFrom" name="prodPeriodFrom" class="prod-chart-date" />
+        <span class="prod-chart-label">To:</span>
+        <input type="date" id="prodPeriodTo" name="prodPeriodTo" class="prod-chart-date" />
+        <span class="prod-period-spacer"></span>
+        <button class="btn tiny primary" id="prodPeriodApply" disabled>✓ Apply</button>
+      </div>
+    </div>
     
-    <!-- Interact.js for drag and drop -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/interact.js/1.10.27/interact.min.js"></script>
+      <div class="hint" id="prodPeriodHint" style="margin:10px 0 0"></div>
+    </div>
+     
+      <div class="row-2">
+        <button class="btn ghost" id="prodClear">✕ Clear production data</button>
+      </div>
+    </div>
+  
+<div class="card">
+  <h2>2. Overall KPIs</h2>
+  <div class="stats prod-stats-compact" id="prodStats">
+    <div class="hint" style="margin:0">No production data loaded yet.</div>
+  </div>
+
+<div class="prod-chart-controls">
+  <span class="prod-chart-label">Capacity trend:</span>
+  <select id="prodChartGranularity" name="prodChartGranularity">
+    <option value="day">Daily</option>
+    <option value="week">Weekly</option>
+    <option value="month" selected>Monthly</option>
+  </select>
+  <select id="prodChartStage" name="prodChartStage">
+    <option value="devanning">005 De-vanning</option>
+    <option value="trimIn">020 Trim-in</option>
+    <option value="offLine" selected>030 Off-line OK</option>
+    <option value="buyOff">Buy-off OK</option>
+    <option value="compoundIn">Compound Gate-in</option>
+    <option value="compoundOut">Compound Gate-out OK</option>
+  </select>
+</div>
+
+  <div class="prod-chart-wrap">
+    <canvas id="prodChart" height="180"></canvas>
+    <div class="prod-chart-empty" id="prodChartEmpty">No data to plot.</div>
+  </div>
+</div>
+  
+    <div class="card">
+      <h2>3. Batch summary</h2>
+      <p class="hint">Batches grouped by <b>Model → Colour</b>. Expand a colour to see its batches; expand a batch to see the VINs inside it.</p>
+      <div class="toolbar">
+       <input id="prodBatchSearch" name="prodBatchSearch" type="search" placeholder="Search batch / model / colour / VIN…" />
+        <select id="prodBatchFilter" name="prodBatchFilter">
+          <option value="all">All batches</option>
+          <option value="inProgress">In progress</option>
+          <option value="completed">Completed (gate-out)</option>
+        </select>
+        <button class="btn" id="prodBatchExport">⤓ Export Excel</button>
+        <button class="btn ghost" id="prodBatchExpandAll">▾ Expand all</button>
+        <button class="btn ghost" id="prodBatchCollapseAll">▸ Collapse all</button>
+      </div>
+      <div id="prodBatchTable" class="prod-batch-tree"></div>
+    </div>
+  
+    <div class="card">
+      <h2>4. VIN detail</h2>
+      <div class="file-chip-container" id="fileChip-exportFolder"></div>
+      <p class="hint">Individual VIN timeline through each milestone. Use the filters to focus on stalled vehicles.</p>
+      <div class="toolbar">
+        <input id="prodVinSearch" name="prodVinSearch" type="search" placeholder="Search VIN / batch / sequence / model…" />
+        <select id="prodVinStage" name="prodVinStage">
+          <option value="all">All VINs</option>
+          <option value="complete">Complete (Gate-out OK)</option>
+          <option value="notDev">Not de-vanned</option>
+          <option value="notTrim">Not trim-in</option>
+          <option value="notOff">Not off-line</option>
+          <option value="notBuyOff">Not buy-off OK</option>
+          <option value="notCompoundIn">Not in compound</option>
+          <option value="notCompoundOut">Not gate-out</option>
+        </select>
+        <button class="btn" id="prodVinExport">⤓ Export Excel</button>
+      </div>
+      <div class="hint" id="prodVinCount" style="margin:-4px 0 8px"></div>
+      <div class="table-wrap"><table id="prodVinTable"></table></div>
+      <div class="pagination" id="prodVinPagination"></div>
+    </div>
+    <div class="prod-xml-row">
+      <span class="prod-chart-label">XML Export folder:</span>
+      <input id="exportFolderPath" name="exportFolderPath" type="text" readonly placeholder="No folder selected…" class="prod-folder-path" />
+      <button class="btn" id="exportFolderPick">📁 Choose folder</button>
+      <button class="btn primary" id="prodXmlExport">⤓ Export XML</button>
+    </div>
     
-    <!-- Core app -->
-    <script src="app.js?v=2"></script>
+    <div class="progress-wrap hidden" id="xmlProgressWrap">
+      <div class="progress-bar"><div class="progress-fill" id="xmlProgressFill"></div></div>
+      <div class="progress-header">
+        <span class="progress-label" id="xmlProgressLabel">Preparing…</span>
+      </div>
+    </div>
+    
+    <div class="xml-error-log hidden" id="xmlErrorLog"></div>
+  </section>
+
+  <!-- ============ TAB: SCRAP ANALYSIS ============ -->
+<section class="tab-panel" id="panel-scrap">
+  <div class="card">
+    <h2>Scrap Log Loader</h2>
+    <p class="hint">
+      Load your scrap extraction file (CSV or TSV). The parser evaluates data quality and extracts key metrics.
+    </p>
+    
+    <div class="file-chip-container" id="fileChip-scrapFile"></div>
+    <div class="file-chip-container" id="fileChip-scrapImageFolder"></div>
+    
+    <div class="folder-hint" id="scrapLogInfo">No scrap file loaded.</div>
+
+    <details class="folder-fallback" style="margin-top:10px">
+      <summary>…or drop the file here</summary>
+      <div class="dropzone" id="scrapLogDrop" style="margin-top:12px">
+        <input type="file" id="scrapLogInput" name="scrapLogInput" accept=".csv,.tsv,.xlsx,.xls,.txt" />
+        <div class="dz-inner">
+          <strong>Drop scrap log here</strong>
+          <span>CSV, Excel or TSV format</span>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>Data Quality & KPIs</h2>
+    <div class="stats" id="scrapKpiStats">
+      <div class="hint" style="margin:0">Load a scrap file to see analytics.</div>
+    </div>
+    
+    <div class="scrap-charts-grid">
+      <div class="chart-container">
+        <h3>Top 10 Scrapped Materials</h3>
+        <canvas id="scrapChartParts"></canvas>
+      </div>
+      <div class="chart-container">
+        <h3>Scrap by Category</h3>
+        <canvas id="scrapChartCategory"></canvas>
+      </div>
+      <div class="chart-container">
+        <h3>Scrap Volume Over Time</h3>
+        <canvas id="scrapChartTrend"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Detailed Scrap Log</h2>
+    
+    <!-- Date Range Filter -->
+    <div class="prod-period-controls" id="scrapPeriodControls" style="margin-bottom: 16px;">
+      <div class="prod-period-row">
+        <button class="btn tiny scrap-period-btn" data-range="today">Today</button>
+        <button class="btn tiny scrap-period-btn" data-range="thisWeek">This Week</button>
+        <button class="btn tiny scrap-period-btn" data-range="thisMonth">This Month</button>
+        <button class="btn tiny scrap-period-btn" data-range="thisYear">This Year</button>
+        <span class="prod-period-spacer"></span>
+        <button class="btn tiny scrap-period-btn scrap-period-btn-all" data-range="all">Full Range</button>
+      </div>
+      <div class="prod-period-row prod-period-dates">
+        <span class="prod-chart-label">From:</span>
+        <input type="date" id="scrapPeriodFrom" name="scrapPeriodFrom" class="prod-chart-date" />
+        <span class="prod-chart-label">To:</span>
+        <input type="date" id="scrapPeriodTo" name="scrapPeriodTo" class="prod-chart-date" />
+        <span class="prod-period-spacer"></span>
+        <button class="btn tiny primary" id="scrapPeriodApply" disabled>✓ Apply</button>
+      </div>
+      <div class="hint" id="scrapPeriodHint" style="margin:6px 0 0"></div>
+    </div>
+
+    <div class="toolbar">
+      <input id="scrapSearch" name="scrapSearch" type="search" placeholder="Search part / reason / operator…" />
+      <select id="scrapCategoryFilter" name="scrapCategoryFilter">
+        <option value="all">All Categories</option>
+      </select>
+      <button class="btn ghost" id="scrapClearFilters">✕ Clear all filters &amp; sorts</button>
+      <button class="btn" id="scrapExport">⤓ Export Excel</button>
+    </div>
+    
+    <p class="hint" style="margin:-4px 0 12px">Click any column header ▾ to sort or filter that column. Filters on each column stack together.</p>
+    
+    <div class="table-wrap">
+      <table id="scrapTable" class="compact">
+        <thead>
+          <tr>
+            <th class="col-head" style="width: 180px;">File/Image</th>
+            <th class="col-head" style="width: 100px;" data-col="date">Date <button class="filter-btn" data-col="date">▾</button></th>
+            <th class="col-head" style="width: 150px;" data-col="category">Category <button class="filter-btn" data-col="category">▾</button></th>
+            <th class="col-head" style="width: 140px;" data-col="partNo">Part No. <button class="filter-btn" data-col="partNo">▾</button></th>
+            <th class="col-head" style="width: auto;" data-col="desc">Description <button class="filter-btn" data-col="desc">▾</button></th>
+            <th class="col-head" style="width: 70px;" data-col="qty">Qty <button class="filter-btn" data-col="qty">▾</button></th>
+            <th class="col-head" style="width: 120px;" data-col="reason">Reason <button class="filter-btn" data-col="reason">▾</button></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+  
+  <!-- ============ TAB: INVENTORY ============ -->
+  <section class="tab-panel" id="panel-inventory">
+    <div class="card">
+      <h2>1. Upload Batch / Shipment file</h2>
+      <div class="file-chip-container" id="fileChip-batchFile"></div>
+      <p class="hint">
+        Select the batch / shipment file. The path is stored locally so on next visit the file reloads
+        without re-picking. Columns: <code>batch number, Modelo, Color, Cantidad, TRIM IN DATE, Name of ship,
+        Week, Decanting date, Arrival Date, Production, Color code, Batch Carroceria…</code>
+      </p>
+      
+      <div class="folder-loader">
+        <div class="folder-path-row">
+          <input id="batchFilePath" name="batchFilePath" type="text" readonly placeholder="No file selected…" />
+          <button class="btn" id="batchFilePick">📁 Choose file</button>
+          <button class="btn primary" id="batchFileProcess" disabled>▶ Process file</button>
+        </div>
+        <div class="folder-hint" id="batchFileInfo">No file selected yet.</div>
+      </div>
+      
+      <details class="folder-fallback">
+        <summary>…or drop the file here</summary>
+        <div class="dropzone" id="batchDrop" style="margin-top:12px">
+          <input type="file" id="batchInput" name="batchInput" accept=".csv,.xlsx,.xls" />
+          <div class="dz-inner">
+            <strong>Drop batch file here</strong>
+            <span>or click to browse</span>
+          </div>
+        </div>
+      </details>
+      <div class="row-2">
+        <button class="btn ghost" id="autoClassify">↻ Re-classify batches</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2. Batch status</h2>
+      <div class="stats" id="batchStats"></div>
+      <div class="line-chips" id="batchLineChips"></div>
+      <div class="toolbar">
+        <select id="batchLineFilter" name="batchLineFilter" style="max-width:180px">
+          <option value="">All lines</option>
+        </select>
+        <input id="batchSearch" name="batchSearch" type="search" placeholder="Search batch / model / color / ship…" />
+        <button class="btn ghost" id="batchExpandAll">▾ Expand all</button>
+        <button class="btn ghost" id="batchCollapseAll">▸ Collapse all</button>
+        <button class="btn ghost" id="batchClearFilters">✕ Clear all filters &amp; sorts</button>
+      </div>
+      <p class="hint" style="margin:-4px 0 12px">Click any column header ▾ to sort or filter that column. Filters on each column stack together.</p>
+      <div id="batchTable" class="batch-tree"></div>
+    </div>
+
+    <div class="card">
+      <h2>3. Scrap submissions</h2>
+      <p class="hint">Record scrapped material one-by-one or upload an Excel/CSV with columns: <code>Material Number</code>, <code>Quantity</code>, <code>Ubication</code>. Scrap is subtracted from <b>Available</b> inventory and considered in shortage checks.</p>
+      <div class="scrap-form">
+        <input list="partList" id="scrapPart" name="scrapPart" placeholder="Part No." />
+        <datalist id="partList"></datalist>
+        <input id="scrapQty" name="scrapQty" type="number" min="0" step="0.001" placeholder="Qty" />
+        <input id="scrapUbi" name="scrapUbi" type="text" placeholder="Ubication" />
+        <input id="scrapNote" name="scrapNote" type="text" placeholder="Note (optional)" />
+        <button class="btn primary" id="scrapAdd">+ Submit scrap</button>
+        <button class="btn" id="scrapUploadBtn">⤒ Upload scrap file</button>
+        <input type="file" id="scrapFile" name="scrapFile" accept=".xlsx,.xls,.csv" hidden />
+      </div>
+      <div id="scrapList" class="scrap-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>4. Material inventory</h2>
+      <div class="toolbar">
+        <input id="invSearch" name="invSearch" type="search" placeholder="Search part…" />
+        <button class="btn" id="exportInv">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="invTable"></table></div>
+    </div>
+  </section>
+  
+  <!-- ============ TAB: PLAN vs EXECUTION ============ -->
+  <section class="tab-panel" id="panel-comparison">
+    <div class="card">
+      <h2>Batch comparison — Planned vs Executed</h2>
+      <p class="hint">
+        Cross-checks <b>Inventory &amp; Stock</b> (planned qty, estimated dates, classification stage)
+        against <b>Production Monitoring</b> (actual VINs, milestone timestamps), joined on batch number.
+        Plan-only batches have no production started yet; Exec-only batches have VINs in the tracking file
+        but no matching row in the batch/shipment plan.
+      </p>
+  
+      <div class="stats" id="compStats">
+        <div class="hint" style="margin:0">Load a batch/shipment file and a production tracking file to see the comparison.</div>
+      </div>
+  
+      <div class="toolbar">
+        <input id="compSearch" name="compSearch" type="search" placeholder="Search batch / model / colour / line…" />
+        <select id="compStatus" name="compStatus">
+          <option value="all">All batches</option>
+          <option value="issues">⚠ Any mismatch only</option>
+          <option value="qtyVariance">Qty variance</option>
+          <option value="planOnly">Plan only (no production yet)</option>
+          <option value="execOnly">Exec only (no plan)</option>
+          <option value="matched">Matched</option>
+        </select>
+        <button class="btn ghost" id="compExpandAll">▾ Expand all</button>
+        <button class="btn ghost" id="compCollapseAll">▸ Collapse all</button>
+        <button class="btn ghost" id="compClear">✕ Clear filters</button>
+        <button class="btn" id="compExport">⤓ Export Excel</button>
+      </div>
+
+      <div id="compTable" class="batch-tree"></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: PLANNING ============ -->
+  <section class="tab-panel" id="panel-planning">
+    <div class="card">
+      <h2>Production plan</h2>
+      <div class="file-chip-container" id="fileChip-productionFile"></div>
+      <div class="plan-add">
+        <select id="planModel" name="planModel"></select>
+        <input id="planQty" name="planQty" type="number" min="0" step="1" placeholder="Quantity" />
+        <button class="btn primary" id="planAdd">+ Add</button>
+        <button class="btn ghost" id="planClear">Clear plan</button>
+      </div>
+      <div id="planList" class="file-list"></div>
+    </div>
+    <div class="card">
+      <h2>Material availability calculator</h2>
+      <p class="hint">
+        Upload a stock list (columns: <code>Material Number</code>, <code>Quantity</code>).
+        Then add one or more <b>Model · Variant · Quantity</b> demands. The tool sums the
+        material requirements of every demand and reports the unique material request
+        against on-hand stock — shortages are highlighted in red.
+      </p>
+    
+      <!-- 1. Load stock file -->
+      <div class="mrp-stock-row">
+        <input id="stockFilePath" name="stockFilePath" type="text" readonly placeholder="No stock file loaded…" />
+        <button class="btn" id="stockFilePick">📁 Choose stock file</button>
+        <button class="btn ghost" id="stockFileClear">✕ Clear</button>
+      </div>
+      <div class="folder-hint" id="stockFileInfo">No stock file loaded.</div>
+    
+      <details class="folder-fallback" style="margin-top:10px">
+        <summary>…or drop the stock file here</summary>
+        <div class="dropzone" id="stockDrop" style="margin-top:12px">
+          <input type="file" id="stockInput" name="stockInput" accept=".csv,.xlsx,.xls" />
+          <div class="dz-inner">
+            <strong>Drop stock list here</strong>
+            <span>Columns: Material Number, Quantity</span>
+          </div>
+        </div>
+      </details>
+    
+      <!-- 2. Build a demand -->
+      <div class="mrp-stock-selectors">
+        <label>
+          <span>Model</span>
+          <select id="stockModel" name="stockModel"></select>
+        </label>
+        <label>
+          <span>BOM variant</span>
+          <select id="stockBom" name="stockBom"></select>
+        </label>
+        <label>
+          <span>Quantity</span>
+          <input id="stockQty" name="stockQty" type="number" min="1" step="1" placeholder="vehicles" />
+        </label>
+        <button class="btn primary" id="stockAddDemand">+ Add demand</button>
+      </div>
+    
+      <!-- 3. Demand list -->
+      <div class="mrp-demand-list" id="stockDemandList"></div>
+      <div class="row-2">
+        <button class="btn ghost" id="stockDemandClear">✕ Clear all demands</button>
+      </div>
+    
+      <!-- 4. Result -->
+      <div class="stats" id="stockSummary" style="margin-top:14px"></div>
+      <div class="table-wrap" style="max-height:520px;margin-top:6px">
+        <table id="stockTable"></table>
+      </div>
+      <div class="row-2">
+        <button class="btn" id="stockExport">⤓ Export calculation</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Shortage criteria</h2>
+      <p class="hint">Choose which stock counts as “available” when checking shortages. Scrap is always subtracted.</p>
+      <div class="criteria">
+        <label class="toggle"><input type="checkbox" id="c_factoryFloor" name="c_factoryFloor" /> Factory Floor</label>
+        <label class="toggle"><input type="checkbox" id="c_edgeLine" name="c_edgeLine" /> Edge Line</label>
+        <div class="wh-group">
+          <span class="wh-label">Warehouses:</span>
+          <div id="whChecklist"></div>
+        </div>
+        <label class="toggle"><input type="checkbox" id="c_inTransit" name="c_inTransit" /> In Transit</label>
+        <label class="safety">
+          Safety factor:
+          <input type="number" id="c_safety" name="c_safety" min="0.1" step="0.05" value="1.0" />
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Material requirement &amp; shortage</h2>
+      <div class="stats" id="planStats"></div>
+      <div class="toolbar">
+        <input id="planSearch" name="planSearch" type="search" placeholder="Search part…" />
+        <label class="toggle"><input type="checkbox" id="planOnlyShort" name="planOnlyShort" /> Only shortages</label>
+        <button class="btn" id="exportPlan">⤓ Export Excel</button>
+      </div>
+      <div class="table-wrap"><table id="planTable"></table></div>
+    </div>
+  </section>
+  
+  <!-- ============ TAB: STORED FILES ============ -->
+  <section class="tab-panel" id="panel-files">
+    <div class="card">
+      <h2>Stored files</h2>
+      <p class="hint">
+        Every file and folder you have selected is remembered locally. On future visits the data reloads
+        automatically when the browser still grants permission. If a green <b>Connected</b> badge is not shown,
+        click <b>Reconnect</b> — a single click, no file dialog. Works in Chrome, Edge, Opera and Brave;
+        Firefox and Safari fall back to manual selection each session.
+      </p>
+      <div class="toolbar">
+        <button class="btn" id="sfReloadAll">↻ Reload all connected</button>
+        <span class="prod-period-spacer"></span>
+        <button class="btn danger ghost" id="sfForgetAll">✕ Forget all files</button>
+      </div>
+      <div class="table-wrap"><table id="sfTable"></table></div>
+    </div>
+  </section>
+  
+  <!-- ============ TAB: SETTINGS ============ -->
+  <section class="tab-panel" id="panel-settings">
+    <div class="card">
+      <h2>Conversion table — Batch → BOM</h2>
+      <p class="hint">Maps <code>Modelo</code> (and optionally <code>Color</code>) from the batch file to a BOM’s <b>Vehicle Material No.</b> Leave Color blank to match any colour for that Modelo.</p>
+      <div id="convTable" class="conv-editor"></div>
+      <div class="row-2">
+        <button class="btn" id="convAdd">+ Add row</button>
+        <button class="btn primary" id="convSave">Save conversion table</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Warehouses</h2>
+      <p class="hint">Edit names or disable warehouses you don’t use.</p>
+      <div id="whEditor" class="wh-editor"></div>
+      <div class="row-2">
+        <button class="btn" id="whAdd">+ Add warehouse</button>
+        <button class="btn primary" id="whSave">Save</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Danger zone</h2>
+      <button class="btn danger" id="resetAll">Reset all data</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>MRP Planner · local-only · no data leaves your browser</span>
+</footer>
+
+<!-- ============ Display BOM modal ============ -->
+<div id="bomDisplayModal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div>
+        <h3 class="bdm-title">BOM Contents</h3>
+        <div class="bdm-subtitle"></div>
+      </div>
+      <button class="modal-close" id="bdmClose" title="Close">✕</button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn primary" id="bdmExport">⤓ Export this BOM</button>
+    </div>
+    <div class="modal-body bdm-body"></div>
+  </div>
+</div>
+<!-- ============ Image Preview Modal ============ -->
+<!-- ============ Scrap Detail Modal (Read-Only) ============ -->
+<div id="scrapDetailModal" class="modal-overlay hidden">
+  <div class="modal-box" style="width: 95vw; height: 92vh; max-width: 1400px; display: flex; flex-direction: column;">
+    
+    <div class="modal-header">
+      <div>
+        <h3 id="sdTitle" style="margin:0; font-size:16px;">Scrap Record Details</h3>
+        <div id="sdSubtitle" class="bdm-subtitle" style="margin-top:4px;"></div>
+      </div>
+      <button class="modal-close" id="sdClose">✕</button>
+    </div>
+
+    <div class="modal-body" style="display:flex; flex:1; overflow:hidden; background:#f8fafc;">
+      <!-- LEFT: IMAGE -->
+      <div style="flex: 1.2; border-right: 1px solid var(--border); display:flex; align-items:center; justify-content:center; position:relative; background:#e2e8f0;">
+        <div id="sdImageLoading" style="position:absolute; font-weight:bold; color:var(--muted);">Loading Image...</div>
+        <img id="sdImage" src="" style="max-width:100%; max-height:100%; object-fit:contain; display:none;" />
+      </div>
+
+      <!-- RIGHT: READ-ONLY DATA -->
+      <div style="flex: 0.8; max-width: 500px; overflow-y:auto; padding:20px; background:#fff;">
+        
+        <h4 style="margin: 0 0 10px; color:var(--brand); border-bottom:1px solid #e2e8f0; padding-bottom:4px;">Header</h4>
+        <div class="form-group">
+          <label>Category</label>
+          <input type="text" id="sd_category" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Ticket ID</label>
+          <input type="text" id="sd_ticketId" class="sd-input" readonly tabindex="-1" />
+        </div>
+
+        <h4 style="margin: 20px 0 10px; color:var(--brand); border-bottom:1px solid #e2e8f0; padding-bottom:4px;">Section 1</h4>
+        <div class="form-group">
+          <label>Codigo Conjunto (Part No)</label>
+          <input type="text" id="sd_partNo" class="sd-input mono" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Codigo Componente (Description)</label>
+          <input type="text" id="sd_desc" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Codigo Rechaz</label>
+          <input type="text" id="sd_reason1" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Cantidad (Qty)</label>
+          <input type="text" id="sd_qty" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Origen Area Zona</label>
+          <input type="text" id="sd_area" class="sd-input" readonly tabindex="-1" />
+        </div>
+
+        <h4 style="margin: 20px 0 10px; color:var(--brand); border-bottom:1px solid #e2e8f0; padding-bottom:4px;">Section 2</h4>
+        <div class="form-group">
+          <label>Motivo Rechace (Reason 2)</label>
+          <input type="text" id="sd_reason2" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Fecha (Date)</label>
+          <input type="text" id="sd_rawDate" class="sd-input" readonly tabindex="-1" />
+        </div>
+        <div class="form-group">
+          <label>Observaciones</label>
+          <textarea id="sd_obs" class="sd-input" rows="3" readonly tabindex="-1"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Operario (Operator)</label>
+          <input type="text" id="sd_operator" class="sd-input" readonly tabindex="-1" />
+        </div>
+
+      </div>
+    </div>
+
+    <div class="modal-actions" style="justify-content: flex-end; border-top: 1px solid var(--border); border-bottom: none;">
+      <button class="btn primary" id="sdCancel" type="button">Close</button>
+    </div>
+  </div>
+</div>
+<!-- ============ Sheet picker modal ============ -->
+<div id="sheetPickerModal" class="modal-overlay hidden">
+  <div class="modal-box" style="width:min(560px,100%)">
+    <div class="modal-header">
+      <div>
+        <h3>Select sheets to import</h3>
+        <div class="bdm-subtitle" id="sheetPickerFile"></div>
+      </div>
+      <button class="modal-close" id="sheetPickerClose" title="Close">✕</button>
+    </div>
+    <div class="modal-body" style="padding:16px 20px">
+      <div id="sheetPickerList" class="sheet-picker-list"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn tiny" id="sheetPickerAll">Select all</button>
+      <button class="btn tiny" id="sheetPickerNone">Select none</button>
+      <span style="flex:1"></span>
+      <button class="btn primary" id="sheetPickerConfirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div id="filterPopup" class="filter-popup hidden"></div>
+
+<script src="app.js"></script>
 </body>
 </html>
