@@ -1,8686 +1,4148 @@
-/* =========================================================
-   MRP Planner v1.5
-   ========================================================= */
-const STATE = {
-  config: null,
-  boms: [],
-  batches: [],
-  inventory: {},
-  partIndex: {},
-  scrap: [],
-  plan: [],
-  batchView: { sorts: {}, filters: {} },
-  bomRegistry: new Map(),   // "specKey||color||signature" → "BOM N"
-  bomCounter:  new Map(),    // "specKey||color"            → N
-  production: {
-    records: [],
-    batches: new Map(),
-    header: null,
-    loaded: false,
-    period:        { from: '', to: '' },
-    pendingPeriod: { from: '', to: '' },
-    periodStage:        '',   // '' = any milestone  ← ADD
-    pendingPeriodStage: '',   // ← ADD 
-    lines:         null,   // Set of selected lines, or null = all
-    pendingLines:  null,
-    models:        null,   // Set of selected models, or null = all
-    pendingModels: null,
-    batchView: { search: '', filter: 'all' },
-    vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
-  }
+// ============================================================
+// app.js - Complete Core Logic (Bug Fixes Applied)
+// ============================================================
+
+console.log('✅ app.js loaded');
+
+// ============================v
+// 1. Constants & State
+// ============================
+
+const REPO_OWNER = 'ebrofactoryprocess';
+const REPO_NAME = 'ebrofactoryprocess.github.io';
+const DATA_PATH = 'data.json';
+
+let isConnectingMode = false;
+let selectedNodeId = null;
+let selectedArrowIndex = null;
+let appData = null;
+let currentSha = null;
+let isSaving = false;
+let currentMode = 'display';
+let currentView = 'sequence';
+let searchKeyword = '';
+let activeFilters = [];
+let collapseState = new Map();
+let pendingDeleteCallback = null;
+let pendingAddSubCallback = null;
+let pendingImportCallback = null;
+let currentEditingProcess = null;
+let lastSnapshot = null;
+let eventsBound = false;
+let workflowEventsBound = false;
+let arrowUpdatePending = false; // ✅ declared only once
+
+// ============================
+// 2. Column Definitions
+// ============================
+
+const columnPaths = {
+    seq: p => p.seq,
+    name: p => p.name,
+    description: p => p.description || '',
+    r: p => p.raci.r.join(', '),
+    a: p => p.raci.a.join(', '),
+    c: p => p.raci.c.join(', '),
+    i: p => p.raci.i.join(', '),
+    businessStatus: p => p.businessStatus,
+    sysName: p => p.system.name,
+    sysStatus: p => p.system.status,
+    sysResp: p => p.system.responsible,
+    businessDoc: p => p.businessDoc || '',
+    userManual: p => p.userManual || '',
+    notes: p => p.notes || ''
 };
 
-const $  = (s, r=document) => r.querySelector(s);
-const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
-const fmt = n => (n==null||isNaN(n)) ? '' : Number(n).toLocaleString(undefined,{maximumFractionDigits:3});
-const today = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
-const LS_CONFIG = 'mrp.configOverrides.v1';
-const LS_SCRAP  = 'mrp.scrap.v2';
-/* =========================================================
-   VEHICLE-LEVEL BOM IDENTITY — v1.6.0
-   ========================================================= */
-
-/* A colour part ends with literal "AAA" + 2 alphanumeric chars. */
-function isColourPartNo(partNo) {
-  const p = String(partNo || '').trim();
-  return p.length >= 5 && /AAA[0-9A-Z]{2}$/.test(p);
-}
-function prefixOfColourPart(partNo) {
-  const p = String(partNo || '').trim();
-  return p.length >= 2 ? p.slice(0, -2) : p;
-}
-function suffixOfColourPart(partNo) {
-  const p = String(partNo || '').trim();
-  return p.length >= 2 ? p.slice(-2) : '';
-}
-
-/* Normalised signature. isExteriorFn(partNo) -> boolean.
-   Exterior parts emit P+"XX"; interior / common parts emit raw. */
-function bomSignatureNormalised(bom, isExteriorFn) {
-  if (!bom || !bom.parts) return '';
-  
-  const aggregated = new Map();
-  for (const p of bom.parts) {
-    const raw = String(p.partNo || '').trim();
-    const nrm = (isColourPartNo(raw) && isExteriorFn(raw))
-      ? prefixOfColourPart(raw) + 'XX'
-      : raw;
-    const uom = (p.uom || '').trim();
-    const key = `${nrm}||${uom}`;
-    const qty = Number(p.qty) || 0;
-    
-    if (aggregated.has(key)) {
-      aggregated.get(key).qty += qty;
-    } else {
-      aggregated.set(key, { pn: nrm, uom: uom, qty: qty });
-    }
-  }
-
-  const tuples = Array.from(aggregated.values());
-  tuples.sort((a, b) => {
-    const c = a.pn.localeCompare(b.pn);
-    if (c) return c;
-    if (a.qty !== b.qty) return a.qty - b.qty;
-    return a.uom.localeCompare(b.uom);
-  });
-
-  return tuples.map(t => `${t.pn}|${t.qty}|${t.uom}`).join(';');
-}
-/* Batch sort key — trailing YYYY MM <counter> from the batch ID. */
-function batchSortKey(batchId) {
-  const s = String(batchId || '');
-  const m = s.match(/(\d{4})(\d{2})(\d+)$/);
-  if (!m) return { primary: Infinity, secondary: s };
-  const year  = parseInt(m[1], 10);
-  const month = parseInt(m[2], 10);
-  const seq   = parseInt(m[3], 10);
-  return {
-    primary:   year * 10000000 + month * 10000 + seq,
-    secondary: s
-  };
-}
-function compareBatchIds(a, b) {
-  const ka = batchSortKey(a);
-  const kb = batchSortKey(b);
-  if (ka.primary !== kb.primary) return ka.primary - kb.primary;
-  return ka.secondary.localeCompare(kb.secondary);
-}
-
-/* Per-spec prefix index: Map<prefix, [{suffix, exterior}]> */
-function buildSpecPrefixIndex(specKey) {
-  const idx = new Map();
-  for (const bom of STATE.boms) {
-    if (specKeyOf(bom.vehicleMatNo) !== specKey) continue;
-    const ext = colorCodeOf(bom.vehicleMatNo);
-    for (const p of bom.parts) {
-      const raw = String(p.partNo || '').trim();
-      if (!isColourPartNo(raw)) continue;
-      const prefix = prefixOfColourPart(raw);
-      const suffix = suffixOfColourPart(raw);
-      if (!idx.has(prefix)) idx.set(prefix, []);
-      idx.get(prefix).push({ suffix, exterior: ext });
-    }
-  }
-  return idx;
-}
-
-/* Exterior prefixes for a spec = every occurrence has suffix === its vehicle's exterior. */
-function computeExteriorPrefixes(specKey) {
-  const idx = buildSpecPrefixIndex(specKey);
-  const out = new Set();
-  for (const [prefix, occ] of idx) {
-    if (occ.length && occ.every(o => o.suffix === o.exterior)) out.add(prefix);
-  }
-  return out;
-}
-
-function bomsForBomId(bomId) {
-  return STATE.boms.filter(b => b.bomId === bomId);
-}
-/* ---------------- BOM key helpers ---------------- */
-function bomKeyOf(bom) {
-  if (!bom) return '';
-  return (bom.vehicleMatNo || '') + '||' + (bom.batchId || '');
-}
-function bomDisplayName(bom) {
-  if (!bom) return '';
-  const parts = [];
-  if (bom.vehicleDesc) parts.push(bom.vehicleDesc);
-  if (bom.batchId)     parts.push(bom.batchId);
-  return parts.join(' — ') || bom.vehicleMatNo || 'BOM';
-}
-
-/* ---------------- Colour / spec helpers ---------------- */
-function colorCodeOf(vehicleMatNo) {
-  const v = (vehicleMatNo || '').trim();
-  if (v.length < 9) return '';
-  return v.substring(7, 9);          // chars 8–9, 1-based
-}
-function specKeyOf(vehicleMatNo) {
-  const v = (vehicleMatNo || '').trim();
-  if (v.length < 9) return v || '__no_matno__';
-  return v.substring(0, 7) + '··' + v.substring(9);
-}
-function longestCommonPrefix(strs) {
-  if (!strs.length) return '';
-  let p = strs[0];
-  for (const s of strs) {
-    while (p && !s.startsWith(p)) p = p.slice(0, -1);
-    if (!p) break;
-  }
-  return p;
-}
-function deriveSpecName(boms) {
-  if (boms.length === 1) return boms[0].vehicleDesc || boms[0].vehicleMatNo || '—';
-  const descs = boms.map(b => b.vehicleDesc || '').filter(Boolean);
-  if (!descs.length) return boms[0].vehicleMatNo || '—';
-  const lcp = longestCommonPrefix(descs)
-    .replace(/[\s\-–—:_,]+$/, '').trim();
-  return lcp || boms[0].vehicleMatNo || '—';
-}
-function deriveColorName(boms, specName) {
-  const desc = boms[0].vehicleDesc || '';
-  if (!desc) return '';
-  if (specName && desc.startsWith(specName)) {
-    const rest = desc.slice(specName.length)
-      .replace(/^[\s\-–—:_,]+/, '').trim();
-    if (rest && rest !== desc) return rest;
-  }
-  return '';
-}
-function colorBadgeStyle(code) {
-  if (!code) return 'background:#f1f5f9;color:#64748b';
-  let h = 0;
-  for (let i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) | 0;
-  const hue = Math.abs(h) % 360;
-  return `background:hsl(${hue},70%,92%);color:hsl(${hue},65%,32%)`;
-}
-/* Material-code family: vehicle material number with the colour code (chars 8–9)
-   replaced by XX.  T7150U5CLNG0901 → T7150U5XXNG0901
-   Groups different SKD/DKD/CKD variants and model-year evolutions of the same spec. */
-function matFamilyOf(vehicleMatNo) {
-  const v = (vehicleMatNo || '').trim();
-  if (v.length < 9) return v || '__no_matno__';
-  return v.substring(0, 7) + 'XX' + v.substring(9);
-}
-
-/* Render the family key with the XX substitution highlighted. */
-function matFamilyBadgeHtml(famKey) {
-  const s = String(famKey || '');
-  const i = s.indexOf('XX');
-  if (i < 0) return escapeHtml(s);
-  return escapeHtml(s.slice(0, i))
-       + '<span class="xx">XX</span>'
-       + escapeHtml(s.slice(i + 2));
-}
-/* ---------------- BOM-ID assignment (scoped per spec + colour) ---------------- */
-function bomSignature(bom) {
-  if (!bom || !bom.parts) return '';
-  return bom.parts
-    .slice()
-    .sort((a, b) => {
-      const p = String(a.partNo).localeCompare(String(b.partNo));
-      if (p) return p;
-      const q = (Number(a.qty) || 0) - (Number(b.qty) || 0);
-      if (q) return q;
-      return String(a.uom || '').localeCompare(String(b.uom || ''));
-    })
-    .map(p => `${p.partNo}|${Number(p.qty) || 0}|${(p.uom || '').trim()}`)
-    .join(';');
-}
-
-/* Group key is spec-only — colour is NOT part of BOM identity. */
-function bomGroupKey(bom) {
-  return specKeyOf(bom.vehicleMatNo);
-}
-
-/* Phase 1 — provisional BOM ID (per-vehicle classification). */
-function assignBomId(bom) {
-  if (!(STATE.bomRegistry instanceof Map)) STATE.bomRegistry = new Map();
-  if (!(STATE.bomCounter  instanceof Map)) STATE.bomCounter  = new Map();
-
-  const specKey = specKeyOf(bom.vehicleMatNo);
-  const ext     = colorCodeOf(bom.vehicleMatNo);
-
-  /* Provisional classifier: colour part counts as exterior iff its suffix
-     equals this vehicle's own exterior code. */
-  const sig = bomSignatureNormalised(bom, (pn) => suffixOfColourPart(pn) === ext);
-  bom._normalisedSig = sig;
-
-  const sigKey = specKey + '||' + sig;
-
-  if (STATE.bomRegistry.has(sigKey)) {
-    bom.bomId = STATE.bomRegistry.get(sigKey);
-  } else {
-    const n = (STATE.bomCounter.get(specKey) || 0) + 1;
-    STATE.bomCounter.set(specKey, n);
-    bom.bomId = 'BOM ' + n;
-    STATE.bomRegistry.set(sigKey, bom.bomId);
-  }
-  return bom.bomId;
-}
-/* =========================================================
-   PHASE 2 — spec-wide re-analysis
-   ========================================================= */
-
-/* Re-run classification and re-number all BOMs of one spec.
-   Returns { specKey, changed } — changed is the number of BOMs whose ID shifted. */
-function reanalyseSpecBomIds(specKey) {
-  const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
-  if (!boms.length) return { specKey, changed: 0 };
-
-  /* Final signatures — using Phase 1 (per-vehicle) logic */
-  const sigByBom = new Map();
-  for (const b of boms) {
-    const ext = colorCodeOf(b.vehicleMatNo);
-    const sig = bomSignatureNormalised(b, pn => suffixOfColourPart(pn) === ext);
-    sigByBom.set(b, sig);
-    b._normalisedSig = sig;
-  }
-
-  /* Clear this spec's prior state */
-  STATE.bomCounter.delete(specKey);
-  for (const k of Array.from(STATE.bomRegistry.keys())) {
-    if (k.startsWith(specKey + '||')) STATE.bomRegistry.delete(k);
-  }
-
-  /* Sort by batch key (chronological), assign IDs on first sight of a signature */
-  const sorted = boms.slice().sort((a, b) => compareBatchIds(a.batchId, b.batchId));
-  const sigToId = new Map();
-  let counter = 0;
-  let changed = 0;
-
-  for (const b of sorted) {
-    const sig = sigByBom.get(b);
-    let id;
-    if (sigToId.has(sig)) {
-      id = sigToId.get(sig);
-    } else {
-      counter++;
-      id = 'BOM ' + counter;
-      sigToId.set(sig, id);
-      STATE.bomRegistry.set(specKey + '||' + sig, id);
-    }
-    if (b.bomId !== id) changed++;
-    b.bomId = id;
-  }
-  STATE.bomCounter.set(specKey, counter);
-  return { specKey, changed };
-}
-
-function reanalyseAllSpecs() {
-  const specs = new Set();
-  for (const b of STATE.boms) specs.add(specKeyOf(b.vehicleMatNo));
-  let total = 0;
-  for (const sk of specs) total += reanalyseSpecBomIds(sk).changed;
-  return total;
-}
-
-/* Minimal, non-blocking toast */
-function showToast(message, opts = {}) {
-  let wrap = document.getElementById('toastWrap');
-  if (!wrap) {
-    wrap = document.createElement('div');
-    wrap.id = 'toastWrap';
-    wrap.className = 'toast-wrap';
-    document.body.appendChild(wrap);
-  }
-  const el = document.createElement('div');
-  el.className = 'toast';
-  el.textContent = message;
-  wrap.appendChild(el);
-  requestAnimationFrame(() => el.classList.add('toast-visible'));
-  setTimeout(() => {
-    el.classList.remove('toast-visible');
-    setTimeout(() => el.remove(), 300);
-  }, opts.duration || 4200);
-}
-/* Material List rows with their Where Used panel expanded */
-const WHERE_USED_OPEN = new Set();
-/* Production batches with their VIN detail panel expanded */
-const PROD_BATCH_EXPANDED = new Set();
-/* Batch table column definitions */
-const BATCH_COLS = [
-  { id:'batch',      label:'Batch' },
-  { id:'model',      label:'Model' },
-  { id:'color',      label:'Color' },
-  { id:'qty',        label:'Qty', num:true, sortable:true },
-  { id:'ship',       label:'Ship' },
-  { id:'arrival',    label:'Arrival',   date:true },
-  { id:'decanting',  label:'Decanting', date:true },
-  { id:'trimIn',     label:'Trim-in',   date:true },
-  { id:'production', label:'Production' },
-  { id:'stage',      label:'Stage' },
-  { id:'warehouse',  label:'Warehouse' },
-  { id:'linkedBom',  label:'Linked BOM' }
-];
-
-/* =========================================================
-   BOOT
-   ========================================================= */
-window.addEventListener('DOMContentLoaded', async () => {
-  await loadConfig();
-  loadPersistedOverrides();
-  loadPersistedScrap();
-  bindTabs();
-  bindUploads();
-  bindButtons();
-  bindProduction();
-  bindStoredFilesTab();
-  bindPersistentFileSlots();
-  bindComparison();
-  bindStockCalc();
-  bindBomDisplayModal();
-  bindFilterPopupGlobal();
-  renderConversionTable();
-  renderWarehouseEditor();
-  renderWarehouseChecklist();
-  renderScrapList();
-  $('#todayBadge').textContent = fmtDate(new Date());
-  $('#c_safety').value          = STATE.config.shortageDefaults.safetyFactor;
-  $('#c_factoryFloor').checked  = STATE.config.shortageDefaults.includeFactoryFloor;
-  $('#c_edgeLine').checked      = STATE.config.shortageDefaults.includeEdgeLine;
-  $('#c_inTransit').checked     = STATE.config.shortageDefaults.includeInTransit;   
-  await renderAllFileChips();
-  await renderStoredFilesTab();
-  await autoReloadStoredFiles();
-
-});
-
-async function loadConfig() {
-  const defaults = {
-    defaultWarehouseId: 'CY',
-    autoAssignDefaultWarehouse: true,
-    warehouses: [
-      {id:'CY',  name:'Container Yard', enabled:true},
-      {id:'WH2', name:'Warehouse 2',    enabled:true},
-      {id:'WH3', name:'Warehouse 3',    enabled:true},
-      {id:'WH4', name:'Warehouse 4',    enabled:true}
-    ],
-    stages: {
-      inTransit:{label:'In Transit',color:'#3b82f6'},
-      warehouse:{label:'Warehouse',color:'#8b5cf6'},
-      factoryFloor:{label:'Factory Floor',color:'#f59e0b'},
-      edgeLine:{label:'Edge Line',color:'#10b981'},
-      consumed:{label:'Consumed',color:'#9ca3af'}
-    },
-    shortageDefaults:{safetyFactor:1.0,includeInTransit:false,includeWarehouses:true,includeFactoryFloor:true,includeEdgeLine:true},
-    conversionTable: []
-  };
-  try {
-    const res = await fetch('config.json');
-    STATE.config = Object.assign({}, defaults, await res.json());
-    for (const k of Object.keys(defaults)) if (!(k in STATE.config)) STATE.config[k] = defaults[k];
-  } catch (e) {
-    console.warn('config.json not loaded — using defaults', e);
-    STATE.config = defaults;
-  }
-}
-
-function loadPersistedOverrides() {
-  try {
-    const raw = localStorage.getItem(LS_CONFIG);
-    if (!raw) return;
-    const o = JSON.parse(raw);
-    if (o.warehouses) STATE.config.warehouses = o.warehouses;
-    if (o.conversionTable) STATE.config.conversionTable = o.conversionTable;
-  } catch(e){}
-}
-function savePersistedOverrides() {
-  try {
-    localStorage.setItem(LS_CONFIG, JSON.stringify({
-      warehouses: STATE.config.warehouses,
-      conversionTable: STATE.config.conversionTable
-    }));
-  } catch(e){}
-}
-function loadPersistedScrap() {
-  try {
-    const raw = localStorage.getItem(LS_SCRAP);
-    if (raw) STATE.scrap = JSON.parse(raw) || [];
-  } catch(e){ STATE.scrap = []; }
-}
-function savePersistedScrap() {
-  try { localStorage.setItem(LS_SCRAP, JSON.stringify(STATE.scrap)); } catch(e){}
-}
-
-/* =========================================================
-   TABS
-   ========================================================= */
-function bindTabs() {
-  $$('.tab').forEach(t => t.addEventListener('click', () => {
-    $$('.tab').forEach(x => x.classList.remove('active'));
-    $$('.tab-panel').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    $('#panel-' + t.dataset.tab).classList.add('active');
-    if (t.dataset.tab === 'files') setTimeout(renderStoredFilesTab, 0);
-    if (t.dataset.tab === 'comparison') {
-      setTimeout(renderComparison, 0);
-    }
-  }));
-}
-
-/* =========================================================
-   UPLOADS
-   ========================================================= */
-function bindUploads() {
-  wireDropzone('#bomDrop',   '#bomInput',   handleBomFiles);
-  wireDropzone('#batchDrop', '#batchInput', handleBatchFiles);
-}
-/* Like wireDropzone, but the click handler is replaced with a persistent picker.
-   Drag-and-drop still works with the old handler. */
-function wirePersistentDropzone(dzSel, inputSel, pickFn, dropHandler) {
-  const dz = $(dzSel), input = $(inputSel);
-  if (!dz || !input) return;
-
-  input.addEventListener('change', e => {
-    dropHandler(Array.from(e.target.files || []));
-    e.target.value = '';
-  });
-  dz.addEventListener('click', e => {
-    if (e.target === input) return;      // ignore the invisible input's own click
-    e.preventDefault();
-    e.stopPropagation();
-    pickFn();
-  }, true);
-
-  ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
-    e.preventDefault(); dz.classList.add('drag');
-  }));
-  ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
-    e.preventDefault(); dz.classList.remove('drag');
-  }));
-  dz.addEventListener('drop', e => {
-    const files = Array.from(e.dataTransfer.files || []);
-    if (files.length) dropHandler(files);
-  });
-}
-function wireDropzone(dzSel, inputSel, handler) {
-  const dz = $(dzSel), input = $(inputSel);
-  if (!dz || !input) return;
-  input.addEventListener('change', e => handler(Array.from(e.target.files)));
-  ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
-    e.preventDefault(); dz.classList.add('drag');
-  }));
-  ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
-    e.preventDefault(); dz.classList.remove('drag');
-  }));
-  dz.addEventListener('drop', e => handler(Array.from(e.dataTransfer.files)));
-}
-function readFileAsArrayBuffer(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result); r.onerror = rej;
-    r.readAsArrayBuffer(file);
-  });
-}
-
-function readFileAsText(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result); r.onerror = rej;
-    r.readAsText(file);
-  });
-}
-/* Return every sheet of a workbook as { name, rows }.
-   CSV files yield one pseudo-sheet named '(csv)'. */
-async function fileToSheetRows(file) {
-  const name = file.name.toLowerCase();
-  if (name.endsWith('.csv') || name.endsWith('.tsv')) {
-    const text = await readFileAsText(file);
-    return [{ name: '(csv)', rows: parseCSV(text) }];
-  }
-  const buf = await readFileAsArrayBuffer(file);
-  const wb  = XLSX.read(buf, { type: 'array', cellDates: true });
-  return wb.SheetNames.map(sn => ({
-    name: sn,
-    rows: XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' })
-  }));
-}
-
-/* Backwards-compat single-sheet reader (BOM folder loader + scrap file). */
-async function fileToRows(file) {
-  const sheets = await fileToSheetRows(file);
-  return sheets[0] ? sheets[0].rows : [];
-}
-
-/* Heuristic: does this sheet look like a batch sheet?
-   Requires a batch-ish column AND at least one data column. */
-function sheetLooksLikeBatch(rows) {
-  if (!rows || !rows.length) return false;
-  const header = (rows[0] || []).map(h => String(h || '').trim().toLowerCase());
-  const has = names => names.some(n => header.some(h => h === n || h.includes(n)));
-  return has(['batch'])
-      && has(['model', 'modelo', 'color', 'cantidad', 'quantity', 'qty',
-              'arrival', 'decanting', 'trim in', 'production', 'ship']);
-}
-
-/* Modal prompt. Resolves with an array of selected { name, rows }
-   or null if the user cancelled. */
-function promptSheetSelection(sheets, fileName) {
-  return new Promise(resolve => {
-    const modal = $('#sheetPickerModal');
-    if (!modal) { resolve(sheets); return; }          // graceful fallback
-
-    $('#sheetPickerFile').textContent = fileName;
-    const list = $('#sheetPickerList');
-    list.innerHTML = sheets.map((s, i) => {
-      const looksOk = sheetLooksLikeBatch(s.rows);
-      return `
-      <label class="sheet-pick-item">
-        <input type="checkbox" data-i="${i}" ${looksOk ? 'checked' : ''} />
-        <span class="sheet-name">
-          ${escapeHtml(s.name)}
-          ${looksOk ? '' : '<small class="sheet-badge">not batch-shaped</small>'}
-        </span>
-        <span class="sheet-dims">${s.rows.length} row${s.rows.length === 1 ? '' : 's'}</span>
-      </label>`;
-    }).join('');
-
-    const cleanup = () => {
-      modal.classList.add('hidden');
-      document.body.style.overflow = '';
-      $('#sheetPickerConfirm').onclick = null;
-      $('#sheetPickerClose').onclick   = null;
-      $('#sheetPickerAll').onclick     = null;
-      $('#sheetPickerNone').onclick    = null;
-      modal.onclick = null;
-    };
-
-    $('#sheetPickerAll').onclick  = () => list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = true);
-    $('#sheetPickerNone').onclick = () => list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false);
-
-    $('#sheetPickerConfirm').onclick = () => {
-      const picked = [];
-      list.querySelectorAll('input[type=checkbox]:checked').forEach(cb => {
-        picked.push(sheets[+cb.dataset.i]);
-      });
-      if (!picked.length) { alert('Please select at least one sheet.'); return; }
-      cleanup();
-      resolve(picked);
-    };
-
-    $('#sheetPickerClose').onclick = () => { cleanup(); resolve(null); };
-    modal.onclick = e => { if (e.target === modal) { cleanup(); resolve(null); } };
-
-    document.addEventListener('keydown', function esc(ev) {
-      if (ev.key === 'Escape') {
-        document.removeEventListener('keydown', esc);
-        cleanup(); resolve(null);
-      }
-    });
-
-    modal.classList.remove('hidden');
-    document.body.style.overflow = 'hidden';
-  });
-}
-
-function parseCSV(text) {
-  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-  const rows = []; let row = [], field = '', inQ = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQ) {
-      if (c === '"') { if (text[i+1] === '"') { field += '"'; i++; } else inQ = false; }
-      else field += c;
-    } else {
-      if (c === '"') inQ = true;
-      else if (c === ',') { row.push(field); field = ''; }
-      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
-      else if (c === '\r') {}
-      else field += c;
-    }
-  }
-  if (field.length || row.length) { row.push(field); rows.push(row); }
-  return rows;
-}
-
-/* =========================================================
-   BOM FOLDER LOADER
-   ========================================================= */
-let _bomFolderHandle = null;
-let _bomFolderFiles  = [];
-
-function isBomFile(name) {
-  return /\.(xlsx|xls|csv)$/i.test(name);
-}
-function yieldToUI() {
-  return new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
-}
-
-async function pickBomFolder() {
-  if (typeof window.showDirectoryPicker === 'function') {
-    try {
-      STATE.mrpStock.model      = '';
-      STATE.mrpStock.variantKey = '';
-      const handle = await window.showDirectoryPicker({ mode: 'read' });                     
-      _bomFolderHandle = handle;
-      await saveFileHandle('bomFolder', handle);
-      renderAllFileChips(); renderStoredFilesTab();
-      $('#bomFolderPath').value = '/' + handle.name + '/';
-      _bomFolderFiles = [];
-      $('#bomFolderInfo').textContent = 'Scanning folder…';
-      $('#bomFolderProcess').disabled = true;
-      await walkDirectory(handle, '');
-      updateFolderInfo();
-      return;
-    } catch (e) {
-      if (e.name === 'AbortError') return;
-      console.warn('showDirectoryPicker failed, falling back', e);
-    }
-  }
-  $('#bomFolderFallback').click();
-}
-
-async function walkDirectory(dirHandle, prefix) {
-  for await (const entry of dirHandle.values()) {
-    if (entry.kind === 'file') {
-      if (!isBomFile(entry.name)) continue;
-      const file = await entry.getFile();
-      _bomFolderFiles.push({ file, path: prefix + entry.name });
-    } else if (entry.kind === 'directory') {
-      if (entry.name.startsWith('.') || entry.name.startsWith('~')) continue;
-      await walkDirectory(entry, prefix + entry.name + '/');
-    }
-  }
-}
-
-function updateFolderInfo() {
-  const n = _bomFolderFiles.length;
-  $('#bomFolderInfo').textContent = n
-    ? `${n} BOM file${n===1?'':'s'} found — click “Process files”.`
-    : 'No BOM files found in that folder.';
-  $('#bomFolderProcess').disabled = n === 0;
-}
-
-async function processBomFolder() {
-  const files = _bomFolderFiles;
-  if (!files.length) return;
-
-  // Deterministic order — first file becomes BOM 1
-  files.sort((a, b) => a.path.localeCompare(b.path));
-
-  const wrap   = $('#bomProgressWrap');
-  const fill   = $('#bomProgressFill');
-  const label  = $('#bomProgressLabel');
-  const list   = $('#bomProgressList');
-  const toggle = $('#bomProgressToggle');
-
-  /* Show the panel; reset the summary + hide the file list & toggle */
-  wrap.classList.remove('hidden');
-  fill.style.width = '0%';
-  label.textContent = 'Preparing…';
-  list.classList.add('hidden');
-  toggle.classList.add('hidden');
-  toggle.textContent = '▸ Display batch list';
-
-  list.innerHTML = files.map((f, i) => `
-    <div class="progress-file" data-i="${i}">
-      <span class="pf-status pending">◌</span>
-      <span class="pf-name" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>
-      <span class="pf-note">waiting…</span>
-    </div>`).join('');
-
-  let ok = 0, fail = 0;
-
-  for (let i = 0; i < files.length; i++) {
-    const { file, path } = files[i];
-    const row = list.querySelector(`[data-i="${i}"]`);
-    const st  = row.querySelector('.pf-status');
-    const nt  = row.querySelector('.pf-note');
-
-    st.className = 'pf-status working';
-    st.textContent = '◐';
-    nt.textContent = 'parsing…';
-    row.classList.remove('fail-row');
-    label.textContent = `Parsing ${i+1} / ${files.length} — ${path}`;
-    await yieldToUI();
-
-    try {
-      const rows = await fileToRows(file);
-      const parsedList = parseBOM(rows, path);
-      STATE.mrpStock.model      = '';
-      STATE.mrpStock.variantKey = '';  
-      if (!parsedList.length) throw new Error('no parts found');
-
-      for (const parsed of parsedList) {
-        const key = bomKeyOf(parsed);
-        const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
-        if (existing >= 0) STATE.boms.splice(existing, 1);
-        assignBomId(parsed);
-        STATE.boms.push(parsed);
-      }
-      const partCount = parsedList.reduce((a, p) => a + p.parts.length, 0);
-
-      st.className = 'pf-status done';
-      st.textContent = '✓';
-      nt.textContent = `${parsedList.length} BOM${parsedList.length===1?'':'s'}, ${partCount} parts`;
-      ok++;
-    } catch (e) {
-      console.error(e);
-      st.className = 'pf-status fail';
-      st.textContent = '✕';
-      nt.textContent = e.message || 'failed';
-      row.classList.add('fail-row');
-      fail++;
-    }
-    /* Live render: BOM List grows file-by-file. */
-    renderBomList();
-    fill.style.width = (((i + 1) / files.length) * 100).toFixed(1) + '%';
-    await yieldToUI();
-  }
-
-  /* Final summary — one line, with the toggle button */
-  label.textContent = `Done — ${ok} succeeded, ${fail} failed`;
-  toggle.classList.remove('hidden');
-  if (fail > 0) toggle.classList.add('has-errors');
-  /* Phase 2 — spec-wide re-analysis and renumbering. */
-  const idsChanged = reanalyseAllSpecs();
-  if (idsChanged > 0) {
-    showToast(`BOM IDs updated — ${idsChanged} batch${idsChanged === 1 ? '' : 'es'} renumbered after full spec analysis`);
-  }
-  rebuildPartIndex();
-  renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
-  renderBatchTable(); renderBatchStats();
-  computeInventory(); renderInventoryTable(); renderPlanning();
-
-  if (typeof renderStockFeasibility === 'function') {
-    populateStockModelSelect();
-    populateStockBomSelect();
-    renderStockFeasibility();
-  }
-   
-}
-function bindFolderFallback() {
-  const inp = $('#bomFolderFallback');
-  if (!inp) return;
-  inp.addEventListener('change', e => {
-    const files = Array.from(e.target.files || []);
-    _bomFolderFiles = files
-      .filter(f => isBomFile(f.name))
-      .map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
-    if (_bomFolderFiles.length) {
-      const first = _bomFolderFiles[0].path;
-      const root  = first.split('/')[0];
-      $('#bomFolderPath').value = '/' + root + '/';
-    } else {
-      $('#bomFolderPath').value = '';
-    }
-    updateFolderInfo();
-    e.target.value = '';
-  });
-}
-
-/* =========================================================
-   BOM
-   ========================================================= */
-async function handleBomFiles(files) {
-  const touchedSpecs = new Set();
-  for (const f of files) {
-    try {
-      const sheets = await fileToSheetRows(f);
-      STATE.mrpStock.model      = '';
-      STATE.mrpStock.variantKey = '';
-      let sheetsToProcess;
-      if (sheets.length === 1) {
-        sheetsToProcess = sheets;
-      } else {
-        const picked = await promptSheetSelection(sheets, f.name);
-        if (!picked) continue;                             // user cancelled this file
-        sheetsToProcess = picked;
-      }
-
-      for (const sheet of sheetsToProcess) {
-        const label = sheets.length === 1 ? f.name : `${f.name} :: ${sheet.name}`;
-        const parsedList = parseBOM(sheet.rows, label);
-        if (!parsedList.length) {
-          alert(`No parts found in ${label}`);
-          continue;
-        }
-        for (const parsed of parsedList) {
-          const key = bomKeyOf(parsed);
-          const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
-          if (existing >= 0) STATE.boms.splice(existing, 1);
-          assignBomId(parsed);
-          STATE.boms.push(parsed);
-          touchedSpecs.add(specKeyOf(parsed.vehicleMatNo));
-        }
-      }
-    } catch (e) {
-      console.error(e);
-      alert(`Failed to parse ${f.name}: ${e.message}`);
-    }
-  }
-   /* Phase 2 — re-analyse only the touched specs. */
-  let idsChanged = 0;
-  for (const sk of touchedSpecs) idsChanged += reanalyseSpecBomIds(sk).changed;
-  if (idsChanged > 0) {
-    showToast(`BOM IDs updated — ${idsChanged} batch${idsChanged === 1 ? '' : 'es'} renumbered after full spec analysis`);
-  }  
-  rebuildPartIndex();
-  renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
-  renderBatchTable(); renderBatchStats();
-  computeInventory(); renderInventoryTable(); renderPlanning();
-  if (typeof renderStockFeasibility === 'function') {
-    populateStockModelSelect();
-    populateStockBomSelect();
-    renderStockFeasibility();
-  } 
-}
-function parseBOM(rows, filename) {
-  if (!rows || !rows.length) throw new Error('Empty file');
-
-  let headerIdx = -1;
-  for (let i = 0; i < Math.min(rows.length, 20); i++) {
-    const joined = (rows[i] || []).map(c => String(c)).join('|');
-    if (joined.includes('Part NO') || joined.includes('Vehicle Matl')) { headerIdx = i; break; }
-  }
-  if (headerIdx === -1) throw new Error('Header row not found');
-
-  const headers     = (rows[headerIdx] || []).map(h => String(h || '').split('\n')[0].trim());
-  const headerLower = headers.map(h => h.toLowerCase());
-
-  const findCol = (hints, exact = false) => {
-    for (const h of hints) {
-      const hl = h.toLowerCase();
-      const i = headers.findIndex((_, idx) =>
-        exact ? headerLower[idx] === hl : headerLower[idx].includes(hl));
-      if (i >= 0) return i;
-    }
-    return -1;
-  };
-
-  let cVehMat = findCol(['vehicle matl', 'vehicle mat']); if (cVehMat < 0) cVehMat = 0;
-  let cVehDesc= findCol(['vehi. desc', 'vehicle desc', 'vehicle description']); if (cVehDesc < 0) cVehDesc = 1;
-  let cBatch  = findCol(['batch'], true);
-  if (cBatch < 0) cBatch = findCol(['sales batch', 'batch id']);
-  if (cBatch < 0) cBatch = 4;
-  let cPartNo = findCol(['part no']); if (cPartNo < 0) cPartNo = 9;
-  let cNameEN = findCol(['part name(en)', 'part name (en)', 'part name']); if (cNameEN < 0) cNameEN = 10;
-  let cQty    = findCol(['qty'], true);
-  if (cQty < 0) cQty = findCol(['quantity per', 'qty per']);
-  if (cQty < 0) cQty = 19;
-  let cUOM    = findCol(['uom'], true);
-  if (cUOM < 0) cUOM = findCol(['unit of measure', 'uom']);
-  if (cUOM < 0) cUOM = 20;
-
-  let cMWO = findCol(['mwo'], true);
-  if (cMWO < 0) cMWO = findCol(['mwo number', 'mwo no']);
-
-  const groups = new Map();
-  for (let i = headerIdx + 1; i < rows.length; i++) {
-    const r = rows[i];
-    if (!r || !r.length) continue;
-
-    const vehicleMatNo = String(r[cVehMat] || '').trim();
-    const batchId      = String(r[cBatch]  || '').trim();
-    const partNo       = String(r[cPartNo] || '').trim();
-    if (!vehicleMatNo && !batchId) continue;
-    if (!partNo) continue;
-
-    const qty = Number(String(r[cQty]).replace(/[^0-9.\-]/g, ''));
-    if (!qty || qty <= 0) continue;
-
-    const key = vehicleMatNo + '||' + batchId;
-    if (!groups.has(key)) {
-      groups.set(key, {
-        id: crypto.randomUUID ? crypto.randomUUID() : (key + '|' + Date.now() + '|' + Math.random()),
-        vehicleMatNo,
-        vehicleDesc: String(r[cVehDesc] || '').trim(),
-        batchId,
-        parts: []
-      });
-    }
-    groups.get(key).parts.push({
-      partNo,
-      nameEN: String(r[cNameEN] ?? '').trim(),
-      nameCN: '',
-      qty,
-      uom:    String(r[cUOM] ?? '').trim(),
-      mwo:    cMWO >= 0 ? String(r[cMWO] ?? '').trim() : '',
-      supplier: '',
-      cpac: ''
-    });
-  }
-
-  const out = [];
-  for (const g of groups.values()) {
-    g.label = g.batchId || g.vehicleMatNo || filename;
-    out.push(g);
-  }
-  return out;
-}
-
-function rebuildPartIndex() {
-  const idx = {};
-  for (const bom of STATE.boms) {
-    const key = bomKeyOf(bom);
-    for (const p of bom.parts) {
-      if (!idx[p.partNo]) {
-        idx[p.partNo] = {
-          partNo: p.partNo, nameCN: p.nameCN, nameEN: p.nameEN,
-          uom: p.uom, supplier: p.supplier, cpac: p.cpac,
-          bomKeys: new Set(), perBomQty: {}
-        };
-      }
-      idx[p.partNo].bomKeys.add(key);
-      idx[p.partNo].perBomQty[key] = (idx[p.partNo].perBomQty[key] || 0) + p.qty;
-    }
-  }
-  const totalBoms = STATE.boms.length;
-  for (const p of Object.values(idx)) {
-    p.isCommon = p.bomKeys.size === totalBoms && totalBoms > 0;
-  }
-  STATE.partIndex = idx;
-}
-
-/* =========================================================
-   BOM LIST TREE
-   ========================================================= */
-function renderBomList() {
-  const wrap = $('#bomList');
-  if (!STATE.boms.length) {
-    wrap.innerHTML = '<div class="hint" style="margin:0">No BOMs loaded yet. Use the folder loader above to load BOM files.</div>';
-    return;
-  }
-
-  /* --- spec → family → bomId → colour → boms[] --- */
-  const specMap = new Map();
-  for (const b of STATE.boms) {
-    const sk  = specKeyOf(b.vehicleMatNo);
-    const fm  = matFamilyOf(b.vehicleMatNo);
-    const cc  = colorCodeOf(b.vehicleMatNo);
-    const bid = b.bomId || '(unassigned)';
-
-    if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, families: new Map(), boms: [] });
-    const sg = specMap.get(sk);
-    sg.boms.push(b);
-
-    if (!sg.families.has(fm)) sg.families.set(fm, { familyKey: fm, bomIds: new Map(), boms: [] });
-    const fg = sg.families.get(fm);
-    fg.boms.push(b);
-
-    if (!fg.bomIds.has(bid)) fg.bomIds.set(bid, { bomId: bid, colors: new Map(), boms: [] });
-    const bg = fg.bomIds.get(bid);
-    bg.boms.push(b);
-
-    if (!bg.colors.has(cc)) bg.colors.set(cc, { colorCode: cc, boms: [] });
-    bg.colors.get(cc).boms.push(b);
-  }
-  for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
-
-  wrap.innerHTML = Array.from(specMap.values()).map(sg => {
-    const specBomIds     = new Set(sg.boms.map(b => b.bomId));
-    const specBomCount   = specBomIds.size;
-    const specBatchCount = sg.boms.length;
-    const specFamCount   = sg.families.size;
-
-    const familyHtml = Array.from(sg.families.values())
-      .sort((a, b) => a.familyKey.localeCompare(b.familyKey))
-      .map(fg => {
-        const famBomIds   = new Set(fg.boms.map(b => b.bomId));
-        const famBomCount = famBomIds.size;
-        const famBatchCnt = fg.boms.length;
-
-        const bomGroupsHtml = Array.from(fg.bomIds.entries())
-          .sort((a, b) => {
-            const na = parseInt(String(a[0]).replace(/\D/g, ''), 10) || 0;
-            const nb = parseInt(String(b[0]).replace(/\D/g, ''), 10) || 0;
-            return na - nb;
-          })
-          .map(([bomId, bg]) => {
-            const rep        = bg.boms[0];
-            const partCount  = rep.parts.length;
-            const colorCount = bg.colors.size;
-            const batchCount = bg.boms.length;
-
-            const colorHtml = Array.from(bg.colors.values())
-              .sort((a, b) => String(a.colorCode).localeCompare(String(b.colorCode)))
-              .map(cg => {
-                const colorName = deriveColorName(cg.boms, sg.specName);
-                const repMatNo  = cg.boms[0].vehicleMatNo || '';
-                const batchItems = cg.boms
-                  .slice()
-                  .sort((a, b) => String(a.batchId || '').localeCompare(String(b.batchId || '')))
-                  .map(bomBatchItemHtml)
-                  .join('');
-                return `
-                  <details class="bom-color-group" open>
-                    <summary class="bom-color-header">
-                      <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
-                      ${colorName ? `<span class="color-name">${escapeHtml(colorName)}</span>` : ''}
-                      ${repMatNo ? `<span class="color-matno" title="Vehicle material number">${escapeHtml(repMatNo)}</span>` : ''}
-                      <span class="color-count">${cg.boms.length} batch${cg.boms.length === 1 ? '' : 'es'}</span>
-                    </summary>
-                    <div class="bom-batch-list">${batchItems}</div>
-                  </details>`;
-              }).join('');
-
-            return `
-              <div class="bom-id-group" data-bomid="${escapeHtml(bomId)}">
-                <div class="bom-id-header">
-                  <span class="bom-id-badge">${escapeHtml(bomId)}</span>
-                  <span class="bom-id-stats">
-                    ${colorCount} colour${colorCount === 1 ? '' : 's'} ·
-                    ${batchCount} batch${batchCount === 1 ? '' : 'es'} ·
-                    ${partCount} parts
-                  </span>
-                  <button class="btn tiny" data-role="bom-display" data-bomid="${escapeHtml(bomId)}">
-                    Display BOM
-                  </button>
-                </div>
-                <div class="bom-color-list">${colorHtml}</div>
-              </div>`;
-          }).join('');
-
-        return `
-          <details class="bom-matcode-group" open>
-            <summary class="bom-matcode-header">
-              <span class="bom-matcode-badge">${matFamilyBadgeHtml(fg.familyKey)}</span>
-              <span class="bom-matcode-count">
-                ${famBomCount} BOM${famBomCount === 1 ? '' : 's'} ·
-                ${famBatchCnt} batch${famBatchCnt === 1 ? '' : 'es'}
-              </span>
-            </summary>
-            <div class="bom-id-list">${bomGroupsHtml}</div>
-          </details>`;
-      }).join('');
-
-    return `
-      <details class="bom-spec-group" data-speckey="${escapeHtml(sg.specKey)}" open>
-        <summary class="bom-spec-header">
-          <span class="spec-name">${escapeHtml(sg.specName)}</span>
-          <span class="spec-count">
-            ${specFamCount} material code${specFamCount === 1 ? '' : 's'} ·
-            ${specBomCount} BOM${specBomCount === 1 ? '' : 's'} ·
-            ${specBatchCount} batch${specBatchCount === 1 ? '' : 'es'}
-          </span>
-          ${specBomCount > 1 ? `<button class="btn tiny" data-role="compare-boms" data-speckey="${escapeHtml(sg.specKey)}" data-specname="${escapeHtml(sg.specName)}" style="margin-left:auto;margin-right:12px">Compare BOMs</button>` : ''}
-        </summary>
-        <div class="bom-matcode-list">${familyHtml}</div>
-      </details>`;
-  }).join('');
-
-  wrap.querySelectorAll('button[data-role=bom-display]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      const specEl = btn.closest('.bom-spec-group');
-      const specKey = specEl.dataset.speckey;
-      openBomDisplay(btn.dataset.bomid, specKey);
-    });
-  });
-
-  if ($('#bomListSearch') && $('#bomListSearch').value) handleBomListSearch();
-}
-function bomBatchItemHtml(b) {
-  const bid = b.batchId || '—';
-  const cc  = colorCodeOf(b.vehicleMatNo) || '';
-  return `<span class="bom-batch-chip" data-batchid="${escapeHtml(b.batchId || '')}" data-colcode="${escapeHtml(cc)}" title="${escapeHtml(bid)}">${escapeHtml(bid)}</span>`;
-}
-
-/* =========================================================
-   BOM LIST — SEARCH & EXPAND / COLLAPSE
-   ========================================================= */
-function handleBomListSearch() {
-  const wrap      = $('#bomList');
-  const resultBox = $('#bomListSearchResult');
-  if (!wrap || !resultBox) return;
-
-  const q = ($('#bomListSearch').value || '').trim().toLowerCase();
-
-  wrap.querySelectorAll('.hidden-for-search').forEach(el => el.classList.remove('hidden-for-search'));
-  wrap.querySelectorAll('.bom-search-hit').forEach(el => el.classList.remove('bom-search-hit'));
-
-  if (!q) { resultBox.classList.add('hidden'); resultBox.innerHTML = ''; return; }
-
-  const hits = [];
-  wrap.querySelectorAll('.bom-spec-group').forEach(specEl => {
-    const specName = specEl.querySelector('.spec-name')?.textContent || '';
-    specEl.querySelectorAll('.bom-matcode-group').forEach(matEl => {
-      const matCode = matEl.querySelector('.bom-matcode-badge')?.textContent || '';
-      matEl.querySelectorAll('.bom-id-group').forEach(bomEl => {
-        const bomId = bomEl.querySelector('.bom-id-badge')?.textContent || '';
-        bomEl.querySelectorAll('.bom-color-group').forEach(colorEl => {
-          const cc    = colorEl.querySelector('.color-code')?.textContent || '';
-          const cn    = colorEl.querySelector('.color-name')?.textContent || '';
-          const matNo = colorEl.querySelector('.color-matno')?.textContent || '';
-          colorEl.querySelectorAll('.bom-batch-chip').forEach(chip => {
-            const bid = chip.dataset.batchid || '';
-            const hay = `${bid} ${cc} ${cn} ${matNo} ${matCode} ${bomId}`.toLowerCase();
-            if (hay.includes(q)) {
-              hits.push({ specName, matCode, bomId, cc, cn, matNo, bid,
-                          chipEl: chip, bomEl, colorEl, matEl, specEl });
-            }
-          });
-        });
-      });
-    });
-  });
-
-  wrap.querySelectorAll('.bom-spec-group, .bom-matcode-group, .bom-id-group, .bom-color-group, .bom-batch-chip')
-    .forEach(el => el.classList.add('hidden-for-search'));
-
-  for (const h of hits) {
-    h.chipEl.classList.remove('hidden-for-search');
-    h.chipEl.classList.add('bom-search-hit');
-    h.colorEl.classList.remove('hidden-for-search');
-    h.bomEl.classList.remove('hidden-for-search');
-    h.matEl.classList.remove('hidden-for-search');
-    h.specEl.classList.remove('hidden-for-search');
-    h.colorEl.open = true;
-  }
-
-  resultBox.classList.remove('hidden');
-  if (!hits.length) {
-    resultBox.innerHTML = `<div class="bom-search-empty">No match for “${escapeHtml(q)}”.</div>`;
-    return;
-  }
-
-  const rows = hits.map(h => `
-    <div class="bom-search-row">
-      <span class="bom-search-spec">${escapeHtml(h.specName)}</span>
-      <span class="bom-search-arrow">›</span>
-      <span class="bom-search-matcode">${matFamilyBadgeHtml(h.matCode)}</span>
-      <span class="bom-search-arrow">›</span>
-      <span class="bom-search-bomid bom-id-badge">${escapeHtml(h.bomId)}</span>
-      <span class="bom-search-arrow">›</span>
-      <span class="bom-search-color">
-        <span class="color-code" style="${colorBadgeStyle(h.cc)}">${escapeHtml(h.cc || '??')}</span>
-        ${h.cn ? `<span class="bom-search-color-name">${escapeHtml(h.cn)}</span>` : ''}
-      </span>
-      ${h.matNo ? `<span class="bom-search-matno">${escapeHtml(h.matNo)}</span>` : ''}
-      <span class="bom-search-arrow">›</span>
-      <span class="bom-search-batch">${escapeHtml(h.bid)}</span>
-    </div>`).join('');
-
-  resultBox.innerHTML = `
-    <div class="bom-search-summary">
-      <b>${hits.length}</b> match${hits.length === 1 ? '' : 'es'} for “${escapeHtml(q)}”
-    </div>
-    <div class="bom-search-rows">${rows}</div>`;
-}
-function expandAllBomList() {
-  document.querySelectorAll('#bomList details').forEach(d => { d.open = true; });
-}
-
-function collapseAllBomList() {
-  document.querySelectorAll('#bomList details').forEach(d => { d.open = false; });
-}
-
-function bindBomListSearch() {
-  const inp = $('#bomListSearch');
-  if (!inp) return;
-  inp.addEventListener('input', handleBomListSearch);
-  $('#bomListExpandAll')?.addEventListener('click', expandAllBomList);
-  $('#bomListCollapseAll')?.addEventListener('click', collapseAllBomList);
-}
-
-/* =========================================================
-   MATERIAL LIST
-   ========================================================= */
-function renderBomTable() {
-  const tbl  = $('#bomTable');
-  const q    = ($('#bomSearch').value || '').toLowerCase();
-  const mode = $('#bomFilter').value;
-
-  let rows = Object.values(STATE.partIndex);
-  let missingFromSearch = [];
-
-  // Handle Bulk Search Mode
-  if (STATE.bulkSearchList) {
-    const listSet = new Set(STATE.bulkSearchList);
-    rows = rows.filter(p => listSet.has(p.partNo));
-    
-    // Auto-expand all found parts
-    rows.forEach(p => WHERE_USED_OPEN.add(p.partNo));
-    
-    // Track missing items
-    missingFromSearch = STATE.bulkSearchList.filter(pn => !STATE.partIndex[pn]);
-  } else {
-    // Standard filter mode
-    rows = rows.filter(p => {
-      if (mode === 'common'   && !p.isCommon) return false;
-      if (mode === 'specific' &&  p.isCommon) return false;
-      if (q) {
-        const hay = `${p.partNo} ${p.nameEN} ${p.nameCN}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-  }
-
-  if (!rows.length) {
-    tbl.innerHTML = `<thead><tr><th>No material data</th></tr></thead>`;
-    return;
-  }
-
-  rows.sort((a, b) => a.partNo.localeCompare(b.partNo, undefined, { numeric: true }));
-
-  const head = `
-    <thead><tr>
-      <th class="c-type">Material Type</th>
-      <th class="c-partno">Material Number</th>
-      <th class="c-nameen">Material Description</th>
-      <th class="c-action">Where Used</th>
-    </tr></thead>`;
-  // Inject Bulk Search Controls into the table view
-  let bulkAlertHtml = '';
-  let bulkExportBtnHtml = '';
-  
-  if (STATE.bulkSearchList) {
-    bulkExportBtnHtml = `<button class="btn tiny primary" onclick="exportBulkWhereUsed()" style="margin-left:12px;">⤓ Export Search Results</button>`;
-    if (missingFromSearch.length > 0) {
-      bulkAlertHtml = `
-        <div class="hint" style="background:#fffbeb; border:1px solid #fde68a; padding:10px; border-radius:6px; margin-bottom:12px; color:#92400e;">
-          ⚠ <b>${missingFromSearch.length}</b> material(s) from your list were not found in master data: 
-          <span class="mono">${missingFromSearch.join(', ')}</span>
-        </div>`;
-    }
-    const clearBtn = `<button class="btn tiny ghost" onclick="clearBulkSearch()" style="margin-left:8px;">✕ Clear Bulk Search</button>`;
-    bulkAlertHtml = `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; background:#f0fdf4; padding:10px; border:1px solid #bbf7d0; border-radius:6px;">
-      <span style="color:#166534; font-size:13px;">Showing <b>${rows.length}</b> results from your bulk list.</span>
-      <div>${bulkExportBtnHtml}${clearBtn}</div>
-    </div>` + bulkAlertHtml;
-  }
-  const body = rows.map(p => {
-    const isOpen = WHERE_USED_OPEN.has(p.partNo);
-    const count  = p.bomKeys.size;
-
-    const mainRow = `
-      <tr class="mat-main-row ${isOpen ? 'row-open' : ''}" data-partno="${escapeHtml(p.partNo)}">
-        <td class="c-type">${p.isCommon
-          ? '<span class="pill common">COMMON</span>'
-          : `<span class="pill specific" title="${escapeHtml([...p.bomKeys].join(', '))}">SPECIFIC</span>`}</td>
-        <td class="c-partno" title="${escapeHtml(p.partNo)}">${escapeHtml(p.partNo)}</td>
-        <td class="c-nameen" title="${escapeHtml(p.nameEN || p.nameCN || '')}">${escapeHtml(p.nameEN || p.nameCN || '')}</td>
-        <td class="c-action">
-          <button class="btn tiny where-used-btn" data-partno="${escapeHtml(p.partNo)}">
-            ${isOpen ? '▾ Hide' : '▸ Where Used'} <span class="wu-count">${count}</span>
-          </button>
-        </td>
-      </tr>`;
-
-    if (!isOpen) return mainRow;
-
-    /* ---- Build spec → family → BOM ID → colour → batch chips with qty ---- */
-    const bomsForPart = Array.from(p.bomKeys)
-      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
-      .filter(Boolean);
-
-    const specMap = new Map();
-    for (const bom of bomsForPart) {
-      const sk  = specKeyOf(bom.vehicleMatNo);
-      const fm  = matFamilyOf(bom.vehicleMatNo);
-      const cc  = colorCodeOf(bom.vehicleMatNo);
-      const bid = bom.bomId || '(unassigned)';
-
-      if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, families: new Map(), boms: [] });
-      const sg = specMap.get(sk);
-      sg.boms.push(bom);
-
-      if (!sg.families.has(fm)) sg.families.set(fm, { familyKey: fm, bomIds: new Map(), boms: [] });
-      const fg = sg.families.get(fm);
-      fg.boms.push(bom);
-
-      if (!fg.bomIds.has(bid)) fg.bomIds.set(bid, { bomId: bid, colors: new Map(), boms: [] });
-      const bg = fg.bomIds.get(bid);
-      bg.boms.push(bom);
-
-      if (!bg.colors.has(cc)) bg.colors.set(cc, { colorCode: cc, boms: [] });
-      bg.colors.get(cc).boms.push(bom);
-    }
-    for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
-
-    /* ---- Render using the BOM List hierarchy classes ---- */
-    const specList = Array.from(specMap.values())
-      .sort((a, b) => a.specName.localeCompare(b.specName, undefined, { numeric: true }));
-
-    const specHtml = specList.map(sg => {
-      const specBomIds     = new Set(sg.boms.map(b => b.bomId));
-      const specBomCount   = specBomIds.size;
-      const specBatchCount = sg.boms.length;
-      const specFamCount   = sg.families.size;
-
-      const familyList = Array.from(sg.families.values())
-        .sort((a, b) => a.familyKey.localeCompare(b.familyKey));
-
-      const familyHtml = familyList.map(fg => {
-        const famBomIds   = new Set(fg.boms.map(b => b.bomId));
-        const famBomCount = famBomIds.size;
-        const famBatchCnt = fg.boms.length;
-
-        const bomIdList = Array.from(fg.bomIds.entries())
-          .sort((a, b) => {
-            const na = parseInt(String(a[0]).replace(/\D/g, ''), 10) || 0;
-            const nb = parseInt(String(b[0]).replace(/\D/g, ''), 10) || 0;
-            return na - nb;
-          });
-
-        const bomHtml = bomIdList.map(([bomId, bg]) => {
-          const rep        = bg.boms[0];
-          const partCount  = rep.parts.length;
-          const colorCount = bg.colors.size;
-          const batchCount = bg.boms.length;
-
-          const colorHtml = Array.from(bg.colors.values())
-            .sort((a, b) => String(a.colorCode).localeCompare(String(b.colorCode)))
-            .map(cg => {
-              const colorName = deriveColorName(cg.boms, sg.specName);
-              const repMatNo  = cg.boms[0].vehicleMatNo || '';
-              const batchChips = cg.boms
-                .slice()
-                .sort((a, b) => String(a.batchId || '').localeCompare(String(b.batchId || '')))
-                .map(bom => {
-                  const key = bomKeyOf(bom);
-                  const qty = p.perBomQty[key] || 0;
-                  const uom = p.uom || '';
-                  return `
-                    <span class="bom-batch-chip wu-chip" title="${escapeHtml(bom.batchId || '')}">
-                      ${escapeHtml(bom.batchId || '—')}
-                      <b class="wu-chip-qty">${fmt(qty)}</b>
-                      ${uom ? `<small class="wu-chip-uom">${escapeHtml(uom)}</small>` : ''}
-                    </span>`;
-                }).join('');
-              return `
-                <details class="bom-color-group" open>
-                  <summary class="bom-color-header">
-                    <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
-                    ${colorName ? `<span class="color-name">${escapeHtml(colorName)}</span>` : ''}
-                    ${repMatNo ? `<span class="color-matno" title="Vehicle material number">${escapeHtml(repMatNo)}</span>` : ''}
-                    <span class="color-count">${cg.boms.length} batch${cg.boms.length === 1 ? '' : 'es'}</span>
-                  </summary>
-                  <div class="bom-batch-list">${batchChips}</div>
-                </details>`;
-            }).join('');
-
-          return `
-            <div class="bom-id-group" data-bomid="${escapeHtml(bomId)}">
-              <div class="bom-id-header">
-                <span class="bom-id-badge">${escapeHtml(bomId)}</span>
-                <span class="bom-id-stats">
-                  ${colorCount} colour${colorCount === 1 ? '' : 's'} ·
-                  ${batchCount} batch${batchCount === 1 ? '' : 'es'} ·
-                  ${partCount} parts
-                </span>
-                <button class="btn tiny" data-role="wu-bom-display" data-bomid="${escapeHtml(bomId)}">
-                  Display BOM
-                </button>
-              </div>
-              <div class="bom-color-list">${colorHtml}</div>
-            </div>`;
-        }).join('');
-
-        return `
-          <details class="bom-matcode-group" open>
-            <summary class="bom-matcode-header">
-              <span class="bom-matcode-badge">${matFamilyBadgeHtml(fg.familyKey)}</span>
-              <span class="bom-matcode-count">
-                ${famBomCount} BOM${famBomCount === 1 ? '' : 's'} ·
-                ${famBatchCnt} batch${famBatchCnt === 1 ? '' : 'es'}
-              </span>
-            </summary>
-            <div class="bom-id-list">${bomHtml}</div>
-          </details>`;
-      }).join('');
-
-      return `
-        <details class="bom-spec-group" data-speckey="${escapeHtml(sg.specKey)}" open>
-          <summary class="bom-spec-header">
-            <span class="spec-name">${escapeHtml(sg.specName)}</span>
-            <span class="spec-count">
-              ${specFamCount} material code${specFamCount === 1 ? '' : 's'} ·
-              ${specBomCount} BOM${specBomCount === 1 ? '' : 's'} ·
-              ${specBatchCount} batch${specBatchCount === 1 ? '' : 'es'}
-            </span>
-            ${specBomCount > 1 ? `<button class="btn tiny" data-role="compare-boms" data-speckey="${escapeHtml(sg.specKey)}" data-specname="${escapeHtml(sg.specName)}" style="margin-left:auto;margin-right:12px">Compare BOMs</button>` : ''}
-          </summary>
-          <div class="bom-matcode-list">${familyHtml}</div>
-        </details>`;
-    }).join('');
-
-    return mainRow + `
-      <tr class="where-used-row">
-        <td colspan="4">
-          <div class="where-used-panel">
-            <div class="wu-title">
-              Used in <b>${bomsForPart.length}</b> vehicle batch${bomsForPart.length === 1 ? '' : 'es'}
-            </div>
-            ${specHtml}
-          </div>
-        </td>
-      </tr>`;
-  }).join('');
-
-    tbl.innerHTML = bulkAlertHtml + head + `<tbody>${body || '<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--muted)">No materials found in master data.</td></tr>'}</tbody>`;
-
-  /* Wire the Where Used expand/collapse button */
-  tbl.querySelectorAll('.where-used-btn').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      const pn = btn.dataset.partno;
-      if (WHERE_USED_OPEN.has(pn)) WHERE_USED_OPEN.delete(pn);
-      else                          WHERE_USED_OPEN.add(pn);
-      renderBomTable();
-    });
-  });
-
-  /* Wire the Display BOM button inside the Where Used panel */
-  tbl.querySelectorAll('button[data-role=wu-bom-display]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      const specEl = btn.closest('.bom-spec-group');
-      const specKey = specEl.dataset.speckey;
-      openBomDisplay(btn.dataset.bomid, specKey);
-    });
-  });
-}
-function populatePlanModels() {
-  const sel = $('#planModel');
-  sel.innerHTML = STATE.boms.length
-    ? STATE.boms.map(b => `<option value="${escapeHtml(bomKeyOf(b))}">${escapeHtml(bomDisplayName(b))}</option>`).join('')
-    : '<option value="">— upload BOMs first —</option>';
-}
-
-function populatePartDatalist() {
-  const dl = $('#partList');
-  if (!dl) return;
-  dl.innerHTML = Object.keys(STATE.partIndex).sort()
-    .map(p => `<option value="${escapeHtml(p)}">`).join('');
-}
-
-/* =========================================================
-   BATCHES
-   ========================================================= */
-async function handleBatchFiles(files) {
-  const f = files[0];
-  if (!f) return;
-  try {
-    const sheets = await fileToSheetRows(f);
-
-    let sheetsToProcess;
-    if (sheets.length === 1) {
-      sheetsToProcess = sheets;
-    } else {
-      const picked = await promptSheetSelection(sheets, f.name);
-      if (!picked) return;                                // user cancelled
-      sheetsToProcess = picked;
-    }
-
-    /* Parse each sheet with its own header row, then merge batch objects. */
-    const allBatches = [];
-    const sheetsReport = [];
-    for (const sheet of sheetsToProcess) {
-      const parsed = parseBatches(sheet.rows);
-      /* Prefer the sheet's own name; fall back to the filename. */
-      const meta = parseLineMeta(sheet.name, f.name);
-
-      for (const b of parsed) {
-        b._line      = meta.line     || b._line      || '';
-        b._planYear  = meta.planYear || b._planYear  || '';
-        b._sheetName = sheet.name;
-      }       
-      sheetsReport.push({ name: sheet.name, count: parsed.length });
-      if (parsed.length) allBatches.push(...parsed);
-    }
-
-    if (!allBatches.length) {
-      alert(
-        'No valid batch rows found in the selected sheet(s).\n' +
-        'Each sheet needs a header with at least a "Batch" column and one of\n' +
-        'Model / Color / Quantity / Arrival / Decanting / Trim-in / Production.'
-      );
-      return;
-    }
-
-    /* Deduplicate by batch number (first occurrence wins). */
-    const seen = new Map();
-    for (const b of allBatches) {
-      if (!seen.has(b.batch)) seen.set(b.batch, b);
-    }
-    STATE.batches = Array.from(seen.values());
-    const lineSel = $('#batchLineFilter');
-    if (lineSel) lineSel.value = '';
-    populateBatchLineFilter();
-
-    STATE.batchView = { sorts: {}, filters: {} };
-    
-    BATCH_MODEL_COLLAPSED.clear();
-    BATCH_COLOR_COLLAPSED.clear(); 
-    BATCH_LINE_COLLAPSED.clear(); 
-    COMP_LINE_COLLAPSED.clear();
-    COMP_MODEL_COLLAPSED.clear();
-    COMP_COLOR_COLLAPSED.clear();
-     
-    classifyBatches();
-    renderBatchStats();
-    renderBatchTable();
-    computeInventory();
-    renderInventoryTable();
-    renderPlanning();
-
-    /* Non-blocking summary of what came from where. */
-    if (sheetsReport.length > 1) {
-      console.info(
-        'Batch file loaded — sheets processed:\n' +
-        sheetsReport.map(s => `  • ${s.name}: ${s.count} batch${s.count === 1 ? '' : 'es'}`).join('\n') +
-        `\nTotal unique batches: ${STATE.batches.length}`
-      );
-    }
-  } catch (e) {
-    console.error(e);
-    alert(`Failed to parse batch file: ${e.message}`);
-  }
-}
-
-/* Extract production line + planning year from sheet names or filenames.
-   Accepts "Production Order M1 - 2026", "M0 - 2025", "A0-2024", etc.
-   Prefers the "Production Order XXX - YYYY" pattern. */
-function parseLineMeta(...names) {
-  /* Pass 1 — most specific form: Production Order <code> - <yyyy> */
-  for (const nm of names) {
-    if (!nm) continue;
-    const m = String(nm).match(/Production\s+Order\s+([A-Z][0-9])\s*-\s*(\d{4})/i);
-    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
-  }
-  /* Pass 2 — relaxed form anywhere in the string */
-  for (const nm of names) {
-    if (!nm) continue;
-    const m = String(nm).match(/\b([A-Z][0-9])\s*-\s*(\d{4})\b/i);
-    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
-  }
-  return { line: '', planYear: '' };
-}
-
-function parseBatches(rows) {
-  if (!rows.length) return [];
-
-  /* ============ LINE A — header normalisation ============ */
-  /* Was: const header = rows[0].map(h => String(h||'').trim().toLowerCase());
-     Now: strips nbsp + zero-width space before lowercasing. */
-  const header = rows[0].map(h =>
-    String(h || '')
-      .replace(/\u00a0/g, ' ')
-      .replace(/\u200b/g, '')
-      .trim()
-      .toLowerCase()
-  );
-  /* ============ LINE B — idx() now accepts an exclude list ============ */
-  const idx = (names, exclude = []) => {
-    const isExcluded = i => exclude.includes(i);
-    for (const n of names) {
-      const i = header.findIndex((h, j) => !isExcluded(j) && h === n.toLowerCase());
-      if (i >= 0) return i;
-    }
-    for (const n of names) {
-      const i = header.findIndex((h, j) => !isExcluded(j) && h.includes(n.toLowerCase()));
-      if (i >= 0) return i;
-    }
-    return -1;
-  };
-
-  /* ============ LINE C — column map ============ */
-  /* 1. Resolve colorCode FIRST so we can exclude it from the color lookup.
-     2. Add 'colour code' and 'colour' as English-variant hints.
-     3. Resolve production date (some files use 'Production' as a date column;
-        others as a 'DONE' flag). We look for either a dedicated date column
-        OR reuse trimIn when Production is date-shaped. */
-  const colorCodeIdx = idx(['color code', 'colour code']);
-
-  const c = {
-    batch:      idx(['batch number', 'batch']),
-    model:      idx(['modelo', 'model']),
-    color:      idx(['color', 'colour','Colour code'], colorCodeIdx >= 0 ? [colorCodeIdx] : []),
-    qty:        idx(['cantidad', 'quantity', 'qty']),
-    trimIn:     idx(['trim in date','Production Date']),
-    ship:       idx(['name of ship', 'ship']),
-    week:       idx(['week']),
-    decanting:  idx(['decanting date']),
-    arrival:    idx(['arrival date', 'arrival']),
-    production: idx(['production']),           // still captured; may be text OR date
-    colorCode:  colorCodeIdx,
-    carroceria: idx(['batch carroceria']),
-    mwo:        idx(['mwo'])
-  };
-
-  /* ============ LINE D — per-row build ============ */
-  const out = [];
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i];
-    if (!r || !r.length) continue;
-
-    const model = String(r[c.model] || '').trim();
-    const batch = String(r[c.batch] || '').trim();
-    if (!model && !batch) continue;
-
-    const qtyRaw = c.qty >= 0 ? String(r[c.qty]).replace(/[^0-9.\-]/g, '') : '';
-    const qty    = Number(qtyRaw);
-
-    /* Raw values first */
-    const trimInRaw     = c.trimIn     >= 0 ? r[c.trimIn]     : '';
-    const productionRaw = c.production >= 0 ? r[c.production] : '';
-
-    /* Trim-in date: try the TRIM IN DATE column first, then fall back to
-       the Production column if it holds a date. */
-    let trimIn = parseDate(trimInRaw);
-    if (!trimIn) trimIn = parseDate(productionRaw);   // Production date = Trim-in date
-
-    /* Production text flag: keep whatever non-date value was in the cell
-       (e.g. "DONE"). If it was a date, blank it so the UI doesn't show a
-       duplicate date in the "Production" column. */
-    let productionText = String(productionRaw || '').trim();
-    if (parseDate(productionText)) productionText = 'DONE';   // date-shaped → treat as done
-
-    out.push({
-      batch, model,
-      color:      String(r[c.color] || '').trim(),
-      qty:        isNaN(qty) ? 0 : qty,
-      trimIn,
-      ship:       String(r[c.ship] || '').trim(),
-      week:       r[c.week],
-      decanting:  parseDate(r[c.decanting]),
-      arrival:    parseDate(r[c.arrival]),
-      production: productionText,
-      colorCode:  String(r[c.colorCode] || '').trim(),
-      carroceria: String(r[c.carroceria] || '').trim(),
-      mwo:        String(r[c.mwo] || '').trim(),
-      _stage: 'unassigned',
-      _warehouse: null
-    });
-  }
-  return out;
-}
-function parseDate(v) {
-  if (v == null || v === '') return null;
-  if (v instanceof Date) return isNaN(v) ? null : v;
-  const s = String(v).trim();
-  if (!s) return null;
-  if (/^\d+(\.\d+)?$/.test(s) && Number(s) > 20000 && Number(s) < 60000) {
-    return new Date(Math.round((Number(s) - 25569) * 86400 * 1000));
-  }
-  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) return new Date(+m[3], +m[1]-1, +m[2]);
-  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (m) return new Date(+m[1], +m[2]-1, +m[3]);
-  const d = new Date(s);
-  return isNaN(d) ? null : d;
-}
-
-/* =========================================================
-   CLASSIFY
-   ========================================================= */
-function classifyBatches() {
-  const t = today();
-  const defaultWh  = STATE.config.defaultWarehouseId || null;
-  const autoAssign = STATE.config.autoAssignDefaultWarehouse === true;
-
-  for (const b of STATE.batches) {
-    if (b.trimIn && b.trimIn < t && /^DONE$/i.test(b.production || '')) {
-      b._stage = 'consumed'; b._warehouse = null; continue;
-    }
-    if (b.arrival && b.arrival > t) {
-      b._stage = 'inTransit'; b._warehouse = null; continue;
-    }
-    if (b.decanting && b.decanting <= t) {
-      b._stage = 'factoryFloor'; b._warehouse = null; continue;
-    }
-    if (b.arrival && b.arrival <= t && (!b.decanting || b.decanting > t)) {
-      b._stage = 'warehouse';
-      if (autoAssign && !b._warehouse && defaultWh) b._warehouse = defaultWh;
-      continue;
-    }
-    b._stage = 'unassigned'; b._warehouse = null;
-  }
-}
-
-/* =========================================================
-   CONVERSION TABLE
-   ========================================================= */
-function resolveBomKeyForBatch(batch) {
-  if (!STATE.boms.length) return null;
-
-  if (batch.batch) {
-    const direct = STATE.boms.find(b => b.batchId === batch.batch);
-    if (direct) return bomKeyOf(direct);
-  }
-
-  const ct = STATE.config.conversionTable || [];
-  const modelo = (batch.model || '').toLowerCase();
-  const color  = (batch.color || '').toLowerCase();
-  let row = ct.find(r => (r.modelo||'').toLowerCase() === modelo && (r.color||'').toLowerCase() === color);
-  if (!row) row = ct.find(r => (r.modelo||'').toLowerCase() === modelo && (!r.color || !r.color.trim()));
-
-  if (row) {
-    let candidates = [];
-    if (row.vehicleMatNo) candidates = STATE.boms.filter(b => b.vehicleMatNo === row.vehicleMatNo);
-    if (!candidates.length && row.batchId) candidates = STATE.boms.filter(b => b.batchId === row.batchId);
-    if (candidates.length) return bomKeyOf(candidates[candidates.length - 1]);
-  }
-
-  const byDesc = STATE.boms.filter(b => b.vehicleDesc === batch.model);
-  if (byDesc.length) return bomKeyOf(byDesc[byDesc.length - 1]);
-
-  return null;
-}
-
-/* =========================================================
-   BATCH CELL VALUE HELPERS
-   ========================================================= */
-function getBatchCellValue(b, colId) {
-  switch (colId) {
-    case 'batch':      return b.batch || '';
-    case 'model':      return b.model || '';
-    case 'color':      return b.color || '';
-    case 'qty':        return b.qty || 0;
-    case 'ship':       return b.ship || '';
-    case 'arrival':    return b.arrival   ? isoDate(b.arrival)   : '';
-    case 'decanting':  return b.decanting ? isoDate(b.decanting) : '';
-    case 'trimIn':     return b.trimIn    ? isoDate(b.trimIn)    : '';
-    case 'production': return b.production || '';
-    case 'stage':      return b._stage || '';
-    case 'warehouse':  return b._warehouse || '';
-    case 'linkedBom':  return resolveBomKeyForBatch(b) || '';
-  }
-  return '';
-}
-function isoDate(d) {
-  if (!d) return '';
-  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
-  return `${y}-${m}-${dd}`;
-}
-
-function getBatchCellLabel(b, colId) {
-  const v = getBatchCellValue(b, colId);
-  if (colId === 'stage') {
-    const s = STATE.config.stages[v];
-    return s ? s.label : v;
-  }
-  if (colId === 'warehouse') {
-    if (!v) return '—';
-    const w = STATE.config.warehouses.find(x => x.id === v);
-    return w ? w.name : v;
-  }
-  if (colId === 'arrival' || colId === 'decanting' || colId === 'trimIn') {
-    return v ? fmtDate(new Date(v + 'T00:00:00')) : '—';
-  }
-  if (colId === 'linkedBom') {
-    if (!v) return '—';
-    const bom = STATE.boms.find(b => bomKeyOf(b) === v);
-    return bom ? bomDisplayName(bom) : v;
-  }
-  if (colId === 'qty') return fmt(v);
-  return v === '' ? '—' : String(v);
-}
-
-function getUniqueValues(colId) {
-  const seen = new Map();
-  for (const b of STATE.batches) {
-    const key   = getBatchCellValue(b, colId);
-    const label = getBatchCellLabel(b, colId);
-    if (!seen.has(key)) seen.set(key, label);
-  }
-  return Array.from(seen.entries())
-    .map(([key, label]) => ({ key: String(key), label }))
-    .sort((a, b) => String(a.label).localeCompare(String(b.label), undefined, { numeric: true }));
-}
-
-/* =========================================================
-   BATCH STATS
-   ========================================================= */
-function renderBatchStats() {
-  const stages = STATE.config.stages;
-  const agg = {};
-  /* ---- Line chips ---- */
-  const chips = $('#batchLineChips');
-  if (chips) {
-    const lineAgg = new Map();
-    for (const b of STATE.batches) {
-      const line = b._line || '(no line)';
-      if (!lineAgg.has(line)) lineAgg.set(line, { count: 0, qty: 0 });
-      const a = lineAgg.get(line);
-      a.count += 1;
-      a.qty   += (b.qty || 0);
-    }
-    const sortedLines = Array.from(lineAgg.entries())
-      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-    const activeLine = ($('#batchLineFilter')?.value || '');
-    const allActive  = !activeLine;
-
-    chips.innerHTML =
-      `<button class="line-chip ${allActive ? 'active' : ''}" data-line="">
-         <span class="lc-name">All</span>
-         <span class="lc-count">${fmt(STATE.batches.length)} batches · ${fmt(STATE.batches.reduce((s,b)=>s+(b.qty||0),0))} veh</span>
-       </button>` +
-      sortedLines.map(([l, a]) => `
-        <button class="line-chip ${activeLine === l ? 'active' : ''}" data-line="${escapeHtml(l)}">
-          <span class="lc-name">${escapeHtml(l)}</span>
-          <span class="lc-count">${fmt(a.count)} batches · ${fmt(a.qty)} veh</span>
-        </button>`).join('');
-
-    chips.querySelectorAll('.line-chip').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const sel = $('#batchLineFilter');
-        if (sel) sel.value = btn.dataset.line || '';
-        renderBatchStats();
-        renderBatchTable();
-      });
-    });
-  }   
-  for (const b of STATE.batches) {
-    if (!agg[b._stage]) agg[b._stage] = { count: 0, qty: 0, byModel: {} };
-    agg[b._stage].count += 1;
-    agg[b._stage].qty   += (b.qty || 0);
-    const m = b.model || '—';
-    if (!agg[b._stage].byModel[m]) agg[b._stage].byModel[m] = { count: 0, qty: 0 };
-    agg[b._stage].byModel[m].count += 1;
-    agg[b._stage].byModel[m].qty   += (b.qty || 0);
-  }
-  const totalCount = STATE.batches.length;
-  const totalQty   = STATE.batches.reduce((a,b) => a + (b.qty||0), 0);
-
-  const rules = {
-    inTransit:    'Arrival Date is in the future',
-    warehouse:    'Arrived, not yet decanted',
-    factoryFloor: 'Decanting Date already passed',
-    edgeLine:     'Manual stage',
-    consumed:     'TRIM IN DATE in the past and Production = DONE'
-  };
-
-  function breakdownHtml(byModel) {
-    const entries = Object.entries(byModel || {})
-      .sort((a,b) => b[1].qty - a[1].qty);
-    if (!entries.length) return '';
-    return `<div class="byModel">
-      ${entries.map(([m, v]) => `
-        <div class="byModel-row">
-          <span class="m-name" title="${escapeHtml(m)}">${escapeHtml(shorten(m, 22))}</span>
-          <span class="m-val">${fmt(v.qty)} <small>v · ${v.count} b</small></span>
-        </div>
-      `).join('')}
-    </div>`;
-  }
-
-  $('#batchStats').innerHTML = `
-    <div class="stat">
-      <div class="label">All batches</div>
-      <div class="value">${fmt(totalQty)}<span class="unit">vehicles</span></div>
-      <div class="sub"><b>${fmt(totalCount)}</b> batches total</div>
-    </div>
-    ${Object.entries(stages).map(([k, s]) => {
-      const a = agg[k] || { count:0, qty:0, byModel:{} };
-      return `
-        <div class="stat" title="${escapeHtml(rules[k]||'')}">
-          <div class="label">
-            <span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span>
-          </div>
-          <div class="value">${fmt(a.qty)}<span class="unit">vehicles</span></div>
-          <div class="sub"><b>${fmt(a.count)}</b> batches</div>
-          ${breakdownHtml(a.byModel)}
-        </div>`;
-    }).join('')}
-    <div class="stat" title="Could not be classified automatically — missing dates">
-      <div class="label">Unassigned</div>
-      <div class="value">${fmt((agg.unassigned||{}).qty||0)}<span class="unit">vehicles</span></div>
-      <div class="sub"><b>${fmt((agg.unassigned||{}).count||0)}</b> batches</div>
-      ${breakdownHtml((agg.unassigned||{}).byModel)}
-    </div>
-  `;
-}
-
-/* =========================================================
-   BATCH TABLE
-   ========================================================= */
-function renderBatchTable() {
-  const tree = $('#batchTable');
-  if (!STATE.batches.length) {
-    tree.innerHTML = '<div class="hint" style="margin:0">No batch data</div>';
-    return;
-  }
-
-  const searchText = ($('#batchSearch').value || '').trim().toLowerCase();
-  const lineFilter = ($('#batchLineFilter')?.value || '').trim();
-
-  /* --- 1. Column filters --- */
-  let list = STATE.batches.map((b, i) => ({ b, i }));
-  for (const [colId, allowedSet] of Object.entries(STATE.batchView.filters)) {
-    if (!allowedSet) continue;
-    list = list.filter(({ b }) => allowedSet.has(String(getBatchCellValue(b, colId))));
-  }
-
-  /* --- 2. Line dropdown filter --- */
-  if (lineFilter) {
-    list = list.filter(({ b }) => (b._line || '(no line)') === lineFilter);
-  }
-
-  /* --- 3. Text search (now includes line) --- */
-  if (searchText) {
-    list = list.filter(({ b }) => {
-      const hay = `${b.batch} ${b.model} ${b.color} ${b._line || ''} ${b.ship} ${b.production}`.toLowerCase();
-      return hay.includes(searchText);
-    });
-  }
-
-  /* --- 4. Group: line → model → colour → batches --- */
-  const lineMap = new Map();
-  for (const item of list) {
-    const b = item.b;
-    const line  = b._line || '(no line)';
-    const model = b.model || '(no model)';
-    const color = b.color || '(no colour)';
-    const cc    = b.colorCode || '';
-
-    if (!lineMap.has(line)) lineMap.set(line, new Map());
-    const modelMap = lineMap.get(line);
-
-    if (!modelMap.has(model)) modelMap.set(model, new Map());
-    const colorMap = modelMap.get(model);
-
-    const ckey = color + '||' + cc;
-    if (!colorMap.has(ckey)) colorMap.set(ckey, { color, colorCode: cc, rows: [] });
-    colorMap.get(ckey).rows.push(item);
-  }
-
-  const sortedLines = Array.from(lineMap.entries())
-    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-  /* --- 5. Sort helper --- */
-  const sortCol = Object.keys(STATE.batchView.sorts)[0] || '';
-  const sortDir = sortCol && STATE.batchView.sorts[sortCol] === 'desc' ? -1 : 1;
-  const applySortToRows = (rows) => {
-    const out = rows.slice();
-    if (sortCol && sortCol !== 'model' && sortCol !== 'color') {
-      out.sort((x, y) => {
-        const a = getBatchCellValue(x.b, sortCol);
-        const b = getBatchCellValue(y.b, sortCol);
-        if (sortCol === 'qty') return ((Number(a) || 0) - (Number(b) || 0)) * sortDir;
-        return String(a).localeCompare(String(b), undefined, { numeric: true }) * sortDir;
-      });
-    } else {
-      out.sort((x, y) => x.b.batch.localeCompare(y.b.batch, undefined, { numeric: true }));
-    }
-    return out;
-  };
-
-  /* --- 6. Visible columns --- */
-  const visibleCols = BATCH_COLS.filter(c => c.id !== 'model' && c.id !== 'color');
-
-  /* --- 7. Render 4-level tree --- */
-  let html = '';
-  for (const [line, modelMap] of sortedLines) {
-    /* Aggregate per line */
-    const lineRows = [];
-    for (const colorMap of modelMap.values())
-      for (const cg of colorMap.values())
-        lineRows.push(...cg.rows);
-    const lineQty       = lineRows.reduce((s, it) => s + (it.b.qty || 0), 0);
-    const lineModelCnt  = modelMap.size;
-    const lineYearSet   = new Set();
-    for (const it of lineRows) if (it.b._planYear) lineYearSet.add(it.b._planYear);
-    const lineYears     = Array.from(lineYearSet).sort().join(', ');
-
-    const lineOpen = !BATCH_LINE_COLLAPSED.has(line);
-
-    html += `<details class="prod-line-group batch-line-group"
-                     data-line="${escapeHtml(line)}"
-                     ${lineOpen ? 'open' : ''}>
-      <summary class="prod-line-header">
-        <span class="line-name">${escapeHtml(line)}</span>
-        <span class="line-count">
-          ${lineYears ? `<b>${escapeHtml(lineYears)}</b> · ` : ''}
-          ${lineModelCnt} model${lineModelCnt === 1 ? '' : 's'} ·
-          ${lineRows.length} batch${lineRows.length === 1 ? '' : 'es'} ·
-          ${fmt(lineQty)} vehicles
-        </span>
-      </summary>
-      <div class="prod-spec-list">`;
-
-    const sortedModelEntries = Array.from(modelMap.entries())
-      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-    for (const [model, colorMap] of sortedModelEntries) {
-      const modelRows = Array.from(colorMap.values()).flatMap(c => c.rows);
-      const modelQty  = modelRows.reduce((s, it) => s + (it.b.qty || 0), 0);
-      const modelKey  = line + '||' + model;
-      const modelOpen = !BATCH_MODEL_COLLAPSED.has(modelKey);
-
-      html += `<details class="prod-spec-group batch-model-group"
-                       data-line="${escapeHtml(line)}"
-                       data-model="${escapeHtml(model)}"
-                       ${modelOpen ? 'open' : ''}>
-        <summary class="prod-spec-header">
-          <span class="spec-name">${escapeHtml(model)}</span>
-          <span class="spec-count">
-            ${modelRows.length} batch${modelRows.length === 1 ? '' : 'es'} ·
-            ${colorMap.size} colour${colorMap.size === 1 ? '' : 's'} ·
-            ${fmt(modelQty)} vehicles
-          </span>
-        </summary>
-        <div class="prod-color-list">`;
-
-      const sortedColorEntries = Array.from(colorMap.entries())
-        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-      for (const [ckey, cg] of sortedColorEntries) {
-        const colorQty  = cg.rows.reduce((s, it) => s + (it.b.qty || 0), 0);
-        const colorKey  = line + '||' + model + '||' + ckey;
-        const colorOpen = !BATCH_COLOR_COLLAPSED.has(colorKey);
-
-        html += `<details class="prod-color-group batch-color-group"
-                         data-line="${escapeHtml(line)}"
-                         data-model="${escapeHtml(model)}"
-                         data-color="${escapeHtml(ckey)}"
-                         ${colorOpen ? 'open' : ''}>
-          <summary class="prod-color-header">
-            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
-            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
-            <span class="color-count">
-              ${cg.rows.length} batch${cg.rows.length === 1 ? '' : 'es'} ·
-              ${fmt(colorQty)} vehicles
-            </span>
-          </summary>
-          <div class="prod-batch-list">
-            <table class="prod-batch-inner-table">
-              <thead>
-                <tr>
-                  ${visibleCols.map(col => {
-                    const cls = [
-                      'col-head',
-                      col.num ? 'num' : '',
-                      STATE.batchView.filters[col.id] ? 'filtered' : '',
-                      STATE.batchView.sorts[col.id]   ? 'sorted'   : ''
-                    ].filter(Boolean).join(' ');
-                    const mark = STATE.batchView.sorts[col.id] === 'asc' ? '▲'
-                               : STATE.batchView.sorts[col.id] === 'desc' ? '▼' : '';
-                    return `<th class="${cls}" data-col="${col.id}">
-                      ${escapeHtml(col.label)}${mark ? `<span class="sort-mark">${mark}</span>` : ''}
-                      <button class="filter-btn" data-col="${col.id}" title="Sort / filter">▾</button>
-                    </th>`;
-                  }).join('')}
-                </tr>
-              </thead>
-              <tbody>`;
-
-        const rows = applySortToRows(cg.rows);
-
-        for (const { b, i } of rows) {
-          const s = STATE.config.stages[b._stage] || { label: b._stage, color: '#9ca3af' };
-
-          const linkedKey  = resolveBomKeyForBatch(b);
-          const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
-
-          let linkCell;
-          if (linkedBom) {
-            const bomId    = linkedBom.bomId || '(unassigned)';
-            const fullName = bomDisplayName(linkedBom);
-            linkCell = `<button class="btn tiny" data-role="batch-bom-display"
-                                data-bomid="${escapeHtml(bomId)}"
-                                title="${escapeHtml(fullName)}">
-                          ${escapeHtml(bomId)}
-                        </button>`;
-          } else if (b.model) {
-            linkCell = `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`;
-          } else {
-            linkCell = '—';
-          }
-
-          const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
-          const unassignedFlag = isUnassignedNoDate
-            ? `<span class="pill warn" title="No Arrival Date — cannot be classified" style="margin-left:6px">⚠</span>`
-            : '';
-
-          const whLabel = b._warehouse
-            ? (STATE.config.warehouses.find(w => w.id === b._warehouse)?.name || b._warehouse)
-            : '—';
-
-          const cells = {
-            batch:      `<td>${escapeHtml(b.batch)}${unassignedFlag}</td>`,
-            qty:        `<td class="num">${fmt(b.qty)}</td>`,
-            ship:       `<td>${escapeHtml(b.ship)}</td>`,
-            arrival:    `<td>${b.arrival   ? fmtDate(b.arrival)   : '—'}</td>`,
-            decanting:  `<td>${b.decanting ? fmtDate(b.decanting) : '—'}</td>`,
-            trimIn:     `<td>${b.trimIn    ? fmtDate(b.trimIn)    : '—'}</td>`,
-            production: `<td>${escapeHtml(b.production)}</td>`,
-            stage:      `<td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>`,
-            warehouse:  `<td>${b._stage === 'warehouse'
-                          ? `<select data-role="wh" data-i="${i}">
-                               <option value="">—</option>
-                               ${STATE.config.warehouses.map(w =>
-                                 `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`
-                               ).join('')}
-                             </select>`
-                          : escapeHtml(whLabel)}</td>`,
-            linkedBom:  `<td>${linkCell}</td>`
-          };
-
-          html += `<tr data-i="${i}">${visibleCols.map(c => cells[c.id] || '<td></td>').join('')}</tr>`;
-        }
-
-        html += `</tbody></table></div></details>`;
-      }
-
-      html += `</div></details>`;
-    }
-
-    html += `</div></details>`;
-  }
-
-  tree.innerHTML = html;
-
-  /* --- 8. Wire interactions --- */
-  tree.querySelectorAll('.filter-btn').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      openFilterPopup(btn.dataset.col, btn);
-    });
-  });
-
-  tree.querySelectorAll('select[data-role=wh]').forEach(sel => {
-    sel.addEventListener('change', e => {
-      const i = +e.target.dataset.i;
-      STATE.batches[i]._warehouse = e.target.value || null;
-      computeInventory(); renderInventoryTable(); renderPlanning();
-    });
-  });
-
-  tree.querySelectorAll('button[data-role=batch-bom-display]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      const tr = btn.closest('tr[data-i]');
-      const i  = tr ? +tr.dataset.i : -1;
-      if (i >= 0 && STATE.batches[i]) {
-        const batch = STATE.batches[i];
-        const cc = batch.colorCode || '';
-        const linkedKey = resolveBomKeyForBatch(batch);
-        const linkedBom = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
-        const sk = linkedBom ? specKeyOf(linkedBom.vehicleMatNo) : '';
-        openBomDisplay(btn.dataset.bomid, sk, cc);
-      }
-    });
-  });
-  /* --- 9. Persist collapse state --- */
-  tree.querySelectorAll('details.batch-line-group').forEach(d => {
-    d.addEventListener('toggle', () => {
-      const key = d.dataset.line;
-      if (d.open) BATCH_LINE_COLLAPSED.delete(key);
-      else        BATCH_LINE_COLLAPSED.add(key);
-    });
-  });
-
-  tree.querySelectorAll('details.batch-model-group').forEach(d => {
-    d.addEventListener('toggle', () => {
-      const key = d.dataset.line + '||' + d.dataset.model;
-      if (d.open) BATCH_MODEL_COLLAPSED.delete(key);
-      else        BATCH_MODEL_COLLAPSED.add(key);
-    });
-  });
-
-  tree.querySelectorAll('details.batch-color-group').forEach(d => {
-    d.addEventListener('toggle', () => {
-      const key = d.dataset.line + '||' + d.dataset.model + '||' + d.dataset.color;
-      if (d.open) BATCH_COLOR_COLLAPSED.delete(key);
-      else        BATCH_COLOR_COLLAPSED.add(key);
-    });
-  });
-}
-function batchExpandAll() {
-  BATCH_LINE_COLLAPSED.clear();
-  BATCH_MODEL_COLLAPSED.clear();
-  BATCH_COLOR_COLLAPSED.clear();
-  if (STATE.batches.length) renderBatchTable();
-}
-function batchCollapseAll() {
-  if (!STATE.batches.length) return;
-  const lines = new Set();
-  for (const b of STATE.batches) {
-    const line  = b._line  || '(no line)';
-    const model = b.model  || '(no model)';
-    const color = b.color  || '(no colour)';
-    const cc    = b.colorCode || '';
-
-    lines.add(line);
-    BATCH_MODEL_COLLAPSED.add(line + '||' + model);
-    BATCH_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + cc);
-  }
-  for (const l of lines) BATCH_LINE_COLLAPSED.add(l);
-  renderBatchTable();
-}
-/* =========================================================
-   FILTER POPUP
-   ========================================================= */
-function bindFilterPopupGlobal() {
-  document.addEventListener('click', e => {
-    const popup = $('#filterPopup');
-    if (popup.classList.contains('hidden')) return;
-    if (popup.contains(e.target)) return;
-    if (e.target.closest('.filter-btn')) return;
-    closeFilterPopup();
-  });
-  window.addEventListener('scroll', closeFilterPopup, true);
-  window.addEventListener('resize', closeFilterPopup);
-}
-
-function closeFilterPopup() {
-  const popup = $('#filterPopup');
-  popup.classList.add('hidden');
-  popup.innerHTML = '';
-  popup._workingSet = null;
-  popup._search = '';
-}
-
-function openFilterPopup(colId, anchor) {
-  const popup = $('#filterPopup');
-  popup.dataset.col = colId;
-  const existingFilter = STATE.batchView.filters[colId];
-  popup._workingSet = existingFilter ? new Set(existingFilter) : null;
-  popup._search = '';
-  popup.classList.remove('hidden');
-  positionPopup(popup, anchor);
-  paintFilterPopup(colId);
-}
-
-function positionPopup(popup, anchor) {
-  const r = anchor.getBoundingClientRect();
-  const pw = 270, ph = 420;
-  let left = r.right - pw;
-  if (left < 8) left = 8;
-  if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
-
-  let top = r.bottom + 6;
-  if (top + ph > window.innerHeight - 8) {
-    top = Math.max(8, r.top - ph - 6);
-  }
-  popup.style.left = left + 'px';
-  popup.style.top  = top + 'px';
-}
-
-function paintFilterPopup(colId) {
-  const popup = $('#filterPopup');
-  const col = BATCH_COLS.find(c => c.id === colId);
-  const allValues = getUniqueValues(colId);
-
-  let ascLabel = '↑ Sort A → Z';
-  let descLabel = '↓ Sort Z → A';
-  if (col && col.date) { ascLabel = '↑ Sort oldest → newest'; descLabel = '↓ Sort newest → oldest'; }
-  else if (col && col.num) { ascLabel = '↑ Sort low → high'; descLabel = '↓ Sort high → low'; }
-
-  const currentSort = STATE.batchView.sorts[colId];
-  const search = (popup._search || '').toLowerCase();
-  const working = popup._workingSet;
-  const visible = allValues.filter(v => !search || v.label.toLowerCase().includes(search));
-
-  const valuesHtml = visible.length
-    ? visible.map(v => {
-        const checked = working === null ? true : working.has(v.key);
-        return `<label class="fp-value">
-          <input type="checkbox" data-key="${escapeHtml(v.key)}" ${checked ? 'checked' : ''}/>
-          <span title="${escapeHtml(v.label)}">${escapeHtml(v.label)}</span>
-        </label>`;
-      }).join('')
-    : `<div class="hint" style="margin:6px">No values</div>`;
-
-  popup.innerHTML = `
-    <div class="fp-sort">
-      <button data-sort="asc"  class="${currentSort==='asc'?'primary':''}">${ascLabel}</button>
-      <button data-sort="desc" class="${currentSort==='desc'?'primary':''}">${descLabel}</button>
-      ${currentSort ? `<button data-sort="none" class="ghost">✕ Clear sort on this column</button>` : ''}
-    </div>
-    <div class="fp-search">
-      <input type="text" id="fpSearchInput" placeholder="Search values…" value="${escapeHtml(popup._search||'')}"/>
-    </div>
-    <div class="fp-values" id="fpValues">${valuesHtml}</div>
-    <div class="fp-actions">
-      <button data-act="all">All</button>
-      <button data-act="none">None</button>
-      <button data-act="apply" class="primary">Apply</button>
-    </div>
-  `;
-
-  popup.querySelectorAll('.fp-sort button').forEach(b => {
-    b.addEventListener('click', e => {
-      e.stopPropagation();
-      const s = b.dataset.sort;
-      if (s === 'none') delete STATE.batchView.sorts[colId];
-      else              STATE.batchView.sorts[colId] = s;
-      closeFilterPopup();
-      renderBatchTable();
-    });
-  });
-
-  const si = popup.querySelector('#fpSearchInput');
-  si.addEventListener('input', e => {
-    popup._search = e.target.value;
-    const currentChecked = new Set();
-    popup.querySelectorAll('.fp-value input[type=checkbox]:checked').forEach(c => currentChecked.add(c.dataset.key));
-    const currentAll = popup.querySelectorAll('.fp-value input[type=checkbox]').length;
-    if (currentChecked.size === currentAll) popup._workingSet = null;
-    else popup._workingSet = currentChecked;
-
-    paintFilterPopup(colId);
-    const newSi = $('#filterPopup #fpSearchInput');
-    if (newSi) { newSi.focus(); newSi.setSelectionRange(newSi.value.length, newSi.value.length); }
-  });
-  si.addEventListener('click', e => e.stopPropagation());
-
-  popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(cb => {
-    cb.addEventListener('change', e => {
-      e.stopPropagation();
-      if (popup._workingSet === null) {
-        popup._workingSet = new Set(allValues.map(v => v.key));
-      }
-      if (cb.checked) popup._workingSet.add(cb.dataset.key);
-      else            popup._workingSet.delete(cb.dataset.key);
-    });
-  });
-  popup.querySelectorAll('.fp-value').forEach(lbl => {
-    lbl.addEventListener('click', e => e.stopPropagation());
-  });
-
-  popup.querySelectorAll('.fp-actions button').forEach(b => {
-    b.addEventListener('click', e => {
-      e.stopPropagation();
-      const act = b.dataset.act;
-      if (act === 'all') {
-        popup._workingSet = null;
-        popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(c => c.checked = true);
-      } else if (act === 'none') {
-        popup._workingSet = new Set();
-        popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(c => c.checked = false);
-      } else if (act === 'apply') {
-        if (popup._workingSet === null) delete STATE.batchView.filters[colId];
-        else if (popup._workingSet.size === 0) STATE.batchView.filters[colId] = new Set();
-        else STATE.batchView.filters[colId] = new Set(popup._workingSet);
-        closeFilterPopup();
-        renderBatchTable();
-      }
-    });
-  });
-}
-
-/* =========================================================
-   SCRAP
-   ========================================================= */
-function bindScrapForm() {
-  $('#scrapAdd').addEventListener('click', () => {
-    const partNo    = ($('#scrapPart').value || '').trim();
-    const qty       = Number($('#scrapQty').value);
-    const ubication = ($('#scrapUbi').value || '').trim();
-    const note      = ($('#scrapNote').value || '').trim();
-    if (!partNo) { alert('Enter a Part No.'); return; }
-    if (!qty || qty <= 0) { alert('Enter a positive quantity.'); return; }
-    if (!STATE.partIndex[partNo]) {
-      if (!confirm(`Part "${partNo}" is not in any uploaded BOM. Add anyway?`)) return;
-    }
-    STATE.scrap.push({
-      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random()),
-      partNo, qty, ubication, note,
-      date: new Date().toISOString()
-    });
-    savePersistedScrap();
-    $('#scrapPart').value = '';
-    $('#scrapQty').value  = '';
-    $('#scrapUbi').value  = '';
-    $('#scrapNote').value = '';
-    renderScrapList();
-    renderInventoryTable();
-    renderPlanning();
-  });
-
-  $('#scrapUploadBtn').addEventListener('click', () => $('#scrapFile').click());
-  $('#scrapFile').addEventListener('change', async e => {
-    const f = e.target.files[0];
-    if (!f) return;
-    try {
-      const rows = await fileToRows(f);
-      const added = parseScrapFile(rows);
-      if (!added) { alert('No valid scrap rows found.'); return; }
-      savePersistedScrap();
-      renderScrapList();
-      renderInventoryTable();
-      renderPlanning();
-      alert(`Imported ${added} scrap row${added===1?'':'s'}.`);
-    } catch (err) {
-      console.error(err);
-      alert(`Failed to parse scrap file: ${err.message}`);
-    }
-    e.target.value = '';
-  });
-}
-
-function parseScrapFile(rows) {
-  if (!rows.length) return 0;
-  const header = rows[0].map(h => String(h||'').trim().toLowerCase());
-  const idx = names => {
-    for (const n of names) {
-      const i = header.findIndex(h => h === n.toLowerCase());
-      if (i >= 0) return i;
-    }
-    for (const n of names) {
-      const i = header.findIndex(h => h.includes(n.toLowerCase()));
-      if (i >= 0) return i;
-    }
-    return -1;
-  };
-  const cPart = idx(['material number','material no','part number','part no','partno','matnr','material','零件号']);
-  const cQty  = idx(['quantity','qty','cantidad','用量','数量']);
-  const cUbi  = idx(['ubication','ubicación','ubicacion','location','warehouse','库位','库房']);
-
-  if (cPart < 0 || cQty < 0) throw new Error('Columns "Material Number" and "Quantity" are required');
-
-  let added = 0;
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i];
-    if (!r || !r.length) continue;
-    const partNo = String(r[cPart] || '').trim();
-    if (!partNo) continue;
-    const qty = Number(String(r[cQty]).replace(/[^0-9.\-]/g,''));
-    if (!qty || qty <= 0) continue;
-    const ubication = cUbi >= 0 ? String(r[cUbi] || '').trim() : '';
-    STATE.scrap.push({
-      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random()+Math.random()),
-      partNo, qty, ubication, note: 'bulk upload',
-      date: new Date().toISOString()
-    });
-    added++;
-  }
-  return added;
-}
-
-function renderScrapList() {
-  const wrap = $('#scrapList');
-  if (!wrap) return;
-  if (!STATE.scrap.length) {
-    wrap.innerHTML = '<span class="hint" style="margin:0">No scrap recorded yet.</span>';
-    return;
-  }
-  const sorted = [...STATE.scrap].sort((a,b) => (b.date||'').localeCompare(a.date||''));
-  wrap.innerHTML = sorted.map(s => `
-    <div class="scrap-item" data-id="${s.id}">
-      <span class="mono">${escapeHtml(s.partNo)}</span>
-      <span>${escapeHtml(s.ubication || '—')}</span>
-      <span class="num">−${fmt(s.qty)}</span>
-      <span class="ts">${escapeHtml(s.note || '')}</span>
-      <span class="ts">${fmtDateTime(s.date)}</span>
-      <button data-role="del" title="Delete">✕</button>
-    </div>
-  `).join('');
-  wrap.querySelectorAll('button[data-role=del]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      const id = e.target.closest('.scrap-item').dataset.id;
-      STATE.scrap = STATE.scrap.filter(x => x.id !== id);
-      savePersistedScrap();
-      renderScrapList();
-      renderInventoryTable();
-      renderPlanning();
-    });
-  });
-}
-
-function scrapByPartNo() {
-  const out = {};
-  for (const s of STATE.scrap) out[s.partNo] = (out[s.partNo] || 0) + s.qty;
-  return out;
-}
-
-/* =========================================================
-   INVENTORY
-   ========================================================= */
-function computeInventory() {
-  const inv = {};
-  for (const p of Object.keys(STATE.partIndex)) {
-    inv[p] = { inTransit: 0, warehouses: {}, factoryFloor: 0, edgeLine: 0, total: 0 };
-  }
-  for (const b of STATE.batches) {
-    if (!b.qty || b._stage === 'consumed' || b._stage === 'unassigned') continue;
-    const key = resolveBomKeyForBatch(b);
-    if (!key) continue;
-    for (const [partNo, p] of Object.entries(STATE.partIndex)) {
-      const q = p.perBomQty[key];
-      if (!q) continue;
-      const amount = q * b.qty;
-      if (b._stage === 'inTransit')         inv[partNo].inTransit    += amount;
-      else if (b._stage === 'factoryFloor') inv[partNo].factoryFloor += amount;
-      else if (b._stage === 'edgeLine')     inv[partNo].edgeLine     += amount;
-      else if (b._stage === 'warehouse') {
-        const wh = b._warehouse || '__unassigned__';
-        inv[partNo].warehouses[wh] = (inv[partNo].warehouses[wh] || 0) + amount;
-      }
-      inv[partNo].total += amount;
-    }
-  }
-  STATE.inventory = inv;
-}
-
-function renderInventoryTable() {
-  const tbl = $('#invTable');
-  const q = ($('#invSearch').value || '').toLowerCase();
-  const whEnabled = STATE.config.warehouses.filter(w => w.enabled);
-  const scrapMap = scrapByPartNo();
-
-  const rows = Object.values(STATE.partIndex).filter(p => {
-    if (!q) return true;
-    const hay = `${p.partNo} ${p.nameCN} ${p.nameEN}`.toLowerCase();
-    return hay.includes(q);
-  });
-
-  if (!rows.length) {
-    tbl.innerHTML = `<thead><tr><th>Upload BOM &amp; batch files first</th></tr></thead>`;
-    return;
-  }
-
-  const head = `
-    <thead><tr>
-      <th>Part No.</th><th>Name</th><th>UOM</th>
-      <th class="num">In Transit</th>
-      ${whEnabled.map(w => `<th class="num">${escapeHtml(w.name)}</th>`).join('')}
-      <th class="num">Factory Floor</th>
-      <th class="num">Edge Line</th>
-      <th class="num">Total</th>
-      <th class="num">Scrap</th>
-      <th class="num">Available</th>
-    </tr></thead>`;
-
-  const body = rows.map(p => {
-    const inv = STATE.inventory[p.partNo] ||
-      { inTransit:0, warehouses:{}, factoryFloor:0, edgeLine:0, total:0 };
-    const scrap = scrapMap[p.partNo] || 0;
-    const available = inv.total - scrap;
-    return `
-      <tr>
-        <td><b>${escapeHtml(p.partNo)}</b></td>
-        <td>${escapeHtml(p.nameCN || p.nameEN)}</td>
-        <td>${escapeHtml(p.uom)}</td>
-        <td class="num">${fmt(inv.inTransit)}</td>
-        ${whEnabled.map(w => `<td class="num">${fmt(inv.warehouses[w.id] || 0)}</td>`).join('')}
-        <td class="num">${fmt(inv.factoryFloor)}</td>
-        <td class="num">${fmt(inv.edgeLine)}</td>
-        <td class="num"><b>${fmt(inv.total)}</b></td>
-        <td class="num" style="color:${scrap?'var(--danger)':'inherit'}">${scrap? '−'+fmt(scrap) : '—'}</td>
-        <td class="num"><b>${fmt(available)}</b></td>
-      </tr>`;
-  }).join('');
-
-  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
-}
-
-/* =========================================================
-   BUTTONS
-   ========================================================= */
-function bindButtons() {
-  $('#bomFolderPick').addEventListener('click', pickBomFolder);
-  $('#bomFolderProcess').addEventListener('click', processBomFolder);
-  bindFolderFallback();
-  bindBomListSearch();
-  $('#bomProgressToggle').addEventListener('click', () => {
-    const list = $('#bomProgressList');
-    const btn  = $('#bomProgressToggle');
-    const nowHidden = list.classList.toggle('hidden');
-    btn.textContent = nowHidden ? '▸ Display batch list' : '▾ Hide batch list';
-  });
-  $('#batchLineFilter')?.addEventListener('change', renderBatchTable);   
-  $('#bomSearch').addEventListener('input', renderBomTable);
-  $('#bomFilter').addEventListener('change', renderBomTable);
-  $('#invSearch').addEventListener('input', renderInventoryTable);
-  $('#planSearch').addEventListener('input', renderPlanning);
-  $('#planOnlyShort').addEventListener('change', renderPlanning);
-  $('#batchSearch').addEventListener('input', renderBatchTable);
-  ['c_factoryFloor','c_edgeLine','c_inTransit','c_safety'].forEach(id =>
-  $('#'+id).addEventListener('change', renderPlanning));
-  $('#batchClearFilters').addEventListener('click', () => {
-    STATE.batchView = { sorts: {}, filters: {} };
-    $('#batchSearch').value = '';
-    renderBatchTable();
-  });
-  /* NEW — expand / collapse the batch tree */
-  $('#batchExpandAll')?.addEventListener('click', batchExpandAll);
-  $('#batchCollapseAll')?.addEventListener('click', batchCollapseAll);
-   
-  $('#autoClassify').addEventListener('click', () => {
-    classifyBatches(); renderBatchStats(); renderBatchTable();
-    computeInventory(); renderInventoryTable(); renderPlanning();
-  });
-
-  $('#planAdd').addEventListener('click', () => {
-    const bomKey = $('#planModel').value;
-    const qty    = Number($('#planQty').value);
-    if (!bomKey || !qty) return;
-    STATE.plan.push({ bomKey, qty });
-    $('#planQty').value = '';
-    renderPlanList(); renderPlanning();
-  });
-  $('#planClear').addEventListener('click', () => { STATE.plan = []; renderPlanList(); renderPlanning(); });
-
-  $('#exportBom').addEventListener('click', exportBom);
-  $('#exportInv').addEventListener('click', exportInventory);
-  $('#exportPlan').addEventListener('click', exportPlan);
-
-  $('#whAdd').addEventListener('click', () => {
-    STATE.config.warehouses.push({ id: 'WH'+(STATE.config.warehouses.length+1), name:'New warehouse', enabled:true });
-    renderWarehouseEditor(); renderWarehouseChecklist(); renderBatchStats();
-  });
-  $('#whSave').addEventListener('click', saveWarehouses);
-
-  $('#convAdd').addEventListener('click', () => {
-    STATE.config.conversionTable.push({ modelo:'', color:'', vehicleMatNo:'' });
-    renderConversionTable();
-  });
-  $('#convSave').addEventListener('click', saveConversionTable);
-
-  $('#resetAll').addEventListener('click', () => {
-    if (!confirm('Erase all uploaded data and local overrides?')) return;
-    STATE.boms = []; STATE.batches = []; STATE.plan = []; STATE.scrap = [];
-    STATE.inventory = {}; STATE.partIndex = {};
-    STATE.batchView = { sorts: {}, filters: {} };
-    STATE.bomRegistry = new Map();
-    STATE.bomCounter  = new Map();
-    STATE.mrpStock = {
-      items: [], byPartNo: {}, loaded: false, fileName: '',
-      model: '', variantKey: '',
-      demands: []
-    };
-    const sp = $('#stockFilePath'); if (sp) sp.value = '';
-    const si = $('#stockFileInfo'); if (si) si.textContent = 'No stock file loaded.';     
-    WHERE_USED_OPEN.clear();
-    savePersistedScrap();
-    try { localStorage.removeItem(LS_CONFIG); } catch(e){}
-    _bomFolderHandle = null;
-    _bomFolderFiles  = [];
-    $('#bomFolderPath').value = '';
-    $('#bomFolderInfo').textContent = 'No folder selected yet.';
-    $('#bomFolderProcess').disabled = true;
-    $('#bomProgressWrap').classList.add('hidden');
-    $('#bomListSearch').value = '';
-    $('#bomListSearchResult').classList.add('hidden');
-    $('#bomListSearchResult').innerHTML = '';
-    $('#bomProgressToggle').classList.add('hidden');
-    $('#bomProgressToggle').classList.remove('has-errors');
-    $('#bomProgressList').classList.add('hidden');
-    renderBomList(); renderBomTable(); renderBatchTable(); renderBatchStats();
-    renderInventoryTable(); renderPlanList(); renderPlanning();
-    renderScrapList(); renderConversionTable();
-  });
-
-  bindScrapForm();
-}
-
-/* =========================================================
-   PLAN
-   ========================================================= */
-function renderPlanList() {
-  const wrap = $('#planList');
-  if (!STATE.plan.length) { wrap.innerHTML = '<span class="hint" style="margin:0">No plan items yet.</span>'; return; }
-  wrap.innerHTML = STATE.plan.map((p, i) => {
-    const bom = STATE.boms.find(b => bomKeyOf(b) === p.bomKey);
-    const label = bom ? bomDisplayName(bom) : p.bomKey;
-    return `
-      <div class="file-item">
-        <span class="tag" title="${escapeHtml(label)}">${escapeHtml(shorten(label, 40))}</span>
-        <div class="grow">${fmt(p.qty)} vehicles</div>
-        <button class="btn ghost" data-i="${i}">✕</button>
-      </div>`;
-  }).join('');
-  wrap.querySelectorAll('button').forEach(b => b.addEventListener('click', e => {
-    STATE.plan.splice(+e.target.dataset.i, 1);
-    renderPlanList(); renderPlanning();
-  }));
-}
-
-function renderWarehouseChecklist() {
-  const wrap = $('#whChecklist');
-  const active = STATE.config.warehouses.filter(w => w.enabled);
-  wrap.innerHTML = active.map(w => `
-    <label class="toggle">
-      <input type="checkbox" data-wh="${w.id}" checked/>
-      ${escapeHtml(w.name)}
-    </label>
-  `).join('');
-  wrap.querySelectorAll('input[data-wh]').forEach(inp => {
-    inp.addEventListener('change', renderPlanning);
-  });
-}
-
-function renderWarehouseEditor() {
-  const wrap = $('#whEditor');
-  wrap.innerHTML = STATE.config.warehouses.map((w,i) => `
-    <div class="wh-row">
-      <input type="checkbox" data-i="${i}" data-role="enabled" ${w.enabled?'checked':''}/>
-      <input type="text" data-i="${i}" data-role="name" value="${escapeHtml(w.name)}"/>
-      <button data-i="${i}" data-role="del">✕</button>
-    </div>
-  `).join('');
-  wrap.querySelectorAll('input').forEach(inp => inp.addEventListener('change', e => {
-    const i = +e.target.dataset.i;
-    if (e.target.dataset.role === 'name')    STATE.config.warehouses[i].name = e.target.value;
-    if (e.target.dataset.role === 'enabled') STATE.config.warehouses[i].enabled = e.target.checked;
-  }));
-  wrap.querySelectorAll('button[data-role=del]').forEach(b => b.addEventListener('click', e => {
-    STATE.config.warehouses.splice(+e.target.dataset.i, 1);
-    renderWarehouseEditor(); renderWarehouseChecklist();
-  }));
-}
-function saveWarehouses() {
-  savePersistedOverrides();
-  renderWarehouseChecklist();
-  renderBatchStats();
-  renderBatchTable();
-  computeInventory();
-  renderInventoryTable();
-  renderPlanning();
-  alert('Warehouses updated.');
-}
-
-function renderConversionTable() {
-  const wrap = $('#convTable');
-  if (!wrap) return;
-  const rows = STATE.config.conversionTable || [];
-  wrap.innerHTML = `
-    <div class="conv-head">
-      <span>Modelo (batch)</span>
-      <span>Color (batch)</span>
-      <span>Vehicle Material No. (BOM)</span>
-      <span></span>
-    </div>
-    ${rows.map((r,i) => `
-      <div class="conv-row" data-i="${i}">
-        <input type="text" data-role="modelo" value="${escapeHtml(r.modelo||'')}" placeholder="e.g. S400 HEV Excellence" />
-        <input type="text" data-role="color"  value="${escapeHtml(r.color||'')}"  placeholder="blank = any color" />
-        <input type="text" class="mono" data-role="vehno" value="${escapeHtml(r.vehicleMatNo||'')}" placeholder="e.g. LE60U5BWL01" />
-        <button data-role="del" title="Delete">✕</button>
-      </div>
-    `).join('')}
-  `;
-  wrap.querySelectorAll('input').forEach(inp => inp.addEventListener('input', e => {
-    const i = +e.target.closest('.conv-row').dataset.i;
-    const r = STATE.config.conversionTable[i];
-    if (e.target.dataset.role === 'modelo') r.modelo = e.target.value;
-    if (e.target.dataset.role === 'color')  r.color  = e.target.value;
-    if (e.target.dataset.role === 'vehno')  r.vehicleMatNo = e.target.value;
-  }));
-  wrap.querySelectorAll('button[data-role=del]').forEach(b => b.addEventListener('click', e => {
-    const i = +e.target.closest('.conv-row').dataset.i;
-    STATE.config.conversionTable.splice(i, 1);
-    renderConversionTable();
-  }));
-}
-
-function saveConversionTable() {
-  savePersistedOverrides();
-  renderBatchTable(); 
-  renderBatchStats();
-  computeInventory();
-  renderInventoryTable();
-  renderPlanning();
-  alert('Conversion table saved.');
-}
-
-/* =========================================================
-   PLANNING
-   ========================================================= */
-function renderPlanning() {
-  const tbl = $('#planTable');
-  if (!STATE.plan.length) {
-    tbl.innerHTML = `<thead><tr><th>Add plan items above</th></tr></thead>`;
-    $('#planStats').innerHTML = '';
-    return;
-  }
-  if (!Object.keys(STATE.partIndex).length) {
-    tbl.innerHTML = `<thead><tr><th>Upload BOM files first</th></tr></thead>`;
-    return;
-  }
-
-  const useFF  = $('#c_factoryFloor').checked;
-  const useEL  = $('#c_edgeLine').checked;
-  const useIT  = $('#c_inTransit').checked;
-  const safety = parseFloat($('#c_safety').value) || 1.0;
-  const whOn = {};
-  $$('#whChecklist input[data-wh]').forEach(i => whOn[i.dataset.wh] = i.checked);
-  const scrapMap = scrapByPartNo();
-
-  const required = {};
-  for (const p of STATE.plan) {
-    for (const [partNo, info] of Object.entries(STATE.partIndex)) {
-      const q = info.perBomQty[p.bomKey];
-      if (!q) continue;
-      required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
-    }
-  }
-
-  const q = ($('#planSearch').value || '').toLowerCase();
-  const onlyShort = $('#planOnlyShort').checked;
-  const rows = [];
-
-  for (const [partNo, req] of Object.entries(required)) {
-    const info = STATE.partIndex[partNo];
-    const inv  = STATE.inventory[partNo] ||
-      {inTransit:0, warehouses:{}, factoryFloor:0, edgeLine:0, total:0};
-    let avail = 0;
-    if (useFF) avail += inv.factoryFloor;
-    if (useEL) avail += inv.edgeLine;
-    if (useIT) avail += inv.inTransit;
-    for (const [whId, on] of Object.entries(whOn)) {
-      if (on) avail += inv.warehouses[whId] || 0;
-    }
-    avail -= (scrapMap[partNo] || 0);
-    const short = Math.max(0, req - avail);
-    if (onlyShort && short <= 0) continue;
-    if (q) {
-      const hay = `${partNo} ${info.nameCN} ${info.nameEN}`.toLowerCase();
-      if (!hay.includes(q)) continue;
-    }
-    rows.push({ partNo, info, req, avail, short });
-  }
-
-  rows.sort((a,b) => (b.short - a.short) || a.partNo.localeCompare(b.partNo));
-  const shortCount = rows.filter(r => r.short > 0).length;
-
-  $('#planStats').innerHTML = `
-    <div class="stat"><div class="label">Parts required</div><div class="value">${rows.length}</div></div>
-    <div class="stat"><div class="label">Parts short</div><div class="value" style="color:${shortCount?'var(--danger)':'var(--ok)'}">${shortCount}</div></div>
-    <div class="stat"><div class="label">Total vehicles</div><div class="value">${fmt(STATE.plan.reduce((a,p)=>a+p.qty,0))}</div></div>
-  `;
-
-  tbl.innerHTML = `
-    <thead><tr>
-      <th>Part No.</th><th>Name</th><th>UOM</th>
-      <th class="num">Required</th>
-      <th class="num">Available</th>
-      <th class="num">Shortage</th>
-      <th>Status</th>
-    </tr></thead>
-    <tbody>
-      ${rows.map(r => `
-        <tr>
-          <td><b>${escapeHtml(r.partNo)}</b></td>
-          <td>${escapeHtml(r.info.nameCN || r.info.nameEN)}</td>
-          <td>${escapeHtml(r.info.uom)}</td>
-          <td class="num">${fmt(r.req)}</td>
-          <td class="num">${fmt(r.avail)}</td>
-          <td class="num" style="color:${r.short>0?'var(--danger)':'inherit'};font-weight:${r.short>0?'600':'400'}">${fmt(r.short)}</td>
-          <td>${r.short > 0 ? '<span class="pill short">SHORT</span>' : '<span class="pill ok">OK</span>'}</td>
-        </tr>`).join('')}
-    </tbody>`;
-}
-
-/* =========================================================
-   EXPORTS
-   ========================================================= */
-function downloadWorkbook(wb, filename) { XLSX.writeFile(wb, filename); }
-function aoaToSheet(aoa) { return XLSX.utils.aoa_to_sheet(aoa); }
-
-function exportBom() {
-  const boms = STATE.boms;
-  const aoa = [['Part No.','Name','UOM','Type','BOMs Used', ...boms.map(b => bomDisplayName(b))]];
-  for (const p of Object.values(STATE.partIndex)) {
-    aoa.push([
-      p.partNo, p.nameEN || p.nameCN, p.uom,
-      p.isCommon ? 'COMMON' : 'SPECIFIC',
-      [...p.bomKeys].join(' | '),
-      ...boms.map(b => p.perBomQty[bomKeyOf(b)] || '')
-    ]);
-  }
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Material List');
-  downloadWorkbook(wb, `Material_List_${dateStamp()}.xlsx`);
-}
-
-function exportInventory() {
-  const whEnabled = STATE.config.warehouses.filter(w => w.enabled);
-  const scrapMap = scrapByPartNo();
-  const aoa = [['Part No.','Name','UOM','In Transit', ...whEnabled.map(w=>w.name),
-                'Factory Floor','Edge Line','Total','Scrap','Available']];
-  for (const p of Object.values(STATE.partIndex)) {
-    const inv = STATE.inventory[p.partNo] ||
-      {inTransit:0, warehouses:{}, factoryFloor:0, edgeLine:0, total:0};
-    const scrap = scrapMap[p.partNo] || 0;
-    aoa.push([
-      p.partNo, p.nameCN || p.nameEN, p.uom,
-      inv.inTransit,
-      ...whEnabled.map(w => inv.warehouses[w.id] || 0),
-      inv.factoryFloor, inv.edgeLine, inv.total,
-      scrap, inv.total - scrap
-    ]);
-  }
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Inventory');
-  downloadWorkbook(wb, `Material_Inventory_${dateStamp()}.xlsx`);
-}
-
-function exportPlan() {
-  const useFF  = $('#c_factoryFloor').checked;
-  const useEL  = $('#c_edgeLine').checked;
-  const useIT  = $('#c_inTransit').checked;
-  const safety = parseFloat($('#c_safety').value) || 1.0;
-  const whOn = {};
-  $$('#whChecklist input[data-wh]').forEach(i => whOn[i.dataset.wh] = i.checked);
-  const scrapMap = scrapByPartNo();
-
-  const required = {};
-  for (const p of STATE.plan) {
-    for (const [partNo, info] of Object.entries(STATE.partIndex)) {
-      const q = info.perBomQty[p.bomKey];
-      if (!q) continue;
-      required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
-    }
-  }
-
-  const aoa = [
-    ['Plan:', ...STATE.plan.map(p => {
-      const bom = STATE.boms.find(b => bomKeyOf(b) === p.bomKey);
-      return `${bom ? bomDisplayName(bom) : p.bomKey} × ${p.qty}`;
-    })],
-    ['Safety factor:', safety],
-    [],
-    ['Part No.','Name','UOM','Required','Available','Shortage','Status']
-  ];
-  for (const [partNo, req] of Object.entries(required)) {
-    const info = STATE.partIndex[partNo];
-    const inv  = STATE.inventory[partNo] ||
-      {inTransit:0, warehouses:{}, factoryFloor:0, edgeLine:0, total:0};
-    let avail = 0;
-    if (useFF) avail += inv.factoryFloor;
-    if (useEL) avail += inv.edgeLine;
-    if (useIT) avail += inv.inTransit;
-    for (const [whId,on] of Object.entries(whOn)) if (on) avail += inv.warehouses[whId] || 0;
-    avail -= (scrapMap[partNo] || 0);
-    const short = Math.max(0, req - avail);
-    aoa.push([
-      partNo, info.nameCN || info.nameEN, info.uom,
-      round3(req), round3(avail), round3(short), short > 0 ? 'SHORT' : 'OK'
-    ]);
-  }
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Plan');
-  downloadWorkbook(wb, `Production_Plan_${dateStamp()}.xlsx`);
-}
-
-/* =========================================================
-   DISPLAY BOM MODAL
-   ========================================================= */
-function openBomDisplay(bomId, specKey, preferredColorCode) {
-  /* Scope strictly to the provided specKey */
-  const matchingBoms = STATE.boms.filter(b => 
-    b.bomId === bomId && specKeyOf(b.vehicleMatNo) === specKey
-  );
-  
-  if (!matchingBoms.length) { 
-    alert(`BOM "${bomId}" not found in this spec.`); 
-    return; 
-  }
-
-  const modal = $('#bomDisplayModal');
-  modal.dataset.bomid = bomId;
-
-  /* Group by exterior colour */
-  const colorMap = new Map();
-  for (const b of matchingBoms) {
-    const cc = colorCodeOf(b.vehicleMatNo) || '';
-    if (!colorMap.has(cc)) colorMap.set(cc, []);
-    colorMap.get(cc).push(b);
-  }
-  const sortedColors = Array.from(colorMap.keys()).sort();
-
-  /* Subtitle */
-  const linkedBatchIds = new Set(matchingBoms.map(b => b.batchId).filter(Boolean));
-  const batchMwoSet = new Set();
-  for (const batch of STATE.batches) {
-    if (linkedBatchIds.has(batch.batch) && batch.mwo) batchMwoSet.add(batch.mwo);
-  }
-  const batchMwos = Array.from(batchMwoSet).sort();
-
-  modal.querySelector('.bdm-title').textContent = `BOM Contents — ${bomId}`;
-  modal.querySelector('.bdm-subtitle').innerHTML =
-    `<span class="bdm-meta">${matchingBoms.length} sales batch${matchingBoms.length === 1 ? '' : 'es'} · ${sortedColors.length} colour${sortedColors.length === 1 ? '' : 's'}</span>` +
-    (batchMwos.length ? ` <span class="bdm-mwo">MWO: ${batchMwos.map(escapeHtml).join(', ')}</span>` : '');
-
-  /* Colour selector */
-  const actions = modal.querySelector('.modal-actions');
-  if (actions) {
-    const prev = actions.querySelector('#bdmColorSelect');
-    if (prev) prev.parentElement.remove();
-  }
-
-  if (sortedColors.length > 1 && actions) {
-    const wrap = document.createElement('label');
-    wrap.className = 'bdm-color-select-wrap';
-    const label = document.createElement('span');
-    label.textContent = 'Colour:';
-    const sel = document.createElement('select');
-    sel.id = 'bdmColorSelect';
-    sel.innerHTML = sortedColors.map(cc =>
-      `<option value="${escapeHtml(cc)}">${escapeHtml(cc || '(no colour)')}</option>`
-    ).join('');
-    wrap.appendChild(label);
-    wrap.appendChild(sel);
-    actions.insertBefore(wrap, actions.firstChild);
-    sel.onchange = () => renderBomDisplayBody(modal, sel.value);
-  }
-
-  modal._bdmContext = { colorMap };
-
-  let initialColor = sortedColors[0] || '';
-  if (preferredColorCode && sortedColors.includes(preferredColorCode)) initialColor = preferredColorCode;
-
-  const sel = modal.querySelector('#bdmColorSelect');
-  if (sel) sel.value = initialColor;
-  renderBomDisplayBody(modal, initialColor);
-
-  modal.classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
-}
-
-function renderBomDisplayBody(modal, colorCode) {
-  const ctx = modal._bdmContext;
-  if (!ctx) return;
-  const bomsOfColor = ctx.colorMap.get(colorCode) || [];
-  if (!bomsOfColor.length) return;
-
-  const rep    = bomsOfColor[0];
-  const hasMwo = rep.parts.some(p => p.mwo);
-
-  const partsRows = rep.parts
-    .slice()
-    .sort((a, b) => String(a.partNo).localeCompare(String(b.partNo), undefined, { numeric: true }))
-    .map(p => `
-      <tr>
-        <td class="mono">${escapeHtml(p.partNo)}</td>
-        <td>${escapeHtml(p.nameEN || p.nameCN || '')}</td>
-        <td class="num">${fmt(p.qty)}</td>
-        <td>${escapeHtml(p.uom || '')}</td>
-        ${hasMwo ? `<td class="mono">${escapeHtml(p.mwo || '')}</td>` : ''}
-      </tr>`)
-    .join('');
-
-  modal.querySelector('.bdm-body').innerHTML = `
-    <table class="bdm-table">
-      <thead>
-        <tr>
-          <th>Material Number</th>
-          <th>Material Description</th>
-          <th class="num">Qty per car</th>
-          <th>UoM</th>
-          ${hasMwo ? '<th>MWO</th>' : ''}
-        </tr>
-      </thead>
-      <tbody>${partsRows}</tbody>
-    </table>`;
-}
-function closeBomDisplay() {
-  const modal = $('#bomDisplayModal');
-  modal.classList.add('hidden');
-  document.body.style.overflow = '';
-}
-
-function exportBomDisplay() {
-  const modal = $('#bomDisplayModal');
-  const bomId = modal.dataset.bomid;
-  const ctx   = modal._bdmContext;
-  if (!ctx) return;
-
-  const sel = modal.querySelector('#bdmColorSelect');
-  const colorCode = sel ? sel.value : (Array.from(ctx.colorMap.keys())[0] || '');
-  const bomsOfColor = ctx.colorMap.get(colorCode) || [];
-  if (!bomsOfColor.length) return;
-
-  const rep    = bomsOfColor[0];
-  const hasMwo = rep.parts.some(p => p.mwo);
-
-  const header = ['Material Number', 'Material Description', 'Qty per car', 'UoM'];
-  if (hasMwo) header.push('MWO');
-
-  const aoa = [header];
-  rep.parts
-    .slice()
-    .sort((a, b) => String(a.partNo).localeCompare(String(b.partNo), undefined, { numeric: true }))
-    .forEach(p => {
-      const row = [p.partNo, p.nameEN || p.nameCN || '', p.qty, p.uom || ''];
-      if (hasMwo) row.push(p.mwo || '');
-      aoa.push(row);
-    });
-
-  const wb = XLSX.utils.book_new();
-  const sheetName = ((bomId || 'BOM') + (colorCode ? ' ' + colorCode : '')).substring(0, 28);
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), sheetName);
-  const fileBase = `${(bomId || 'BOM').replace(/\s+/g, '_')}${colorCode ? '_' + colorCode : ''}`;
-  downloadWorkbook(wb, `${fileBase}_${dateStamp()}.xlsx`);
-}
-function bindBomDisplayModal() {
-  $('#bdmClose')?.addEventListener('click', closeBomDisplay);
-  $('#bdmExport')?.addEventListener('click', exportBomDisplay);
-  $('#bomDisplayModal')?.addEventListener('click', e => {
-    if (e.target.id === 'bomDisplayModal') closeBomDisplay();
-  });
-  document.addEventListener('keydown', e => {
-    const m = $('#bomDisplayModal');
-    if (e.key === 'Escape' && m && !m.classList.contains('hidden')) closeBomDisplay();
-  });
-}
-
-/* =========================================================
-   UTILITIES
-   ========================================================= */
-function escapeHtml(s) {
-  if (s == null) return '';
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  })[c]);
-}
-function shorten(s, n) { s = String(s||''); return s.length > n ? s.slice(0, n-1) + '…' : s; }
-/* Locale-independent date formatters — DD/MM/YYYY. */
-function fmtDate(d) {
-  if (!d) return '';
-  const dt = (d instanceof Date) ? d : new Date(d);
-  if (isNaN(dt)) return '';
-  const dd   = String(dt.getDate()).padStart(2, '0');
-  const mm   = String(dt.getMonth() + 1).padStart(2, '0');
-  const yyyy = dt.getFullYear();
-  return `${dd}/${mm}/${yyyy}`;
-}
-function fmtDateTime(d) {
-  if (!d) return '';
-  const dt = (d instanceof Date) ? d : new Date(d);
-  if (isNaN(dt)) return '';
-  const dd   = String(dt.getDate()).padStart(2, '0');
-  const mm   = String(dt.getMonth() + 1).padStart(2, '0');
-  const yyyy = dt.getFullYear();
-  const hh   = String(dt.getHours()).padStart(2, '0');
-  const mi   = String(dt.getMinutes()).padStart(2, '0');
-  return `${dd}/${mm}/${yyyy} ${hh}:${mi}`;
-}
-function dateStamp() {
-  const d = new Date();
-  return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
-}
-function round3(n) { return Math.round(n * 1000) / 1000; }
-/* =========================================================
-   PRODUCTION MONITORING
-   ========================================================= */
-const PROD_STAGES = [
-  { key: 'devanning',   label: '005 De-vanning',       short: 'DEV', color: '#94a3b8' },
-  { key: 'trimIn',      label: '020 Trim-in',          short: 'TRM', color: '#3b82f6' },
-  { key: 'offLine',     label: '030 Off-line OK',      short: 'OFF', color: '#8b5cf6' },
-  { key: 'buyOff',      label: 'Buy-off OK',           short: 'BUY', color: '#f59e0b' },
-  { key: 'compoundIn',  label: 'Compound Gate-in',     short: 'CIN', color: '#10b981' },
-  { key: 'compoundOut', label: 'Compound Gate-out OK', short: 'COT', color: '#059669' }
-];
-
-/* Sequence first letter → production line */
-const PROD_LINE_MAP = { A: 'A0', B: 'M1', D: 'M0' };
-
-/* CSV column auto-detection hints (exact → fallback contains) */
-const PROD_COL_HINTS = {
-  code:         ['code'],
-  sequence:     ['sequence'],
-  batch:        ['batch'],
-  description:  ['description'],
-  color:        ['color'],
-  colorCode:    ['colorcode', 'color code'],
-  materialCode: ['materialcode', 'material code'],
-  devanning:    ['005 devanning'],
-  trimIn:       ['020 trim in'],
-  offLine:      ['030 off line ok'],
-  diverted:     ['025 diverted'],                          // ← NEW
-  buyOff:       ['buy off ok'],
-  compoundIn:   ['compound gate in in', 'compound gate in'],
-  compoundOut:  ['compound gate out ok']
+const columnNames = {
+    seq: 'Seq',
+    name: 'Process Name',
+    description: 'Description',
+    r: 'Responsible (R)',
+    a: 'Accountable (A)',
+    c: 'Consulted (C)',
+    i: 'Informed (I)',
+    businessStatus: 'Business Status',
+    sysName: 'System Name',
+    sysStatus: 'System Status',
+    sysResp: 'System Responsible',
+    businessDoc: 'Business Doc',
+    userManual: 'User Manual',
+    notes: 'Notes'
 };
-/* VIN normalisation: strip every non-alphanumeric separator */
-function cleanVin(s) {
-  if (!s) return '';
-  return String(s).replace(/[^A-Za-z0-9]/g, '');
+
+// ============================
+// 3. Utility Functions
+// ============================
+
+function genId() {
+    return Date.now() + '-' + Math.random().toString(36).substr(2, 8);
 }
-
-/* Displayed VIN — prefers the human-readable 'code' column,
-   falls back to the raw vinId (dashes stripped). */
-function displayVin(rec) {
-  if (!rec || !rec.code) return '';
-  return cleanVin(rec.code);
-}
-/* Most-frequent non-empty value of a field across a set of VIN records.
-   Empty / whitespace-only values are skipped, so a batch inherits a colour
-   (or model, or colour code) as soon as any VIN carries one. */
-function dominantField(vins, field) {
-  if (!vins || !vins.length) return '';
-  const counts = {};
-  for (const v of vins) {
-    const val = String(v[field] || '').trim();
-    if (!val) continue;                                  // ← skip empties
-    counts[val] = (counts[val] || 0) + 1;
-  }
-  let best = '', bestN = 0;
-  for (const [k, n] of Object.entries(counts)) {
-    if (n > bestN) { best = k; bestN = n; }
-  }
-  return best;
-}
-/* True when the batch's VINs disagree on a field:
-   two or more distinct non-empty values exist. */
-function hasFieldConflict(vins, field) {
-  if (!vins || !vins.length) return false;
-  const seen = new Set();
-  for (const v of vins) {
-    const val = String(v[field] || '').trim();
-    if (!val) continue;
-    seen.add(val);
-    if (seen.size > 1) return true;
-  }
-  return false;
-}
-
-/* True when the batch's VINs disagree on their production line.
-   '—' is ignored (VINs without a sequence don't vote). */
-function hasLineConflict(batch) {
-  if (!batch || !batch.vins || !batch.vins.length) return false;
-  const seen = new Set();
-  for (const r of batch.vins) {
-    const l = lineOfSequence(r.sequence);
-    if (l === '—') continue;
-    seen.add(l);
-    if (seen.size > 1) return true;
-  }
-  return false;
-}
-/* Most-frequent production line across a batch's VINs.
-   Ignores the '—' placeholder (VINs with no sequence yet) so a batch is
-   always tagged with the line its known VINs actually rolled out from.
-   Falls back to '—' only when no VIN in the batch has a resolvable line. */
-function dominantLine(batch) {
-  if (!batch || !batch.vins || !batch.vins.length) return '—';
-  const counts = {};
-  for (const r of batch.vins) {
-    const l = lineOfSequence(r.sequence);
-    if (l === '—') continue;                          // skip unknown lines
-    counts[l] = (counts[l] || 0) + 1;
-  }
-  let best = '—', bestN = 0;
-  for (const [k, n] of Object.entries(counts)) {
-    if (n > bestN) { best = k; bestN = n; }
-  }
-  return best;
-}
-/* Distinct production lines present in the loaded file. */
-function getAvailableLines() {
-  const s = new Set();
-  for (const r of STATE.production.records) s.add(lineOfSequence(r.sequence));
-  return Array.from(s).sort();
-}
-
-/* Distinct model descriptions present in the loaded file. */
-function getAvailableModels() {
-  const s = new Set();
-  for (const r of STATE.production.records) {
-    if (r.description) s.add(r.description);
-  }
-  return Array.from(s).sort();
-}
-
-/* True if the record matches the currently applied line / model filters. */
-function recordMatchesLineModel(rec) {
-  const line = lineOfSequence(rec.sequence);
-  if (STATE.production.lines  && !STATE.production.lines.has(line))            return false;
-  const model = rec.description || '';
-  if (STATE.production.models && !STATE.production.models.has(model))          return false;
-  return true;
-}
-
-/* Combined: period + line + model. */
-function recordMatchesFilters(rec) {
-  return recordInPeriod(rec) && recordMatchesLineModel(rec);
-}
-
-/* Set equality that treats null/undefined as "all". */
-function setsEqual(a, b) {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  if (a.size !== b.size) return false;
-  for (const v of a) if (!b.has(v)) return false;
-  return true;
-}
-/* Track which spec / colour groups the user has collapsed.
-   (Batch expansion already uses PROD_BATCH_EXPANDED.) */
-const PROD_SPEC_COLLAPSED  = new Set();
-const PROD_COLOR_COLLAPSED = new Set();
-const PROD_LINE_COLLAPSED = new Set();
-/* Inventory batch tree — collapse state (persists across re-renders) */
-const BATCH_MODEL_COLLAPSED = new Set();
-const BATCH_COLOR_COLLAPSED = new Set();
-const BATCH_LINE_COLLAPSED = new Set();
-/* Plan vs Execution tree — collapse state */
-const COMP_LINE_COLLAPSED  = new Set();
-const COMP_MODEL_COLLAPSED = new Set();
-const COMP_COLOR_COLLAPSED = new Set();
-
-function lineOfSequence(seq) {
-  if (!seq) return '—';
-  return PROD_LINE_MAP[seq.charAt(0).toUpperCase()] || '—';
-}
-
-function formatProdTime(s) {
-  if (!s) return '<span class="prod-empty">—</span>';
-  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
-  if (!m) return escapeHtml(s);
-  const [, y, mo, d, h, mi] = m;
-  return `<span title="${escapeHtml(s)}">${d}/${mo}/${y} ${h}:${mi}</span>`;
-}
-/* Merge "030 OFF LINE OK" and "025 DIVERTED".
-   Reads the first 10 characters of each value as YYYY-MM-DD and returns
-   the full original string of whichever date is earlier. If neither cell
-   contains a usable date, returns ''. */
-function mergeOffLineDates(offLineVal, divertedVal) {
-  const a = String(offLineVal || '').trim();
-  const b = String(divertedVal || '').trim();
-  const da = a.slice(0, 10);
-  const db = b.slice(0, 10);
-  const hasA = /^\d{4}-\d{2}-\d{2}$/.test(da);
-  const hasB = /^\d{4}-\d{2}-\d{2}$/.test(db);
-  if (!hasA && !hasB) return '';
-  if (!hasA) return b;
-  if (!hasB) return a;
-  /* YYYY-MM-DD sorts lexically, so a simple string compare works */
-  return da <= db ? a : b;
-}
-/* ---- Streaming CSV parser (chunked, yields to UI) ---- */
-async function parseProductionCSV(text, onProgress) {
-  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-  const len = text.length;
-  let i = 0, field = '', row = [], inQ = false;
-  let lastYield = performance.now();
-
-  /* -- 1. Parse header row -- */
-  const header = [];
-  let headerDone = false;
-  while (i < len && !headerDone) {
-    const c = text[i];
-    if (inQ) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
-        inQ = false;
-      } else field += c;
-    } else {
-      if (c === '"') inQ = true;
-      else if (c === ',') { header.push(field); field = ''; }
-      else if (c === '\n') { header.push(field); field = ''; headerDone = true; }
-      else if (c !== '\r') field += c;
-    }
-    i++;
-  }
-
-  /* -- 2. Map header names → column indices -- */
-  const headerLower = header.map(h => String(h).trim().toLowerCase());
-  const idx = {};
-  for (const [key, hints] of Object.entries(PROD_COL_HINTS)) {
-    let found = -1;
-    for (const h of hints) {
-      const p = headerLower.indexOf(h);
-      if (p >= 0) { found = p; break; }
-    }
-    if (found < 0) {
-      for (const h of hints) {
-        if (h.length < 5) continue;              // ← skip short hints on fallback
-        const p = headerLower.findIndex(x => x.includes(h));
-        if (p >= 0) { found = p; break; }
-      }
-    }
-    idx[key] = found;
-  }
-  if (idx.code < 0) throw new Error('Required column "code" not found in CSV header');
-
-  const maxIdx = Math.max(...Object.values(idx).filter(x => x >= 0));
-  const records = [];
-
-  /* -- 3. Parse data rows directly into lean objects -- */
-  field = ''; row = []; inQ = false;
-
-  const finalizeRow = () => {
-    row.push(field); field = '';
-    if (row.length > maxIdx) {
-      const code = String(row[idx.code] ?? '').trim();
-      if (code) {
-        const rec = { code };
-        for (const [key, ci] of Object.entries(idx)) {
-          if (key === 'code' || ci < 0) continue;
-          rec[key] = String(row[ci] ?? '').trim();
-        }
-
-        /* Off-line OK = earlier of 030 OFF LINE OK and 025 DIVERTED */
-        rec.offLine = mergeOffLineDates(rec.offLine, rec.diverted);
-        delete rec.diverted;
-
-        records.push(rec);
-      }
-    }
-    row = [];
-  };
-
-  while (i < len) {
-    const c = text[i];
-    if (inQ) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
-        inQ = false; i++; continue;
-      }
-      field += c; i++; continue;
-    }
-    if (c === '"') { inQ = true; i++; continue; }
-    if (c === ',') { row.push(field); field = ''; i++; continue; }
-    if (c === '\n') { finalizeRow(); i++; continue; }
-    if (c === '\r') { i++; continue; }
-    field += c; i++;
-
-    if (performance.now() - lastYield > 50) {
-      lastYield = performance.now();
-      onProgress && onProgress(i / len, records.length);
-      await yieldToUI();
-    }
-  }
-  if (field.length || row.length) finalizeRow();
-
-  return { records, header };
-}
-
-function computeProductionBatches(records) {
-  const map = new Map();
-  for (const r of records) {
-
-    /* Orphan VINs (no sales batch) are grouped by their own line + model +
-       colour so they can't be pooled with unrelated VINs from other lines,
-       models or colours into one synthetic "(no batch)" pile. */
-    const id = r.batch
-      ? r.batch
-      : `(no batch) · ${lineOfSequence(r.sequence)}`
-      + ` · ${r.description || '(no model)'}`
-      + ` · ${r.color       || '(no colour)'}`;
-
-    let b = map.get(id);
-    if (!b) { b = { id, vins: [], counts: {} }; map.set(id, b); }
-    b.vins.push(r);
-    for (const s of PROD_STAGES) {
-      if (r[s.key]) b.counts[s.key] = (b.counts[s.key] || 0) + 1;
-    }
-  }
-  return map;
-}
-/* ---- File ingestion ---- */
-async function handleProductionFiles(files) {
-  const f = files[0];
-  if (!f) return;
-
-  const wrap  = $('#prodProgressWrap');
-  const fill  = $('#prodProgressFill');
-  const label = $('#prodProgressLabel');
-  wrap.classList.remove('hidden');
-  fill.style.width = '0%';
-  label.textContent = `Reading ${f.name} (${fmt(f.size / 1048576)} MB)…`;
-  await yieldToUI();
-
-  try {
-    const text = await readFileAsText(f);
-    label.textContent = `Parsing ${fmt(text.length)} characters…`;
-    await yieldToUI();
-
-    const { records, header } = await parseProductionCSV(text, (p, n) => {
-      fill.style.width = (p * 100).toFixed(1) + '%';
-      label.textContent = `Parsing… ${(p * 100).toFixed(0)}% · ${fmt(n)} VINs extracted`;
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/[&<>"]/g, m => {
+        if (m === '&') return '&amp;';
+        if (m === '<') return '&lt;';
+        if (m === '>') return '&gt;';
+        if (m === '"') return '&quot;';
+        return m;
     });
-
-    if (!records.length) throw new Error('No valid VIN rows found');
-
-    /* --- Reset state --- */
-    STATE.production.records = records;
-    STATE.production.batches = computeProductionBatches(records);
-    STATE.production.header  = header;
-    STATE.production.loaded  = true;
-    STATE.production.vinView.page = 1;
-    STATE.production.batchView.search = '';
-    STATE.production.vinView.search = '';
-    STATE.production.vinView.stage = 'all';
-    STATE.production.periodStage        = '';   // ← ADD
-    STATE.production.pendingPeriodStage = '';   // ← ADD
-    $('#prodPeriodStage').value = '';           // ← ADD     
-    $('#prodBatchSearch').value = '';
-    $('#prodVinSearch').value = '';
-    $('#prodVinStage').value = 'all';
-
-     PROD_BATCH_EXPANDED.clear();
-     PROD_LINE_COLLAPSED.clear();     // ← add
-     PROD_SPEC_COLLAPSED.clear();
-     PROD_COLOR_COLLAPSED.clear();
-     COMP_LINE_COLLAPSED.clear();
-     COMP_MODEL_COLLAPSED.clear();
-     COMP_COLOR_COLLAPSED.clear();
-
-    /* --- Default monitoring period = entire file --- */
-    const { min, max } = getFileDateBounds();
-    STATE.production.period        = { from: min || '', to: max || '' };
-    STATE.production.pendingPeriod = { from: min || '', to: max || '' };
-    STATE.production.lines         = null;
-    STATE.production.pendingLines  = null;
-    STATE.production.models        = null;
-    STATE.production.pendingModels = null;
+}
+function generateNodeDiff(oldData, newData) {
+    const diff = {};
     
-     $('#prodPeriodFrom').value = min || '';
-    $('#prodPeriodTo').value   = max || '';
-
-    /* Highlight the "Full Range" button */
-    $$('.prod-period-btn').forEach(b =>
-      b.classList.toggle('primary', b.dataset.range === 'all'));
-
-    /* --- Render --- */
-    renderLineModelOptions();
-    fill.style.width = '100%';
-    label.textContent = `Done — ${fmt(records.length)} VINs · ${fmt(STATE.production.batches.size)} batches`;
-
-    renderAllProductionViews();
-    updateProductionPeriodHint();
-    updateApplyButtonState();
-
-    setTimeout(() => wrap.classList.add('hidden'), 3000);
-  } catch (e) {
-    console.error(e);
-    label.textContent = `Failed: ${e.message}`;
-    alert(`Failed to parse production file: ${e.message}`);
-  }
-}
-
-function clearProduction() {
-  if (!STATE.production.loaded) return;
-  if (!confirm('Clear all loaded production tracking data?')) return;
-
-  STATE.production = {
-    records: [], batches: new Map(), header: null, loaded: false,
-    period:        { from: '', to: '' },
-    pendingPeriod: { from: '', to: '' },
-    periodStage:        '',
-    pendingPeriodStage: '',     
-    lines:         null, pendingLines:  null,
-    models:        null, pendingModels: null,
-    batchView: { search: '', filter: 'all' },
-    vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
-  };
-  PROD_BATCH_EXPANDED.clear();
-  PROD_LINE_COLLAPSED.clear();
-  PROD_SPEC_COLLAPSED.clear();
-  PROD_COLOR_COLLAPSED.clear();
-
-  const fromEl = $('#prodPeriodFrom'); if (fromEl) fromEl.value = '';
-  const toEl   = $('#prodPeriodTo');   if (toEl)   toEl.value   = '';
-  $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
-  
-   const stageSel = $('#prodPeriodStage');
-  if (stageSel) stageSel.value = '';
-   
-  const applyBtn = $('#prodPeriodApply');
-  if (applyBtn) { applyBtn.disabled = true; applyBtn.classList.remove('pending'); }
-
-  const lineValues  = $('#prodLineValues');  if (lineValues)  lineValues.innerHTML = '';
-  const modelValues = $('#prodModelValues'); if (modelValues) modelValues.innerHTML = '';
-  syncMultiselectUI();
-
-  $('#prodProgressWrap').classList.add('hidden');
-  renderAllProductionViews();
-  updateProductionPeriodHint();
-  updateApplyButtonState();
-}
-/* =========================================================
-   MONITORING PERIOD
-   ========================================================= */
-function ymdLocal(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth()+1).padStart(2,'0');
-  const dd = String(d.getDate()).padStart(2,'0');
-  return `${y}-${m}-${dd}`;
-}
-
-/* Min/max date present in the loaded file across ALL stages. */
-function getFileDateBounds() {
-  let min = null, max = null;
-  for (const r of STATE.production.records) {
-    for (const s of PROD_STAGES) {
-      const t = r[s.key];
-      if (!t) continue;
-      const m = String(t).match(/^(\d{4}-\d{2}-\d{2})/);
-      if (!m) continue;
-      const d = m[1];
-      if (min === null || d < min) min = d;
-      if (max === null || d > max) max = d;
-    }
-  }
-  return { min, max };
-}
-
-/* Compute { from, to } for a named quick-range, using the system clock. */
-function getPeriodRange(kind) {
-  const t = new Date(); t.setHours(0,0,0,0);
-  switch (kind) {
-    case 'all': {
-      const { min, max } = getFileDateBounds();
-      return { from: min || '', to: max || '' };
-    }
-        case 'thisWeek': {
-      // Monday → Sunday of the current week
-      const day = t.getDay() || 7;                       // Sunday=7
-      const mon = new Date(t); mon.setDate(t.getDate() - (day - 1));
-      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
-      return { from: ymdLocal(mon), to: ymdLocal(sun) };
-    }
-    case 'thisMonth': {
-      const y = t.getFullYear(), m = t.getMonth();
-      const first = new Date(y, m, 1);
-      const last  = new Date(y, m + 1, 0);
-      return { from: ymdLocal(first), to: ymdLocal(last) };
-    }
-    case 'thisYear': {
-      const y = t.getFullYear();
-      return { from: `${y}-01-01`, to: `${y}-12-31` };
-    }    
-    case 'today': {
-      const s = ymdLocal(t);
-      return { from: s, to: s };
-    }
-    case 'yesterday': {
-      const y = new Date(t); y.setDate(y.getDate()-1);
-      const s = ymdLocal(y);
-      return { from: s, to: s };
-    }
-    case 'lastWeek': {
-      // Previous Monday → Sunday
-      const day = t.getDay() || 7;
-      const thisMon = new Date(t); thisMon.setDate(t.getDate() - (day - 1));
-      const lastMon = new Date(thisMon); lastMon.setDate(thisMon.getDate() - 7);
-      const lastSun = new Date(lastMon); lastSun.setDate(lastMon.getDate() + 6);
-      return { from: ymdLocal(lastMon), to: ymdLocal(lastSun) };
-    }
-    case 'lastMonth': {
-      const y  = t.getFullYear();
-      const m  = t.getMonth();
-      const pm = m === 0 ? 11 : m - 1;
-      const py = m === 0 ? y - 1 : y;
-      const first = new Date(py, pm, 1);
-      const last  = new Date(py, pm + 1, 0);
-      return { from: ymdLocal(first), to: ymdLocal(last) };
-    }
-    case 'lastYear': {
-      const y = t.getFullYear() - 1;
-      return { from: `${y}-01-01`, to: `${y}-12-31` };
-    }
-    default:
-      return { from: '', to: '' };
-  }
-}
-
-/* True if the given timestamp falls inside the current monitoring period. */
-function stageInPeriod(ts) {
-  const p = STATE.production.period || {};
-  const from = p.from || '', to = p.to || '';
-  if (!from && !to) return true;
-  if (!ts) return false;
-  const d = String(ts).slice(0, 10);
-  if (from && d < from) return false;
-  if (to   && d > to)   return false;
-  return true;
-}
-/* As-of semantics: does this timestamp fall on or before period.to?
-   Used for STAGE COUNTING (KPIs + batch columns).
-   VIN SELECTION still uses the range-based stageInPeriod().
-   - period.to set         → ts ≤ period.to
-   - period.to empty, from → fall back to range (ts ≥ from)
-   - both empty            → true */
-function stageReachedByPeriod(ts) {
-  if (!ts) return false;
-  const d = String(ts).slice(0, 10);
-  const p = STATE.production.period || {};
-  if (!p.to) {
-    if (!p.from) return true;
-    return d >= p.from;
-  }
-  return d <= p.to;
-}
-/* True if the record is inside the current monitoring period,
-   evaluated against the selected milestone (or any milestone if none chosen). */
-function recordInPeriod(rec) {
-  const p = STATE.production.period || {};
-  const stage = STATE.production.periodStage || '';
-
-  // No date range set → nothing to filter on
-  if (!p.from && !p.to) return true;
-
-  // Scoped to a specific milestone
-  if (stage) {
-    return !!(rec[stage] && stageInPeriod(rec[stage]));
-  }
-
-  // Any-milestone mode (current default)
-  for (const s of PROD_STAGES) {
-    if (rec[s.key] && stageInPeriod(rec[s.key])) return true;
-  }
-  return false;
-}
-
-function getFilteredProductionRecords() {
-  if (!STATE.production.loaded) return [];
-  const p = STATE.production.period || {};
-  const noPeriodFilter = !p.from && !p.to;
-  const noLineFilter   = !STATE.production.lines;
-  const noModelFilter  = !STATE.production.models;
-  if (noPeriodFilter && noLineFilter && noModelFilter) return STATE.production.records;
-  return STATE.production.records.filter(recordMatchesFilters);
-}
-/* ---- Pending-state staging ---- */
-function isProductionPeriodDirty() {
-  const a = STATE.production.period        || { from: '', to: '' };
-  const p = STATE.production.pendingPeriod || { from: '', to: '' };
-
-  const datesDirty = (a.from || '') !== (p.from || '') ||
-                     (a.to   || '') !== (p.to   || '');
-  const linesDirty  = !setsEqual(STATE.production.lines,  STATE.production.pendingLines);
-  const modelsDirty = !setsEqual(STATE.production.models, STATE.production.pendingModels);
-  const stageDirty  = (STATE.production.periodStage || '') !==
-                      (STATE.production.pendingPeriodStage || '');
-
-  return datesDirty || linesDirty || modelsDirty || stageDirty;
-}
-
-
-function updateApplyButtonState() {
-  const btn = $('#prodPeriodApply');
-  if (!btn) return;
-  if (!STATE.production.loaded) {
-    btn.disabled = true;
-    btn.classList.remove('pending');
-    return;
-  }
-  const dirty = isProductionPeriodDirty();
-  btn.disabled = !dirty;
-  btn.classList.toggle('pending', dirty);
-}
-
-/* Commit pending → applied, re-render once. */
-function applyProductionPeriod() {
-  if (!STATE.production.loaded) return;
-  STATE.production.period = { ...STATE.production.pendingPeriod };
-  STATE.production.lines  = STATE.production.pendingLines
-    ? new Set(STATE.production.pendingLines) : null;
-  STATE.production.models = STATE.production.pendingModels
-    ? new Set(STATE.production.pendingModels) : null;
-  STATE.production.periodStage = STATE.production.pendingPeriodStage || '';   // ← commit stage
-  renderAllProductionViews();
-  updateProductionPeriodHint();
-  updateApplyButtonState();
-}
-
-
-/* Set both applied + pending (used on file load / reset). */
-function setProductionPeriod(from, to, lines = null, models = null, stage = '') {
-  STATE.production.period        = { from: from || '', to: to || '' };
-  STATE.production.pendingPeriod = { from: from || '', to: to || '' };
-  STATE.production.lines         = lines  ? new Set(lines)  : null;
-  STATE.production.pendingLines  = lines  ? new Set(lines)  : null;
-  STATE.production.models        = models ? new Set(models) : null;
-  STATE.production.pendingModels = models ? new Set(models) : null;
-  STATE.production.periodStage        = stage || '';    // ← ADD
-  STATE.production.pendingPeriodStage = stage || '';    // ← ADD
-
-  const fromEl = $('#prodPeriodFrom');
-  const toEl   = $('#prodPeriodTo');
-  const stEl   = $('#prodPeriodStage');
-  if (fromEl) fromEl.value = from || '';
-  if (toEl)   toEl.value   = to   || '';
-  if (stEl)   stEl.value   = stage || '';
-
-  syncMultiselectUI();
-  renderAllProductionViews();
-  updateProductionPeriodHint();
-  updateApplyButtonState();
-}
-
-
-
-function renderAllProductionViews() {
-  renderProductionStats();
-  renderProductionBatchTable();
-  renderProductionVinTable();
-  renderProductionChart();
-}
-
-function updateProductionPeriodHint() {
-  const el = $('#prodPeriodHint');
-  if (!el) return;
-  if (!STATE.production.loaded) { el.textContent = ''; return; }
-
-  const total    = STATE.production.records.length;
-  const filtered = getFilteredProductionRecords().length;
-
-  const p = STATE.production.period || {};
-  let rangeStr = 'full data';
-  if (p.from || p.to) {
-    const fmtD = s => s ? s.split('-').reverse().join('/') : '…';
-    rangeStr = `${fmtD(p.from)} → ${fmtD(p.to)}`;
-  }
-
-  /* Milestone scope */
-  const stageKey = STATE.production.periodStage || '';
-  const stageStr = stageKey
-    ? (PROD_STAGES.find(s => s.key === stageKey)?.label || stageKey)
-    : 'any milestone';
-
-  const lineStr = !STATE.production.lines
-    ? 'all lines'
-    : STATE.production.lines.size === 0 ? 'no lines'
-    : `${STATE.production.lines.size} line${STATE.production.lines.size === 1 ? '' : 's'}`;
-
-  const modelStr = !STATE.production.models
-    ? 'all models'
-    : STATE.production.models.size === 0 ? 'no models'
-    : `${STATE.production.models.size} model${STATE.production.models.size === 1 ? '' : 's'}`;
-
-  const { min, max } = getFileDateBounds();
-  const fileRangeStr = (min && max)
-    ? ` · File range: <span style="color:var(--muted)">${min.split('-').reverse().join('/')} → ${max.split('-').reverse().join('/')}</span>`
-    : '';
-
-  let pendingStr = '';
-  if (isProductionPeriodDirty()) {
-    pendingStr = ` · <b style="color:#d97706">Pending changes — click Apply</b>`;
-  }
-
-  el.innerHTML =
-    `Period: <b>${rangeStr}</b> (on <b>${escapeHtml(stageStr)}</b>) · <b>${lineStr}</b> · <b>${modelStr}</b> · ` +
-    `Showing <b>${fmt(filtered)}</b> of ${fmt(total)} VINs${fileRangeStr}${pendingStr}`;
-}
-/* Rebuild the checkbox lists for Line and Model dropdowns. */
-function renderLineModelOptions() {
-  const lines  = getAvailableLines();
-  const models = getAvailableModels();
-
-  const linesEl  = $('#prodLineValues');
-  const modelsEl = $('#prodModelValues');
-
-  if (linesEl) {
-    linesEl.innerHTML = lines.map(l => `
-      <label class="prod-ms-value">
-        <input type="checkbox" data-kind="line" value="${escapeHtml(l)}" checked />
-        <span>${escapeHtml(l || '—')}</span>
-      </label>`).join('');
-  }
-  if (modelsEl) {
-    modelsEl.innerHTML = models.map(m => `
-      <label class="prod-ms-value" data-model-label="${escapeHtml(m.toLowerCase())}">
-        <input type="checkbox" data-kind="model" value="${escapeHtml(m)}" checked />
-        <span>${escapeHtml(m)}</span>
-      </label>`).join('');
-  }
-  syncMultiselectUI();
-}
-
-/* Reflect current *pending* sets on the checkboxes + button labels. */
-function syncMultiselectUI() {
-  const pl = STATE.production.pendingLines;
-  const pm = STATE.production.pendingModels;
-
-  // Lines
-  const lineChecks = $$('#prodLineValues input[type=checkbox]');
-  lineChecks.forEach(cb => {
-    cb.checked = !pl || pl.has(cb.value);
-  });
-  const lineLabel = $('#prodLineMS .prod-ms-label');
-  if (lineLabel) {
-    const avail = lineChecks.length;
-    const n = pl ? pl.size : avail;
-    lineLabel.textContent =
-      n === 0        ? 'No Lines'
-      : (!pl || n === avail) ? 'All Lines'
-      : n === 1      ? Array.from(pl)[0]
-      : `${n} Lines`;
-  }
-
-  // Models
-  const modelChecks = $$('#prodModelValues input[type=checkbox]');
-  modelChecks.forEach(cb => {
-    cb.checked = !pm || pm.has(cb.value);
-  });
-  const modelLabel = $('#prodModelMS .prod-ms-label');
-  if (modelLabel) {
-    const avail = modelChecks.length;
-    const n = pm ? pm.size : avail;
-    modelLabel.textContent =
-      n === 0        ? 'No Models'
-      : (!pm || n === avail) ? 'All Models'
-      : n === 1      ? Array.from(pm)[0]
-      : `${n} Models`;
-  }
-}
-/* =========================================================
-   RENDER — Overall KPIs
-   ========================================================= */
-function renderProductionStats() {
-  const wrap = $('#prodStats');
-  if (!STATE.production.loaded) {
-    wrap.innerHTML = '<div class="hint" style="margin:0">No production data loaded yet.</div>';
-    return;
-  }
-  const filtered = getFilteredProductionRecords();
-  const total    = filtered.length;
-
-  const batchSet = new Set();
-  for (const r of filtered) batchSet.add(r.batch || '(no batch)');
-
-  // Per-stage count = VINs whose stage timestamp falls inside the period
-  const counts = {};
-  for (const s of PROD_STAGES) {
-    let n = 0;
-    for (const r of filtered) if (stageReachedByPeriod(r[s.key])) n++;
-    counts[s.key] = n;
-  }
-  const complete = counts.compoundOut;
-
-  const kpis = [
-    { label: 'VINs in period', value: fmt(total),
-      sub: `${fmt(batchSet.size)} batches`, color: '#2563eb' },
-    { label: 'Complete', value: fmt(complete),
-      sub: `${total ? (complete / total * 100).toFixed(1) : 0}%`, color: '#059669' },
-    ...PROD_STAGES.map(s => {
-      const n = counts[s.key];
-      const pct = total ? (n / total * 100) : 0;
-      return { label: s.label, value: fmt(n), sub: `${pct.toFixed(1)}%`, color: s.color };
-    })
-  ];
-
-  wrap.innerHTML = kpis.map(k => `
-    <div class="kpi-compact" title="${escapeHtml(k.label)}">
-      <div class="kpi-bar" style="background:${k.color}"></div>
-      <div class="kpi-body">
-        <div class="kpi-label">${escapeHtml(k.label)}</div>
-        <div class="kpi-value">${k.value}<span class="kpi-sub">${k.sub}</span></div>
-      </div>
-    </div>`).join('');
-}
-function prodBatchExpandAll() {
-  PROD_LINE_COLLAPSED.clear();
-  PROD_SPEC_COLLAPSED.clear();
-  PROD_COLOR_COLLAPSED.clear();
-  if (STATE.production.loaded) renderProductionBatchTable();
-}
-
-function prodBatchCollapseAll() {
-  if (!STATE.production.loaded) return;
-  for (const b of STATE.production.batches.values()) {
-    const line  = dominantLine(b);
-    const model = dominantField(b.vins, 'description') || '(no model)';
-    const color = dominantField(b.vins, 'color')       || '(no colour)';
-    const ccode = dominantField(b.vins, 'colorCode')   || '';
-
-    PROD_LINE_COLLAPSED.add(line);
-    PROD_SPEC_COLLAPSED.add(line + '||' + model);
-    PROD_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + ccode);
-  }
-  renderProductionBatchTable();
-}
-/* ---- Capacity trend chart ---- */
-function bucketKeyFor(dateStr, granularity) {
-  const m = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!m) return null;
-  const [, y, mo, d] = m;
-  if (granularity === 'day')   return `${y}-${mo}-${d}`;
-  if (granularity === 'month') return `${y}-${mo}`;
-  if (granularity === 'week') {
-    const dt = new Date(Date.UTC(+y, +mo - 1, +d));
-    const day = dt.getUTCDay() || 7;
-    dt.setUTCDate(dt.getUTCDate() + 4 - day);
-    const yStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
-    const week = Math.ceil((((dt - yStart) / 86400000) + 1) / 7);
-    return `${dt.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
-  }
-  return null;
-}
-
-function shortBucketLabel(key, granularity) {
-  if (granularity === 'day')   return key.slice(5);        // MM-DD
-  if (granularity === 'month') return key;                 // YYYY-MM
-  return key.replace('-W', ' W');                          // YYYY Wnn
-}
-
-function niceCeil(n) {
-  if (n <= 10) return 10;
-  const mag = Math.pow(10, Math.floor(Math.log10(n)));
-  const r = n / mag;
-  const step = r <= 1 ? 1 : r <= 2 ? 2 : r <= 5 ? 5 : 10;
-  return step * mag;
-}
-
-function renderProductionChart() {
-  const canvas = $('#prodChart');
-  const empty  = $('#prodChartEmpty');
-  if (!canvas) return;
-
-  if (!STATE.production.loaded || !STATE.production.records.length) {
-    canvas.style.display = 'none';
-    empty.style.display = '';
-    empty.textContent = 'No data to plot.';
-    return;
-  }
-
-  const granularity = $('#prodChartGranularity').value;
-  const stageKey    = $('#prodChartStage').value;
-
-
-  const buckets = new Map();
-  for (const r of STATE.production.records) {
-    if (!recordMatchesLineModel(r)) continue;
-    if (!recordInPeriod(r)) continue;              // ← scope filter (line+stage+dates)
-    const t = r[stageKey];
-    if (!t) continue;
-    if (!stageInPeriod(t)) continue;               // ← keep: chart bar must fall in the date range
-    const key = bucketKeyFor(t, granularity);
-    if (!key) continue;
-    buckets.set(key, (buckets.get(key) || 0) + 1);
-  }
-
-  if (!buckets.size) {
-    canvas.style.display = 'none';
-    empty.style.display = '';
-    empty.textContent = 'No timestamps for this stage.';
-    return;
-  }
-
-  canvas.style.display = '';
-  empty.style.display = 'none';
-
-  const entries = Array.from(buckets.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-
-  const dpr  = window.devicePixelRatio || 1;
-  const cssW = Math.max(320, canvas.parentElement.clientWidth - 16);
-  const cssH = 180;
-  canvas.width  = cssW * dpr;
-  canvas.height = cssH * dpr;
-  canvas.style.width  = cssW + 'px';
-  canvas.style.height = cssH + 'px';
-
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, cssW, cssH);
-
-  const padLeft = 48, padRight = 14, padTop = 14, padBottom = 52;
-  const plotW = cssW - padLeft - padRight;
-  const plotH = cssH - padTop - padBottom;
-
-  const maxVal  = Math.max(...entries.map(e => e[1]));
-  const niceMax = niceCeil(maxVal);
-  const slot    = plotW / entries.length;
-  const gap     = entries.length > 60 ? 1 : entries.length > 30 ? 2 : 4;
-  const barW    = Math.max(1.5, slot - gap);
-
-  /* grid + y-axis labels */
-  ctx.strokeStyle = '#e5e7eb';
-  ctx.fillStyle = '#94a3b8';
-  ctx.font = '10px system-ui, sans-serif';
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  const gridN = 4;
-  for (let i = 0; i <= gridN; i++) {
-    const v = (niceMax / gridN) * i;
-    const y = padTop + plotH - (v / niceMax) * plotH;
-    ctx.beginPath();
-    ctx.moveTo(padLeft, y + 0.5);
-    ctx.lineTo(padLeft + plotW, y + 0.5);
-    ctx.stroke();
-    ctx.fillText(fmt(Math.round(v)), padLeft - 6, y);
-  }
-
-  /* bars */
-  entries.forEach(([, v], i) => {
-    const x = padLeft + i * slot + (slot - barW) / 2;
-    const h = (v / niceMax) * plotH;
-    const y = padTop + plotH - h;
-    const grad = ctx.createLinearGradient(0, y, 0, y + h);
-    grad.addColorStop(0, '#3b82f6');
-    grad.addColorStop(1, '#1d4ed8');
-    ctx.fillStyle = grad;
-    ctx.fillRect(x, y, barW, h);
-  });
-
-  /* x-axis labels (rotated, sparse) */
-  ctx.fillStyle = '#64748b';
-  const maxLabels = Math.min(entries.length, 14);
-  const labelEvery = Math.max(1, Math.ceil(entries.length / maxLabels));
-  entries.forEach(([k], i) => {
-    if (i % labelEvery !== 0 && i !== entries.length - 1) return;
-    const cx = padLeft + i * slot + slot / 2;
-    ctx.save();
-    ctx.translate(cx, padTop + plotH + 8);
-    ctx.rotate(-Math.PI / 4);
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(shortBucketLabel(k, granularity), 0, 0);
-    ctx.restore();
-  });
-
-  /* hover tooltip */
-  canvas.onmousemove = ev => {
-    const rect = canvas.getBoundingClientRect();
-    const mx = ev.clientX - rect.left;
-    const idx = Math.floor((mx - padLeft) / slot);
-    if (idx < 0 || idx >= entries.length) { canvas.title = ''; return; }
-    const [k, v] = entries[idx];
-    canvas.title = `${shortBucketLabel(k, granularity)} — ${fmt(v)} VINs`;
-  };
-  canvas.onmouseleave = () => { canvas.title = ''; };
-}
-/* =========================================================
-   RENDER — Batch summary
-   ========================================================= */
-function renderProductionBatchTable() {
-  const tree = $('#prodBatchTable');
-  if (!STATE.production.loaded) {
-    tree.innerHTML = '<div class="hint" style="margin:0">No production data loaded.</div>';
-    return;
-  }
-
-  const search = (STATE.production.batchView.search || '').toLowerCase().trim();
-  const filter = STATE.production.batchView.filter;
-
-  /* --- 1. Keep only batches with at least one VIN inside the period --- */
-  let batches = Array.from(STATE.production.batches.values())
-     .filter(b => b.vins.some(recordMatchesFilters));   // ← was recordInPeriod
-
-
-  /* --- 2. Enrich with period counts + dominant line/model/colour --- */
-  const enriched = [];
-  for (const b of batches) {
-    const periodVins = b.vins.filter(recordMatchesFilters);
-    if (!periodVins.length) continue;
-
-    /* Conflict flags — computed across the FULL batch, not just period VINs,
-       so a hidden inconsistency is never masked by the current filter. */
-    const colorConflict = hasFieldConflict(b.vins, 'color')
-                       || hasFieldConflict(b.vins, 'colorCode');
-    const lineConflict  = hasLineConflict(b);
-
-    enriched.push({
-      id:           b.id,
-      allVins:      b.vins,
-      periodVins,
-      periodCounts: batchCountsAsOfPeriod(periodVins),
-      fullCounts:   b.counts,
-      line:      dominantLine(b),
-      model:     dominantField(b.vins, 'description') || '(no model)',
-      color:     dominantField(b.vins, 'color')       || '(no colour)',
-      colorCode: dominantField(b.vins, 'colorCode')   || '',
-      colorConflict,
-      lineConflict
-    });
-  }
-  batches = enriched;
-
-  /* --- 3. Status filter (uses FULL-batch completion, not period) --- */
-  if (filter === 'completed')
-    batches = batches.filter(b => b.allVins.length > 0 &&
-                                 (b.fullCounts.compoundOut || 0) === b.allVins.length);
-  else if (filter === 'inProgress')
-    batches = batches.filter(b => (b.fullCounts.compoundOut || 0) < b.allVins.length);
-
-  /* --- 4. Text search --- */
-  if (search) {
-    batches = batches.filter(b => {
-      if (b.id.toLowerCase().includes(search)) return true;
-      return `${b.line} ${b.model} ${b.color}`.toLowerCase().includes(search);
-    });
-  }
-
-  if (!batches.length) {
-    tree.innerHTML = '<div class="hint" style="margin:16px 0 0">No batches match the current filters.</div>';
-    return;
-  }
-
-  /* --- 5. Group: line → model → colour → batches --- */
-  const lineMap = new Map();
-  for (const b of batches) {
-    if (!lineMap.has(b.line)) lineMap.set(b.line, new Map());
-    const specMap = lineMap.get(b.line);
-
-    if (!specMap.has(b.model)) specMap.set(b.model, new Map());
-    const colorMap = specMap.get(b.model);
-
-    const ckey = b.color + '||' + b.colorCode;
-    if (!colorMap.has(ckey)) colorMap.set(ckey, { color: b.color, colorCode: b.colorCode, batches: [] });
-    colorMap.get(ckey).batches.push(b);
-  }
-
-  const sortedLines = Array.from(lineMap.entries())
-    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-  /* --- 6. Render tree --- */
-  let html = '';
-  for (const [line, specMap] of sortedLines) {
-    const lineBatches   = Array.from(specMap.values()).flatMap(cm =>
-      Array.from(cm.values()).flatMap(cg => cg.batches));
-    const lineVinTotal  = lineBatches.reduce((s, b) => s + b.periodVins.length, 0);
-    const lineComplete  = lineBatches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
-    const lineBatchCnt  = lineBatches.length;
-    const lineModelCnt  = specMap.size;
-    const lineOpen      = !PROD_LINE_COLLAPSED.has(line);
-
-    html += `<details class="prod-line-group" data-line="${escapeHtml(line)}" ${lineOpen ? 'open' : ''}>
-      <summary class="prod-line-header">
-        <span class="line-name">${escapeHtml(line)}</span>
-        <span class="line-count">
-          ${lineModelCnt} model${lineModelCnt === 1 ? '' : 's'} ·
-          ${lineBatchCnt} batch${lineBatchCnt === 1 ? '' : 'es'} ·
-          ${fmt(lineVinTotal)} VINs ·
-          <b>${fmt(lineComplete)}</b> complete
-        </span>
-      </summary>
-      <div class="prod-spec-list">`;
-
-    const sortedSpecs = Array.from(specMap.entries())
-      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-    for (const [model, colorMap] of sortedSpecs) {
-      const allBatches   = Array.from(colorMap.values()).flatMap(c => c.batches);
-      const specVinTotal = allBatches.reduce((s, b) => s + b.periodVins.length, 0);
-      const specComplete = allBatches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
-      const specBatchCnt = allBatches.length;
-      const specColorCnt = colorMap.size;
-      const specOpen     = !PROD_SPEC_COLLAPSED.has(line + '||' + model);
-
-      html += `<details class="prod-spec-group" data-line="${escapeHtml(line)}" data-spec="${escapeHtml(model)}" ${specOpen ? 'open' : ''}>
-        <summary class="prod-spec-header">
-          <span class="spec-name">${escapeHtml(model)}</span>
-          <span class="spec-count">
-            ${specBatchCnt} batch${specBatchCnt === 1 ? '' : 'es'} ·
-            ${specColorCnt} colour${specColorCnt === 1 ? '' : 's'} ·
-            ${fmt(specVinTotal)} VINs ·
-            <b>${fmt(specComplete)}</b> complete
-          </span>
-        </summary>
-        <div class="prod-color-list">`;
-
-      const sortedColors = Array.from(colorMap.entries())
-        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-      for (const [ckey, cg] of sortedColors) {
-        const colorVinTotal = cg.batches.reduce((s, b) => s + b.periodVins.length, 0);
-        const colorComplete = cg.batches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
-        const colorOpen     = !PROD_COLOR_COLLAPSED.has(line + '||' + model + '||' + ckey);
-
-        html += `<details class="prod-color-group" data-line="${escapeHtml(line)}" data-spec="${escapeHtml(model)}" data-color="${escapeHtml(ckey)}" ${colorOpen ? 'open' : ''}>
-          <summary class="prod-color-header">
-            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
-            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
-            <span class="color-count">
-              ${cg.batches.length} batch${cg.batches.length === 1 ? '' : 'es'} ·
-              ${fmt(colorVinTotal)} VINs ·
-              <b>${fmt(colorComplete)}</b> complete
-            </span>
-          </summary>
-          <div class="prod-batch-list">
-            <table class="prod-batch-inner-table">
-              <thead>
-                <tr>
-                  <th style="width:32px"></th>
-                  <th>Batch</th>
-                  <th class="num">VINs</th>
-                  ${PROD_STAGES.map(s => `<th class="num" title="${s.label} — VINs that reached this stage as of period end">${s.short}</th>`).join('')}
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>`;
-
-        const sortedBatches = cg.batches.slice()
-          .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
-
-        for (const b of sortedBatches) {
-          const allTotal    = b.allVins.length;
-          const periodTotal = b.periodVins.length;
-          const isOpen      = PROD_BATCH_EXPANDED.has(b.id);
-
-          const vinsCell = (periodTotal === allTotal)
-            ? `${periodTotal}`
-            : `${periodTotal}<small style="color:var(--muted)">/${allTotal}</small>`;
-
-          const stageCells = PROD_STAGES.map(s => {
-            const n   = b.periodCounts[s.key] || 0;
-            const pct = periodTotal ? Math.round(n / periodTotal * 100) : 0;
-            const cls = pct === 100 ? 'ok' : pct > 0 ? 'partial' : 'empty';
-            return `<td class="num"><span class="prod-pct ${cls}">${n}/${periodTotal}</span><small style="color:var(--muted);margin-left:4px">${pct}%</small></td>`;
-          }).join('');
-
-          let status;
-          if ((b.fullCounts.compoundOut || 0) === allTotal && allTotal > 0)
-            status = '<span class="pill ok">COMPLETE</span>';
-          else if ((b.fullCounts.compoundIn || 0) === allTotal && allTotal > 0)
-            status = '<span class="pill" style="background:#dbeafe;color:#1e40af">IN COMPOUND</span>';
-          else
-            status = '<span class="pill warn">IN PROGRESS</span>';
-
-          const rowWarn = (b.colorConflict || b.lineConflict) ? ' row-warning' : '';
-          const warnTitle = [
-            b.colorConflict ? 'Colour mismatch across VINs in this batch.' : '',
-            b.lineConflict  ? 'Production-line mismatch across VINs in this batch.' : ''
-          ].filter(Boolean).join(' ');
-
-          html += `<tr class="prod-batch-row ${isOpen ? 'row-open' : ''}${rowWarn}"
-                       data-batch="${escapeHtml(b.id)}"
-                       ${warnTitle ? `title="${escapeHtml(warnTitle)}"` : ''}>
-            <td class="prod-batch-toggle-cell">
-              <button class="btn tiny prod-batch-toggle" data-batch="${escapeHtml(b.id)}"
-                      title="${isOpen ? 'Hide VIN details' : 'Show VIN details'}">
-                ${isOpen ? '▾' : '▸'}
-              </button>
-            </td>
-            <td><b class="mono">${escapeHtml(b.id)}</b></td>
-            <td class="num">${vinsCell}</td>
-            ${stageCells}
-            <td>${status}</td>
-          </tr>`;
-
-          if (isOpen) {
-            const vins = b.periodVins.slice().sort((x, y) => {
-              const c = String(x.sequence || '').localeCompare(String(y.sequence || ''), undefined, { numeric: true });
-              return c || displayVin(x).localeCompare(displayVin(y));
+    // ============================================================
+    // NEW: Compare Master Data (root-level properties)
+    // ============================================================
+    const masterKeys = ['departments', 'sysNameList', 'sysStatusList', 'sysRespList', 'businessStatuses', 'importanceList', 'urgencyList'];
+    const masterDiff = {};
+    
+    for (const key of masterKeys) {
+        const oldVal = oldData[key] || [];
+        const newVal = newData[key] || [];
+        
+        // Compare arrays
+        if (Array.isArray(oldVal) && Array.isArray(newVal)) {
+            const oldSet = new Set(oldVal.map(item => JSON.stringify(item)));
+            const newSet = new Set(newVal.map(item => JSON.stringify(item)));
+            
+            const added = [];
+            const removed = [];
+            
+            // Find added items
+            newVal.forEach(item => {
+                const stringified = JSON.stringify(item);
+                if (!oldSet.has(stringified)) {
+                    added.push(item);
+                }
             });
+            
+            // Find removed items
+            oldVal.forEach(item => {
+                const stringified = JSON.stringify(item);
+                if (!newSet.has(stringified)) {
+                    removed.push(item);
+                }
+            });
+            
+            if (added.length > 0 || removed.length > 0) {
+                masterDiff[key] = {};
+                if (added.length > 0) masterDiff[key]._added = added;
+                if (removed.length > 0) masterDiff[key]._removed = removed;
+            }
+        } else if (typeof oldVal === 'object' && typeof newVal === 'object') {
+            // For objects, compare as JSON
+            if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+                masterDiff[key] = { _updated: newVal };
+            }
+        } else {
+            // For primitive values
+            if (oldVal !== newVal) {
+                masterDiff[key] = { _updated: newVal };
+            }
+        }
+    }
+    
+    if (Object.keys(masterDiff).length > 0) {
+        diff._master = masterDiff;
+        console.log('📊 Master data changes detected:', Object.keys(masterDiff));
+    }
+    
+    // ============================================================
+    // YOUR EXISTING LOGIC BELOW (UNCHANGED)
+    // ============================================================
+    const oldMap = {};
+    (oldData.scenarios || []).forEach(s => { oldMap[s.id] = s; });
 
-            const colspan = 4 + PROD_STAGES.length;
+    // Check for DELETED scenarios (in old but not in new)
+    const newIds = new Set((newData.scenarios || []).map(s => s.id));
+    for (const oldId in oldMap) {
+        if (!newIds.has(oldId)) {
+            diff[oldId] = { _deleted: true };
+            console.log(`Scenario ${oldId} was deleted`);
+        }
+    }
 
-            html += `<tr class="prod-batch-detail-row">
-              <td colspan="${colspan}">
-                <div class="prod-batch-detail">
-                  <div class="prod-batch-detail-title">
-                    VINs in <b>${escapeHtml(b.id)}</b> — ${vins.length} vehicle${vins.length === 1 ? '' : 's'} in period
-                  </div>
-                  <div class="table-wrap prod-batch-detail-scroll">
-                    <table class="prod-batch-detail-table">
-                      <thead>
-                        <tr>
-                          <th>Seq</th>
-                          <th>VIN</th>
-                          <th>Line</th>
-                          <th>Colour</th>
-                          ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
-                          <th>Timeline</th>
-                        </tr>
-                      </thead>
-                      <tbody>`;
+    // Process new scenarios (added or updated)
+    (newData.scenarios || []).forEach(newSc => {
+        const oldSc = oldMap[newSc.id];
+        if (!oldSc) {
+            // New scenario – send full data
+            diff[newSc.id] = { _full: true, data: newSc };
+            return;
+        }
 
-            for (const r of vins) {
-              const lineOf = lineOfSequence(r.sequence);
-              const dots = PROD_STAGES.map(s =>
-                r[s.key]
-                  ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
-                  : `<span class="prod-dot empty" title="${s.label}: —"></span>`
-              ).join('');
-              html += `<tr>
-                <td class="mono">${escapeHtml(r.sequence || '—')}</td>
-                <td class="mono">${escapeHtml(displayVin(r))}</td>
-                <td>${escapeHtml(lineOf)}</td>
-                <td>${escapeHtml(r.color || '—')}</td>
-                ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
-                <td><div class="prod-timeline">${dots}</div></td>
-              </tr>`;
+        const scenarioDiff = {};
+
+        // ============================================================
+        // Compare scenario-level properties (name, etc.)
+        // ============================================================
+        const scenarioChanges = {};
+        
+        // Log the values for debugging
+        console.log(`Comparing scenario "${newSc.id}": old name="${oldSc.name}", new name="${newSc.name}"`);
+        
+        if (newSc.name !== oldSc.name) {
+            scenarioChanges.name = newSc.name;
+            console.log(`✅ Scenario ${newSc.id} name changed: "${oldSc.name}" → "${newSc.name}"`);
+        }
+        
+        // Add other scenario-level properties if needed (e.g., description, etc.)
+        // if (newSc.description !== oldSc.description) scenarioChanges.description = newSc.description;
+
+        if (Object.keys(scenarioChanges).length > 0) {
+            scenarioDiff._scenario = scenarioChanges;
+            console.log(`Added scenario changes for ${newSc.id}:`, scenarioChanges);
+        }
+
+        // ----- Compare processes -----
+        const oldProcesses = oldSc.processes || [];
+        const newProcesses = newSc.processes || [];
+
+        const oldProcMap = {};
+        oldProcesses.forEach(p => { if (p.id) oldProcMap[p.id] = p; });
+
+        const newProcMap = {};
+        newProcesses.forEach(p => { if (p.id) newProcMap[p.id] = p; });
+
+        const procChanges = {};
+        for (const id in newProcMap) {
+            const oldProc = oldProcMap[id];
+            const newProc = newProcMap[id];
+            if (!oldProc) {
+                procChanges[id] = { _added: true, proc: newProc };
+                continue;
+            }
+            if (JSON.stringify(oldProc) !== JSON.stringify(newProc)) {
+                procChanges[id] = { _updated: true, proc: newProc };
+            }
+        }
+        for (const id in oldProcMap) {
+            if (!newProcMap[id]) {
+                procChanges[id] = { _deleted: true };
+            }
+        }
+        if (Object.keys(procChanges).length > 0) {
+            scenarioDiff.processes = procChanges;
+        }
+
+        // ----- Compare workflow nodes -----
+        const newNodes = newSc.workflow?.nodes || [];
+        const oldNodes = oldSc.workflow?.nodes || [];
+
+        const oldNodeMap = {};
+        oldNodes.forEach(n => { if (n.id) oldNodeMap[n.id] = n; });
+
+        const newNodeMap = {};
+        newNodes.forEach(n => { if (n.id) newNodeMap[n.id] = n; });
+
+        const nodeChanges = {};
+        for (const id in newNodeMap) {
+            const oldNode = oldNodeMap[id];
+            const newNode = newNodeMap[id];
+            if (!oldNode) {
+                nodeChanges[id] = { _added: true, node: newNode };
+                continue;
+            }
+            const changes = {};
+            if (newNode.x !== oldNode.x) changes.x = newNode.x;
+            if (newNode.y !== oldNode.y) changes.y = newNode.y;
+            if (newNode.hidden !== oldNode.hidden) changes.hidden = newNode.hidden;
+            if (newNode.type !== oldNode.type) changes.type = newNode.type;
+            if (newNode.label !== oldNode.label) changes.label = newNode.label;
+            if (newNode.processId !== oldNode.processId) changes.processId = newNode.processId;
+
+            if (Object.keys(changes).length > 0) {
+                nodeChanges[id] = changes;
+            }
+        }
+        for (const id in oldNodeMap) {
+            if (!newNodeMap[id]) {
+                nodeChanges[id] = { _deleted: true };
+            }
+        }
+        if (Object.keys(nodeChanges).length > 0) {
+            scenarioDiff.nodes = nodeChanges;
+        }
+
+        // ----- Compare workflow connections -----
+        const newConnections = newSc.workflow?.connections || [];
+        const oldConnections = oldSc.workflow?.connections || [];
+
+        const oldConnMap = {};
+        oldConnections.forEach(c => { if (c.id) oldConnMap[c.id] = c; });
+
+        const newConnMap = {};
+        newConnections.forEach(c => { if (c.id) newConnMap[c.id] = c; });
+
+        const connChanges = {};
+        for (const id in newConnMap) {
+            const oldConn = oldConnMap[id];
+            const newConn = newConnMap[id];
+            if (!oldConn) {
+                connChanges[id] = { _added: true, conn: newConn };
+                continue;
+            }
+            const changes = {};
+            if (newConn.from !== oldConn.from) changes.from = newConn.from;
+            if (newConn.to !== oldConn.to) changes.to = newConn.to;
+            if (newConn.type !== oldConn.type) changes.type = newConn.type;
+            if (newConn.label !== oldConn.label) changes.label = newConn.label;
+            if (Object.keys(changes).length > 0) {
+                connChanges[id] = changes;
+            }
+        }
+        for (const id in oldConnMap) {
+            if (!newConnMap[id]) {
+                connChanges[id] = { _deleted: true };
+            }
+        }
+        if (Object.keys(connChanges).length > 0) {
+            scenarioDiff.connections = connChanges;
+        }
+
+        if (Object.keys(scenarioDiff).length > 0) {
+            diff[newSc.id] = scenarioDiff;
+            console.log(`✅ Diff created for scenario ${newSc.id} with changes:`, Object.keys(scenarioDiff));
+        } else {
+            console.log(`ℹ️ No changes detected for scenario ${newSc.id}`);
+        }
+    });
+
+    console.log('📊 Final diff:', JSON.stringify(diff, null, 2));
+    return diff;
+}
+function ensureUniqueNodeIds(workflow) {
+    if (!workflow || !workflow.nodes) return;
+    let counter = 0;
+    for (let node of workflow.nodes) {
+        // Generate a new unique ID based on the existing nodeIdCounter
+        // or simply use a sequential ID.
+        node.id = 'node-' + (workflow.nodeIdCounter || 0) + '-' + (counter++);
+    }
+    // Update the workflow's counter
+    if (workflow.nodes.length > 0) {
+        workflow.nodeIdCounter = (workflow.nodeIdCounter || 0) + workflow.nodes.length;
+    }
+}
+function enforceSimpleNodeIds(workflow) {
+    if (!workflow || !workflow.nodes || !Array.isArray(workflow.nodes)) return;
+    const nodes = workflow.nodes;
+    const connections = workflow.connections || [];
+
+    // Check if any ID already contains a dash or is not of the form 'node-X'
+    let needsRenumber = false;
+    for (const n of nodes) {
+        if (!n.id || !/^node-\d+$/.test(n.id)) {
+            needsRenumber = true;
+            break;
+        }
+    }
+    if (!needsRenumber) return; // already simple
+
+    // Renumber all nodes
+    const idMap = {};
+    const newNodes = [];
+    let counter = 0;
+    nodes.forEach(n => {
+        const oldId = n.id;
+        const newId = 'node-' + counter++;
+        idMap[oldId] = newId;
+        n.id = newId;
+        newNodes.push(n);
+    });
+
+    // Update connections
+    const validIds = new Set(newNodes.map(n => n.id));
+    const newConnections = connections
+        .map(c => {
+            const from = idMap[c.from] || c.from;
+            const to = idMap[c.to] || c.to;
+            return { ...c, from, to };
+        })
+        .filter(c => validIds.has(c.from) && validIds.has(c.to));
+
+    workflow.nodes = newNodes;
+    workflow.connections = newConnections;
+    // Update counter to the max
+    workflow.nodeIdCounter = counter;
+}
+
+function compareSeq(a, b) {
+    const strA = String(a || '0');
+    const strB = String(b || '0');
+    let pa = strA.split('.');
+    let pb = strB.split('.');
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        let na = i < pa.length ? parseInt(pa[i]) : 0;
+        let nb = i < pb.length ? parseInt(pb[i]) : 0;
+        if (isNaN(na)) na = 0;
+        if (isNaN(nb)) nb = 0;
+        if (na !== nb) return na - nb;
+    }
+    return 0;
+}
+
+function sortProcesses(procs) {
+    if (!procs || !Array.isArray(procs)) {
+        console.warn('⚠️ sortProcesses: input is not an array, returning empty array');
+        return [];
+    }
+    const validProcs = procs.filter(p => p && typeof p === 'object' && p.seq !== undefined);
+    return [...validProcs].sort((a, b) => {
+        const seqA = a.seq || '0';
+        const seqB = b.seq || '0';
+        return compareSeq(String(seqA), String(seqB));
+    });
+}
+
+function isSeqUnique(scenario, seq, excludeId) {
+    return !scenario.processes.some(p => p.seq === seq && p.id !== excludeId);
+}
+
+// ============================
+// 4. Data Normalization
+// ============================
+
+function normalizeData(data) {
+    console.log('📊 normalizeData called');
+
+    if (!data || typeof data !== 'object') {
+        console.warn('⚠️ normalizeData: data is not an object, creating default');
+        return getDefaultData();
+    }
+
+    if (!data.scenarios || !Array.isArray(data.scenarios)) {
+        console.warn('⚠️ normalizeData: scenarios is not an array, creating default');
+        data.scenarios = [{
+            id: 'default',
+            name: 'Manufacturing',
+            processes: []
+        }];
+        data.currentScenarioId = 'default';
+    }
+
+    for (let sc of data.scenarios) {
+        if (!sc || typeof sc !== 'object') {
+            console.warn('⚠️ Skipping invalid scenario:', sc);
+            continue;
+        }
+
+        if (!sc.processes || !Array.isArray(sc.processes)) {
+            console.warn('⚠️ Scenario missing processes array, creating empty:', sc.id || 'unknown');
+            sc.processes = [];
+        }
+
+        for (let p of sc.processes) {
+            if (!p || typeof p !== 'object') {
+                console.warn('⚠️ Skipping invalid process:', p);
+                continue;
             }
 
-            html += `</tbody></table></div></div></td></tr>`;
-          }
+            if (!p.raci || typeof p.raci !== 'object') {
+                p.raci = { r: [], a: [], c: [], i: [] };
+            }
+
+            if (typeof p.raci.r === 'string') {
+                p.raci.r = p.raci.r.split(',').filter(s => s && s.trim());
+            }
+            if (typeof p.raci.a === 'string') {
+                p.raci.a = p.raci.a.split(',').filter(s => s && s.trim());
+            }
+            if (typeof p.raci.c === 'string') {
+                p.raci.c = p.raci.c.split(',').filter(s => s && s.trim());
+            }
+            if (typeof p.raci.i === 'string') {
+                p.raci.i = p.raci.i.split(',').filter(s => s && s.trim());
+            }
+
+            if (!Array.isArray(p.raci.r)) p.raci.r = [];
+            if (!Array.isArray(p.raci.a)) p.raci.a = [];
+            if (!Array.isArray(p.raci.c)) p.raci.c = [];
+            if (!Array.isArray(p.raci.i)) p.raci.i = [];
+
+            if (!p.system || typeof p.system !== 'object') {
+                p.system = { name: '', status: '', responsible: '' };
+            }
+
+            if (!p.businessDoc) p.businessDoc = '';
+            if (!p.userManual) p.userManual = '';
+            if (!p.notes) p.notes = '';
+            if (!p.id) p.id = genId();
+
+            if (p.seq !== undefined && p.seq !== null) {
+                p.seq = String(p.seq);
+            } else {
+                p.seq = '0';
+            }
         }
 
-        html += `</tbody></table></div></details>`;
-      }
+        sc.processes = sortProcesses(sc.processes);
 
-      html += `</div></details>`;
-    }
-
-    html += `</div></details>`;
-  }
-
-  tree.innerHTML = html;
-
-  /* --- 7. Wire up interactions --- */
-
-  tree.querySelectorAll('.prod-batch-toggle').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      const id = btn.dataset.batch;
-      if (PROD_BATCH_EXPANDED.has(id)) PROD_BATCH_EXPANDED.delete(id);
-      else                             PROD_BATCH_EXPANDED.add(id);
-      renderProductionBatchTable();
-    });
-  });
-
-  tree.querySelectorAll('.prod-batch-row').forEach(row => {
-    row.addEventListener('click', e => {
-      if (e.target.closest('button')) return;
-      const id = row.dataset.batch;
-      if (PROD_BATCH_EXPANDED.has(id)) PROD_BATCH_EXPANDED.delete(id);
-      else                             PROD_BATCH_EXPANDED.add(id);
-      renderProductionBatchTable();
-    });
-  });
-
-  tree.querySelectorAll('details.prod-line-group').forEach(d => {
-    d.addEventListener('toggle', () => {
-      const key = d.dataset.line;
-      if (d.open) PROD_LINE_COLLAPSED.delete(key);
-      else        PROD_LINE_COLLAPSED.add(key);
-    });
-  });
-
-  tree.querySelectorAll('details.prod-spec-group').forEach(d => {
-    d.addEventListener('toggle', () => {
-      const key = d.dataset.line + '||' + d.dataset.spec;
-      if (d.open) PROD_SPEC_COLLAPSED.delete(key);
-      else        PROD_SPEC_COLLAPSED.add(key);
-    });
-  });
-
-  tree.querySelectorAll('details.prod-color-group').forEach(d => {
-    d.addEventListener('toggle', () => {
-      const key = d.dataset.line + '||' + d.dataset.spec + '||' + d.dataset.color;
-      if (d.open) PROD_COLOR_COLLAPSED.delete(key);
-      else        PROD_COLOR_COLLAPSED.add(key);
-    });
-  });
-}
-/* =========================================================
-   RENDER — VIN detail (paginated)
-   ========================================================= */
-function getFilteredProductionVins() {
-  const v = STATE.production.vinView;
-  const search = (v.search || '').toLowerCase();
-  let rows = getFilteredProductionRecords();      // ← was STATE.production.records
-
-  if (search) {
-    rows = rows.filter(r =>
-      `${r.code} ${r.batch} ${r.sequence} ${r.description} ${r.color} ${r.materialCode}`
-        .toLowerCase().includes(search));
-  }
-  switch (v.stage) {
-    case 'complete':       rows = rows.filter(r => r.compoundOut); break;
-    case 'notDev':         rows = rows.filter(r => !r.devanning); break;
-    case 'notTrim':        rows = rows.filter(r => !r.trimIn); break;
-    case 'notOff':         rows = rows.filter(r => !r.offLine); break;
-    case 'notBuyOff':      rows = rows.filter(r => !r.buyOff); break;
-    case 'notCompoundIn':  rows = rows.filter(r => !r.compoundIn); break;
-    case 'notCompoundOut': rows = rows.filter(r => !r.compoundOut); break;
-  }
-  return rows;
-}
-
-function renderProductionVinTable() {
-  const tbl = $('#prodVinTable');
-  const pg  = $('#prodVinPagination');
-  if (!STATE.production.loaded) {
-    tbl.innerHTML = `<thead><tr><th>No production data loaded</th></tr></thead>`;
-    pg.innerHTML = '';
-    $('#prodVinCount').textContent = '';
-    return;
-  }
-  const v = STATE.production.vinView;
-
-  const filtered = getFilteredProductionVins().slice().sort((a, b) => {
-    const c = (a.batch || '').localeCompare(b.batch || '', undefined, { numeric: true });
-    return c || (a.code || '').localeCompare(b.code || '');
-  });
-
-  const total = filtered.length;
-  const totalPages = Math.max(1, Math.ceil(total / v.pageSize));
-  if (v.page > totalPages) v.page = totalPages;
-  const start = (v.page - 1) * v.pageSize;
-  const pageRows = filtered.slice(start, start + v.pageSize);
-
-  $('#prodVinCount').innerHTML =
-    `<b>${fmt(total)}</b> VIN${total === 1 ? '' : 's'} match · showing ${fmt(start + 1)}–${fmt(Math.min(start + v.pageSize, total))}`;
-
-  const head = `
-    <thead><tr>
-      <th>VIN</th>
-      <th>Seq</th>
-      <th>Line</th>
-      <th>Batch</th>
-      <th>Model / Color</th>
-      ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
-      <th>Timeline</th>
-    </tr></thead>`;
-
-  const body = pageRows.map(r => {
-    const line = lineOfSequence(r.sequence);
-    const timeline = PROD_STAGES.map(s =>
-      r[s.key]
-        ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
-        : `<span class="prod-dot empty" title="${s.label}: —"></span>`
-    ).join('');
-    return `<tr>
-      <td class="mono">${escapeHtml(displayVin(r))}</td>
-      <td class="mono">${escapeHtml(r.sequence || '—')}</td>
-      <td>${escapeHtml(line)}</td>
-      <td class="mono">${escapeHtml(r.batch || '—')}</td>
-      <td>${escapeHtml(r.description || '')}${r.color ? ` — <span style="color:var(--muted)">${escapeHtml(r.color)}</span>` : ''}</td>
-      ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
-      <td><div class="prod-timeline">${timeline}</div></td>
-    </tr>`;
-  }).join('');
-
-  tbl.innerHTML = head + `<tbody>${
-    body || `<tr><td colspan="${6 + PROD_STAGES.length}" style="text-align:center;color:#6b7280;padding:16px">No VINs match the current filters</td></tr>`
-  }</tbody>`;
-
-  renderPagination(pg, v.page, totalPages, p => {
-    v.page = p;
-    renderProductionVinTable();
-    tbl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  });
-}
-
-function renderPagination(container, page, total, onChange) {
-  if (total <= 1) { container.innerHTML = ''; return; }
-  const btns = [];
-  const win = 5;
-  let start = Math.max(1, page - 2);
-  let end = Math.min(total, start + win - 1);
-  if (end - start < win - 1) start = Math.max(1, end - win + 1);
-
-  btns.push(`<button class="btn tiny" data-p="${page - 1}" ${page <= 1 ? 'disabled' : ''}>‹ Prev</button>`);
-  if (start > 1) {
-    btns.push(`<button class="btn tiny" data-p="1">1</button>`);
-    if (start > 2) btns.push(`<span class="pg-dots">…</span>`);
-  }
-  for (let i = start; i <= end; i++) {
-    btns.push(`<button class="btn tiny ${i === page ? 'primary' : ''}" data-p="${i}">${i}</button>`);
-  }
-  if (end < total) {
-    if (end < total - 1) btns.push(`<span class="pg-dots">…</span>`);
-    btns.push(`<button class="btn tiny" data-p="${total}">${total}</button>`);
-  }
-  btns.push(`<button class="btn tiny" data-p="${page + 1}" ${page >= total ? 'disabled' : ''}>Next ›</button>`);
-
-  container.innerHTML = btns.join('');
-  container.querySelectorAll('button[data-p]').forEach(b => {
-    b.addEventListener('click', () => {
-      const p = parseInt(b.dataset.p, 10);
-      if (p >= 1 && p <= total && p !== page) onChange(p);
-    });
-  });
-}
-
-/* =========================================================
-   EXPORTS
-   ========================================================= */
-function exportProductionBatches() {
-  if (!STATE.production.loaded) return;
-  const aoa = [['Batch', 'VINs', ...PROD_STAGES.map(s => s.label), 'Status']];
-  const batches = Array.from(STATE.production.batches.values())
-    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
-  for (const b of batches) {
-    const total = b.vins.length;
-    const row = [b.id, total];
-    for (const s of PROD_STAGES) row.push(b.counts[s.key] || 0);
-    row.push((b.counts.compoundOut || 0) === total && total > 0 ? 'COMPLETE' : 'IN PROGRESS');
-    aoa.push(row);
-  }
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Batch Progress');
-  downloadWorkbook(wb, `Production_Batches_${dateStamp()}.xlsx`);
-}
-
-function exportProductionVins() {
-  if (!STATE.production.loaded) return;
-  const rows = getFilteredProductionVins();
-  const aoa = [[
-    'VIN', 'Sequence', 'Line', 'Batch', 'Description', 'Color', 'Material Code',
-    ...PROD_STAGES.map(s => s.label)
-  ]];
-  for (const r of rows) {
-    aoa.push([
-      displayVin(r), r.sequence, lineOfSequence(r.sequence), r.batch,
-      r.description, r.color, r.materialCode,
-      ...PROD_STAGES.map(s => r[s.key] || '')
-    ]);
-  }
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'VIN Tracking');
-  downloadWorkbook(wb, `Production_VINs_${dateStamp()}.xlsx`);
-}
-/* Count of period-selected VINs that had reached each stage as of period.to.
-   Numerator and denominator share the same scope (periodVins), so percentages
-   are always 0–100%. */
-function batchCountsAsOfPeriod(periodVins) {
-  const counts = {};
-  for (const s of PROD_STAGES) counts[s.key] = 0;
-  if (!periodVins || !periodVins.length) return counts;
-  for (const r of periodVins) {
-    for (const s of PROD_STAGES) {
-      if (stageReachedByPeriod(r[s.key])) counts[s.key]++;
-    }
-  }
-  return counts;
-}
-/* =========================================================
-   XML EXPORT — one file per VIN in the current VIN detail list
-   ========================================================= */
-let _exportFolderHandle = null;
-let _lastXmlErrors = [];
-
-/* XML-safe text */
-function escapeXml(s) {
-  if (s == null) return '';
-  return String(s).replace(/[<>&'"]/g, c => ({
-    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'
-  })[c]);
-}
-
-/* 'YYYY-MM-DD…' → 'YYYYMMDD' */
-function toYmdCompact(dateStr) {
-  if (!dateStr) return '';
-  const m = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!m) return '';
-  return `${m[1]}${m[2]}${m[3]}`;
-}
-
-/* Strip characters that are illegal in most filesystems */
-function sanitizeFileName(name) {
-  return String(name || '')
-    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 180);
-}
-
-function populateBatchLineFilter() {
-  const sel = $('#batchLineFilter');
-  if (!sel) return;
-  const lines = new Set();
-  for (const b of STATE.batches) lines.add(b._line || '(no line)');
-  const sorted = Array.from(lines).sort();
-  const current = sel.value;
-  sel.innerHTML =
-    `<option value="">All lines (${STATE.batches.length} batches)</option>` +
-    sorted.map(l => {
-      const n = STATE.batches.filter(b => (b._line || '(no line)') === l).length;
-      return `<option value="${escapeHtml(l)}">${escapeHtml(l)} — ${n} batch${n === 1 ? '' : 'es'}</option>`;
-    }).join('');
-  sel.value = sorted.includes(current) ? current : '';
-}
-
-/* Build the XML string for one VIN, one <InventoryLine> per BOM part. */
-function buildXMLForVin(rec, bom) {
-  const zone         = lineOfSequence(rec.sequence);
-  const deliveryNote = `${rec.sequence}-${displayVin(rec)}`;
-  const order        = rec.batch || '';
-  const stockDate    = toYmdCompact(rec.offLine);
-
-  const lines = bom.parts.map(p => `    <InventoryLine>
-        <Type>CONSUME</Type>
-        <Zone>${escapeXml(zone)}</Zone>
-        <Warehouse>EBR</Warehouse>
-        <COResponsible>WH</COResponsible>
-        <COInventoryReason>JC</COInventoryReason>
-        <DeliveryNote>${escapeXml(deliveryNote)}</DeliveryNote>
-        <CONotes>NOTES</CONotes>
-        <Part>${escapeXml(p.partNo)}</Part>
-        <StockAV>${Number(p.qty) || 0}</StockAV>
-        <Order>${escapeXml(order)}</Order>
-        <StockDate>${stockDate}</StockDate>
-    </InventoryLine>`).join('\n');
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Inventory>
-${lines}
-</Inventory>
-`;
-}
-
-/* Folder picker (File System Access API, write mode) */
-async function pickExportFolder() {
-  if (typeof window.showDirectoryPicker !== 'function') {
-    alert('XML folder export requires Chrome or Edge (File System Access API).');
-    return;
-  }
-  try {
-    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });                      
-    _exportFolderHandle = handle;
-    await saveFileHandle('exportFolder', handle);
-    renderAllFileChips(); renderStoredFilesTab();
-    $('#exportFolderPath').value = '/' + handle.name + '/';
-  } catch (e) {
-    if (e.name === 'AbortError') return;
-    console.error(e);
-    alert('Failed to select folder: ' + e.message);
-  }
-}
-
-async function exportProductionXml() {
-  /* ---- Pre-flight checks ---- */
-  if (!STATE.production.loaded) {
-    alert('Load production tracking data first.');
-    return;
-  }
-  if (!STATE.boms.length) {
-    alert('Please load BOM data first.');
-    return;
-  }
-  const vins = getFilteredProductionVins();
-  if (!vins.length) {
-    alert('No VINs match the current filters.');
-    return;
-  }
-
-  /* ---- Ensure a folder is selected + writable ---- */
-  if (!_exportFolderHandle) {
-    await pickExportFolder();
-    if (!_exportFolderHandle) return;
-  }
-  try {
-    let perm = await _exportFolderHandle.queryPermission({ mode: 'readwrite' });
-    if (perm !== 'granted') {
-      perm = await _exportFolderHandle.requestPermission({ mode: 'readwrite' });
-    }
-    if (perm !== 'granted') {
-      alert('Write permission to the folder was not granted.');
-      return;
-    }
-  } catch (e) {
-    console.error(e);
-    alert('Could not verify folder permission: ' + e.message);
-    return;
-  }
-
-  /* ---- Reset UI ---- */
-  const wrap   = $('#xmlProgressWrap');
-  const fill   = $('#xmlProgressFill');
-  const label  = $('#xmlProgressLabel');
-  const errBox = $('#xmlErrorLog');
-
-  wrap.classList.remove('hidden');
-  errBox.classList.add('hidden');
-  errBox.innerHTML = '';
-  fill.style.width = '0%';
-  label.textContent = `Preparing 0 / ${vins.length}…`;
-
-  _lastXmlErrors = [];
-
-  /* ---- Live error-log helpers (nested — closure over errBox) ---- */
-  const ensureErrorPanel = () => {
-    if (errBox.dataset.built === '1') return;
-    errBox.dataset.built = '1';
-    errBox.classList.remove('hidden');
-    errBox.innerHTML = `
-      <div class="xml-err-title">
-        <span id="xmlErrCount">⚠ 0 errors</span>
-        <span class="xml-err-actions">
-          <button type="button" id="xmlErrExport" title="Export errors to Excel">⤓ Export Errors</button>
-          <button type="button" id="xmlErrClose" title="Dismiss">✕</button>
-        </span>
-      </div>
-      <div class="xml-err-rows" id="xmlErrRows">
-        <div class="xml-err-row xml-err-header">
-          <span>VIN</span><span>Batch</span><span>Reason</span>
-        </div>
-      </div>`;
-    $('#xmlErrExport').addEventListener('click', exportXmlErrors);
-    $('#xmlErrClose').addEventListener('click', () => {
-      errBox.classList.add('hidden');
-      errBox.innerHTML = '';
-      errBox.dataset.built = '';
-    });
-  };
-
-  const appendErrorRow = (er) => {
-    ensureErrorPanel();
-    const rows = $('#xmlErrRows');
-    const row = document.createElement('div');
-    row.className = 'xml-err-row';
-    row.innerHTML = `
-      <span class="xml-err-vin">${escapeHtml(er.vin)}</span>
-      <span class="xml-err-batch">${escapeHtml(er.batch)}</span>
-      <span>${escapeHtml(er.reason)}</span>`;
-    rows.appendChild(row);
-    const countEl = $('#xmlErrCount');
-    if (countEl) {
-      const n = _lastXmlErrors.length;
-      countEl.textContent = `⚠ ${n} error${n === 1 ? '' : 's'}`;
-    }
-  };
-
-  /* ---- Process every VIN ---- */
-  let successCount = 0;
-  const total = vins.length;
-
-  for (let i = 0; i < total; i++) {
-    const rec = vins[i];
-
-    /* --- Sequence + VIN required --- */
-    const seq = String(rec.sequence || '').trim();
-    const vin = displayVin(rec);
-    if (!seq || !vin) {
-      const missing = [];
-      if (!seq) missing.push('Sequence');
-      if (!vin) missing.push('VIN');
-      const er = {
-        vin:   vin || '(missing)',
-        batch: rec.batch || '—',
-        reason: `Missing ${missing.join(' and ')} field(s)`
-      };
-      _lastXmlErrors.push(er);
-      appendErrorRow(er);
-      await yieldToUI();
-      continue;
-    }
-
-    /* --- BOM lookup by batch --- */
-    const matches = STATE.boms.filter(b => b.batchId === rec.batch);
-    if (matches.length === 0) {
-      const er = {
-        vin, batch: rec.batch || '—',
-        reason: `No BOM loaded for sales batch ${rec.batch || '—'}`
-      };
-      _lastXmlErrors.push(er);
-      appendErrorRow(er);
-      await yieldToUI();
-      continue;
-    }
-    if (matches.length > 1) {
-      const er = {
-        vin, batch: rec.batch || '—',
-        reason: 'Multi BOM detected for the Batch, please check'
-      };
-      _lastXmlErrors.push(er);
-      appendErrorRow(er);
-      await yieldToUI();
-      continue;
-    }
-    const bom = matches[0];
-    if (!bom.parts || !bom.parts.length) {
-      const er = { vin, batch: rec.batch || '—', reason: 'BOM has no parts' };
-      _lastXmlErrors.push(er);
-      appendErrorRow(er);
-      await yieldToUI();
-      continue;
-    }
-
-    /* --- Build XML + write --- */
-    const xmlStr   = buildXMLForVin(rec, bom);
-    const fileName = sanitizeFileName(`${seq}-${vin}`) + '.xml';
-
-    try {
-      const fh = await _exportFolderHandle.getFileHandle(fileName, { create: true });
-      const w  = await fh.createWritable();
-      await w.write(xmlStr);
-      await w.close();
-      successCount++;
-    } catch (e) {
-      console.error(e);
-      const er = {
-        vin, batch: rec.batch || '—',
-        reason: `Write failed: ${e.message || e}`
-      };
-      _lastXmlErrors.push(er);
-      appendErrorRow(er);
-      await yieldToUI();
-    }
-
-    /* --- Throttled progress update --- */
-    if (i % 5 === 0 || i === total - 1) {
-      fill.style.width = (((i + 1) / total) * 100).toFixed(1) + '%';
-      label.textContent = `Exporting ${i + 1} / ${total} — ${fileName}`;
-      await yieldToUI();
-    }
-  }
-
-  /* ---- Wrap-up ---- */
-  fill.style.width = '100%';
-  label.textContent =
-    `Done — ${successCount} processed correctly, ${_lastXmlErrors.length} with error${_lastXmlErrors.length === 1 ? '' : 's'}.`;
-
-  alert(
-    `XML export complete.\n` +
-    `${successCount} processed correctly, ${_lastXmlErrors.length} ended with error.\n` +
-    (_lastXmlErrors.length ? 'Please check the error log for details.' : '')
-  );
-
-  setTimeout(() => wrap.classList.add('hidden'), 3000);
-}
-
-function exportXmlErrors() {
-  if (!_lastXmlErrors || !_lastXmlErrors.length) {
-    alert('No errors to export.');
-    return;
-  }
-  const aoa = [['#', 'VIN', 'Batch', 'Reason']];
-  _lastXmlErrors.forEach((er, i) => {
-    aoa.push([i + 1, er.vin, er.batch, er.reason]);
-  });
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'XML Export Errors');
-  downloadWorkbook(wb, `XML_Export_Errors_${dateStamp()}.xlsx`);
-}
-/* =========================================================
-   BIND — Production tab UI
-   ========================================================= */
-function bindProduction() {
-  const dz    = $('#prodDrop');
-  const input = $('#prodInput');
-  if (!dz || !input) return;
-
-  /* --- File input --- */
-  input.addEventListener('change', e => {
-    handleProductionFiles(Array.from(e.target.files || []));
-    e.target.value = '';
-  });
-  ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => {
-    e.preventDefault(); dz.classList.add('drag');
-  }));
-  ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => {
-    e.preventDefault(); dz.classList.remove('drag');
-  }));
-  dz.addEventListener('drop', e => {
-    handleProductionFiles(Array.from(e.dataTransfer.files || []));
-  });
-
-  /* --- Batch summary controls --- */
-  $('#prodBatchSearch').addEventListener('input', e => {
-    STATE.production.batchView.search = e.target.value;
-    renderProductionBatchTable();
-  });
-  $('#prodBatchFilter').addEventListener('change', e => {
-    STATE.production.batchView.filter = e.target.value;
-    renderProductionBatchTable();
-  });
-  $('#prodBatchExpandAll').addEventListener('click', prodBatchExpandAll);
-  $('#prodBatchCollapseAll').addEventListener('click', prodBatchCollapseAll);
-
-  /* --- VIN detail controls --- */
-  $('#prodVinSearch').addEventListener('input', e => {
-    STATE.production.vinView.search = e.target.value;
-    STATE.production.vinView.page = 1;
-    renderProductionVinTable();
-  });
-  $('#prodVinStage').addEventListener('change', e => {
-    STATE.production.vinView.stage = e.target.value;
-    STATE.production.vinView.page = 1;
-    renderProductionVinTable();
-  });
-
-  /* --- Exports --- */
-  $('#prodBatchExport').addEventListener('click', exportProductionBatches);
-  $('#prodVinExport').addEventListener('click', exportProductionVins);
-  /* --- XML Export --- */
-  $('#exportFolderPick').addEventListener('click', pickExportFolder);
-  $('#prodXmlExport').addEventListener('click', exportProductionXml);
-  /* --- Capacity chart selectors --- */
-  $('#prodChartGranularity').addEventListener('change', renderProductionChart);
-  $('#prodChartStage').addEventListener('change',       renderProductionChart);
-
-  /* --- Monitoring period: quick-range buttons (stage only) --- ;*/
-  const periodCtrl = $('#prodPeriodControls');
-  if (periodCtrl) {
-    periodCtrl.addEventListener('click', e => {
-      const btn = e.target.closest('button[data-range]');
-      if (!btn || !periodCtrl.contains(btn)) return;
-
-      const { from, to } = getPeriodRange(btn.dataset.range);
-
-      const fromEl = $('#prodPeriodFrom');
-      const toEl   = $('#prodPeriodTo');
-      if (fromEl) fromEl.value = from || '';
-      if (toEl)   toEl.value   = to   || '';
-      STATE.production.pendingPeriod = { from: from || '', to: to || '' };
-
-      periodCtrl.querySelectorAll('button[data-range]').forEach(b =>
-        b.classList.remove('primary'));
-      btn.classList.add('primary');
-
-      updateApplyButtonState();
-    });
-  }
-
-  /* --- Manual date edits: stage only --- */
-  const stageFromInputs = () => {
-    const fromEl = $('#prodPeriodFrom');
-    const toEl   = $('#prodPeriodTo');
-    STATE.production.pendingPeriod = {
-      from: fromEl ? (fromEl.value || '') : '',
-      to:   toEl   ? (toEl.value   || '') : ''
-    };
-    $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
-    updateApplyButtonState();
-  };
-  $('#prodPeriodFrom').addEventListener('change', stageFromInputs);
-  $('#prodPeriodTo').addEventListener('change', stageFromInputs);
-   
-  /* --- Milestone scope for the period (stage only) --- */
-  $('#prodPeriodStage').addEventListener('change', e => {
-    STATE.production.pendingPeriodStage = e.target.value || '';
-    updateApplyButtonState();
-  });
-  /* --- Line / Model multi-select dropdowns --- */
-  const closeAllMS = () => {
-    $$('.prod-ms-panel').forEach(p => p.classList.add('hidden'));
-  };
-  ['#prodLineMS', '#prodModelMS'].forEach(sel => {
-    const root = $(sel);
-    if (!root) return;
-    const btn   = root.querySelector('.prod-ms-btn');
-    const panel = root.querySelector('.prod-ms-panel');
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      const wasHidden = panel.classList.contains('hidden');
-      closeAllMS();
-      if (wasHidden) panel.classList.remove('hidden');
-    });
-    panel.addEventListener('click', e => e.stopPropagation());
-  });
-  document.addEventListener('click', closeAllMS);
-
-  /* Checkbox changes → update pending sets, no re-render */
-  const onChangeMS = () => {
-    const lineChecks  = $$('#prodLineValues input[type=checkbox]');
-    const modelChecks = $$('#prodModelValues input[type=checkbox]');
-
-    const selectedLines  = lineChecks.filter(c => c.checked).map(c => c.value);
-    const selectedModels = modelChecks.filter(c => c.checked).map(c => c.value);
-
-    STATE.production.pendingLines  = selectedLines.length  === lineChecks.length  ? null : new Set(selectedLines);
-    STATE.production.pendingModels = selectedModels.length === modelChecks.length ? null : new Set(selectedModels);
-
-    syncMultiselectUI();
-    updateApplyButtonState();
-  };
-  $('#prodLineValues')?.addEventListener('change', e => {
-    if (e.target.matches('input[type=checkbox]')) onChangeMS();
-  });
-  $('#prodModelValues')?.addEventListener('change', e => {
-    if (e.target.matches('input[type=checkbox]')) onChangeMS();
-  });
-
-  /* All / None quick buttons inside each panel */
-  $$('.prod-ms-header').forEach(header => {
-    header.addEventListener('click', e => {
-      const btn = e.target.closest('button[data-act]');
-      if (!btn) return;
-      e.stopPropagation();
-      const root = header.closest('.prod-ms');
-      const checks = root.querySelectorAll('input[type=checkbox]');
-      const setAll = btn.dataset.act === 'all';
-      checks.forEach(cb => { cb.checked = setAll; });
-      onChangeMS();
-    });
-  });
-
-  /* Model search input */
-  const modelSearch = $('#prodModelMS .prod-ms-search input');
-  if (modelSearch) {
-    modelSearch.addEventListener('input', e => {
-      const q = e.target.value.toLowerCase();
-      $$('#prodModelValues .prod-ms-value').forEach(lbl => {
-        const hay = lbl.dataset.modelLabel || '';
-        lbl.style.display = hay.includes(q) ? '' : 'none';
-      });
-    });
-  }
-
-  /* --- Apply button: commit all pending filters --- */
-  $('#prodPeriodApply').addEventListener('click', () => {
-    applyProductionPeriod();
-    closeAllMS();
-  });
-
-  /* --- Clear button --- */
-  $('#prodClear').addEventListener('click', clearProduction);
-
-  /* --- Redraw chart on resize --- */
-  window.addEventListener('resize', () => {
-    if (STATE.production.loaded) renderProductionChart();
-  });
-}
-/* =========================================================
-   PLAN vs EXECUTION — Comparison
-   ========================================================= */
-
-/* Earliest ISO timestamp for a milestone across a list of VIN records. */
-function earliestMilestone(vins, key) {
-  let min = null;
-  if (!vins || !vins.length) return null;
-  for (const r of vins) {
-    const t = r[key];
-    if (!t) continue;
-    if (min === null || t < min) min = t;
-  }
-  return min;
-}
-
-/* Best-effort date parsing for both Date objects and ISO strings. */
-function toDateAny(v) {
-  if (!v) return null;
-  const d = (v instanceof Date) ? v : new Date(v);
-  return isNaN(d) ? null : d;
-}
-
-/* Build the comparison rows once; reused by render + export. */
-function buildComparisonRows() {
-  const invMap = new Map();
-  for (const b of STATE.batches) invMap.set(b.batch, b);
-
-  const prodMap = new Map();
-  for (const [id, pb] of STATE.production.batches) {
-    if (!id || id.startsWith('(no batch)')) continue;      // skip orphan VINs
-    prodMap.set(id, pb);
-  }
-
-  const ids = new Set([...invMap.keys(), ...prodMap.keys()]);
-  const rows = [];
-
-  for (const id of ids) {
-    const inv  = invMap.get(id);
-    const prod = prodMap.get(id);
-
-    /* ---- Plan (Inventory & Stock) ---- */
-    const planQty        = inv ? (inv.qty || 0) : 0;
-    const planModel      = inv?.model       || '';
-    const planColor      = inv?.color       || '';
-    const planColorCode  = inv?.colorCode   || '';
-    const planLine       = inv?._line       || '';
-    const planStage      = inv?._stage      || '';
-    const planTrimIn     = inv?.trimIn      || null;
-    const planArrival    = inv?.arrival     || null;
-    const planDecanting  = inv?.decanting   || null;
-
-    /* ---- Execution (Production Monitoring) ---- */
-    const actualVins   = prod ? prod.vins.length : 0;
-    const actualModel  = prod ? dominantField(prod.vins, 'description') : '';
-    const actualColor     = prod ? dominantField(prod.vins, 'color')     : '';
-    const actualColorCode = prod ? dominantField(prod.vins, 'colorCode') : '';
-    const actualLine   = prod ? dominantLine(prod) : '';
-
-    const actualDev      = prod ? earliestMilestone(prod.vins, 'devanning')   : null;
-    const actualTrim     = prod ? earliestMilestone(prod.vins, 'trimIn')      : null;
-    const actualOff      = prod ? earliestMilestone(prod.vins, 'offLine')     : null;
-    const actualBuyOff   = prod ? earliestMilestone(prod.vins, 'buyOff')      : null;
-    const actualCin      = prod ? earliestMilestone(prod.vins, 'compoundIn')  : null;
-    const actualCot      = prod ? earliestMilestone(prod.vins, 'compoundOut') : null;
-
-    const actualComplete = prod ? (prod.counts.compoundOut || 0) : 0;
-    const progressPct    = actualVins ? Math.round(actualComplete / actualVins * 100) : 0;
-
-    /* ---- Variance computations ---- */
-    const qtyVariance   = actualVins - planQty;
-
-    let trimDeltaDays = null;
-    const pTrim = toDateAny(planTrimIn);
-    const aTrim = toDateAny(actualTrim);
-    if (pTrim && aTrim) {
-      const ms = aTrim.getTime() - pTrim.getTime();
-      trimDeltaDays = Math.round(ms / 86400000);
-    }
-
-    /* ---- Status ---- */
-    let status, statusKey;
-    if (inv && prod) {
-      if (qtyVariance === 0) { status = 'MATCHED'; statusKey = 'matched'; }
-      else                   { status = 'QTY VARIANCE'; statusKey = 'variance'; }
-    } else if (inv) {
-      status = 'PLAN ONLY'; statusKey = 'planOnly';
-    } else {
-      status = 'EXEC ONLY'; statusKey = 'execOnly';
-    }
-
-    rows.push({
-      id, inv, prod,
-      planQty, planModel, planColor, planColorCode, planLine, planStage,
-      planTrimIn, planArrival, planDecanting,
-      actualVins, actualModel, actualColor, actualColorCode, actualLine,
-      actualDev, actualTrim, actualOff, actualBuyOff, actualCin, actualCot,
-      progressPct, qtyVariance, trimDeltaDays,
-      status, statusKey
-    });
-  }
-
-  return rows;
-}
-
-/* Recompute the summary cards. */
-function renderCompStats(rows) {
-  const el = $('#compStats');
-  if (!el) return;
-
-  if (!STATE.batches.length && !STATE.production.batches.size) {
-    el.innerHTML = '<div class="hint" style="margin:0">Load a batch/shipment file and a production tracking file to see the comparison.</div>';
-    return;
-  }
-
-  const planBatches  = rows.filter(r => r.inv).length;
-  const execBatches  = rows.filter(r => r.prod).length;
-  const matched      = rows.filter(r => r.statusKey === 'matched').length;
-  const variance     = rows.filter(r => r.statusKey === 'variance').length;
-  const planOnly     = rows.filter(r => r.statusKey === 'planOnly').length;
-  const execOnly     = rows.filter(r => r.statusKey === 'execOnly').length;
-  const totalPlan    = rows.reduce((s, r) => s + r.planQty, 0);
-  const totalActual  = rows.reduce((s, r) => s + r.actualVins, 0);
-  const totalDelta   = totalActual - totalPlan;
-
-  const deltaClass = totalDelta === 0 ? 'comp-delta-ok'
-                   : totalDelta > 0   ? 'comp-delta-pos'
-                   : 'comp-delta-neg';
-
-  el.innerHTML = `
-    <div class="stat">
-      <div class="label">Batches in plan</div>
-      <div class="value">${fmt(planBatches)}</div>
-      <div class="sub"><b>${fmt(totalPlan)}</b> vehicles planned</div>
-    </div>
-    <div class="stat">
-      <div class="label">Batches in execution</div>
-      <div class="value">${fmt(execBatches)}</div>
-      <div class="sub"><b>${fmt(totalActual)}</b> VINs tracked</div>
-    </div>
-    <div class="stat">
-      <div class="label">Volume delta</div>
-      <div class="value ${deltaClass}">${totalDelta >= 0 ? '+' : ''}${fmt(totalDelta)}</div>
-      <div class="sub">exec − plan</div>
-    </div>
-    <div class="stat">
-      <div class="label">Matched</div>
-      <div class="value" style="color:var(--ok)">${fmt(matched)}</div>
-      <div class="sub">plan = execution</div>
-    </div>
-    <div class="stat">
-      <div class="label">Qty variance</div>
-      <div class="value" style="color:${variance ? 'var(--warn)' : 'inherit'}">${fmt(variance)}</div>
-      <div class="sub">plan ≠ execution</div>
-    </div>
-    <div class="stat">
-      <div class="label">Plan only</div>
-      <div class="value" style="color:${planOnly ? '#1e40af' : 'inherit'}">${fmt(planOnly)}</div>
-      <div class="sub">no production yet</div>
-    </div>
-    <div class="stat">
-      <div class="label">Exec only</div>
-      <div class="value" style="color:${execOnly ? '#6b21a8' : 'inherit'}">${fmt(execOnly)}</div>
-      <div class="sub">no plan on file</div>
-    </div>
-  `;
-}
-function refreshComparisonIfVisible() {
-  const panel = document.getElementById('panel-comparison');
-  if (panel && panel.classList.contains('active')) renderComparison();
-}
-/* Main renderer. */
-function renderComparison() {
-  const tree = $('#compTable');
-  if (!tree) return;
-
-  const rows = buildComparisonRows();
-  renderCompStats(rows);
-
-  if (!rows.length) {
-    tree.innerHTML = '<div class="hint" style="margin:0">Load a batch/shipment file and a production tracking file to see the comparison.</div>';
-    return;
-  }
-
-  const search       = ($('#compSearch')?.value || '').trim().toLowerCase();
-  const statusFilter = $('#compStatus')?.value || 'all';
-
-  /* --- Filter --- */
-  let filtered = rows;
-  if (statusFilter === 'matched')          filtered = filtered.filter(r => r.statusKey === 'matched');
-  else if (statusFilter === 'qtyVariance') filtered = filtered.filter(r => r.statusKey === 'variance');
-  else if (statusFilter === 'planOnly')    filtered = filtered.filter(r => r.statusKey === 'planOnly');
-  else if (statusFilter === 'execOnly')    filtered = filtered.filter(r => r.statusKey === 'execOnly');
-  else if (statusFilter === 'issues')      filtered = filtered.filter(r => r.statusKey !== 'matched');
-
-  if (search) {
-    filtered = filtered.filter(r =>
-      `${r.id} ${r.planModel} ${r.planColor} ${r.planLine} ${r.actualModel} ${r.actualColor} ${r.actualLine}`
-        .toLowerCase().includes(search));
-  }
-
-  if (!filtered.length) {
-    tree.innerHTML = '<div class="hint" style="margin:8px 0 0">No batches match the current filters.</div>';
-    return;
-  }
-
-  /* --- Grouping keys: prefer Plan, fall back to Execution --- */
-  const lineOf  = r => r.planLine  || r.actualLine  || '(no line)';
-  const modelOf = r => r.planModel || r.actualModel || '(no model)';
-  const colorOf = r => r.planColor || r.actualColor || '(no colour)';
-  const codeOf  = r => r.planColorCode || r.actualColorCode || '';
-
-  /* --- Build Line → Model → Colour → rows --- */
-  const lineMap = new Map();
-  for (const r of filtered) {
-    const line = lineOf(r);
-    const model = modelOf(r);
-    const ckey = colorOf(r) + '||' + codeOf(r);
-
-    if (!lineMap.has(line)) lineMap.set(line, new Map());
-    const modelMap = lineMap.get(line);
-
-    if (!modelMap.has(model)) modelMap.set(model, new Map());
-    const colorMap = modelMap.get(model);
-
-    if (!colorMap.has(ckey)) {
-      colorMap.set(ckey, { color: colorOf(r), colorCode: codeOf(r), rows: [] });
-    }
-    colorMap.get(ckey).rows.push(r);
-  }
-
-  const sortedLines = Array.from(lineMap.entries())
-    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-  /* --- Columns inside each colour group (line/model/colour promoted) --- */
-  const innerCols = [
-    { id: 'batch',     label: 'Batch',          align: '' },
-    { id: 'status',    label: 'Status',         align: '' },
-    { id: 'planQty',   label: 'Plan Qty',       align: 'num' },
-    { id: 'actualVins',label: 'Actual VINs',    align: 'num' },
-    { id: 'delta',     label: 'Δ',              align: 'num' },
-    { id: 'progress',  label: 'Progress',       align: 'num' },
-    { id: 'planStage', label: 'Plan Stage',     align: '' },
-    { id: 'planTrim',  label: 'Plan Trim-in',   align: '' },
-    { id: 'actualTrim',label: 'Actual Trim-in', align: '' },
-    { id: 'trimDelta', label: 'Trim Δ (d)',     align: 'num' }
-  ];
-
-  /* --- Render --- */
-  let html = '';
-  for (const [line, modelMap] of sortedLines) {
-    const lineRows = [];
-    for (const cm of modelMap.values())
-      for (const cg of cm.values())
-        lineRows.push(...cg.rows);
-
-    const lineQty    = lineRows.reduce((s, r) => s + r.planQty, 0);
-    const lineActual = lineRows.reduce((s, r) => s + r.actualVins, 0);
-    const lineDelta  = lineActual - lineQty;
-    const lineOpen   = !COMP_LINE_COLLAPSED.has(line);
-
-    /* Line-level conflict: any batch in this line whose plan line ≠ exec line */
-    const lineHasConflict = lineRows.some(r =>
-      r.planLine && r.actualLine && r.planLine !== r.actualLine);
-
-    html += `<details class="prod-line-group batch-line-group"
-                     data-line="${escapeHtml(line)}"
-                     ${lineOpen ? 'open' : ''}>
-      <summary class="prod-line-header">
-        <span class="line-name">${escapeHtml(line)}${lineHasConflict ? ' ⚠' : ''}</span>
-        <span class="line-count">
-          ${modelMap.size} model${modelMap.size === 1 ? '' : 's'} ·
-          ${lineRows.length} batch${lineRows.length === 1 ? '' : 'es'} ·
-          <b>${fmt(lineQty)}</b> planned ·
-          <b>${fmt(lineActual)}</b> actual ·
-          <span class="${lineDelta === 0 ? 'comp-delta-ok' : lineDelta > 0 ? 'comp-delta-pos' : 'comp-delta-neg'}">
-            ${lineDelta >= 0 ? '+' : ''}${fmt(lineDelta)} Δ
-          </span>
-        </span>
-      </summary>
-      <div class="prod-spec-list">`;
-
-    const sortedModelEntries = Array.from(modelMap.entries())
-      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-    for (const [model, colorMap] of sortedModelEntries) {
-      const modelRows = [];
-      for (const cg of colorMap.values()) modelRows.push(...cg.rows);
-
-      const modelQty    = modelRows.reduce((s, r) => s + r.planQty, 0);
-      const modelActual = modelRows.reduce((s, r) => s + r.actualVins, 0);
-      const modelDelta  = modelActual - modelQty;
-      const modelKey    = line + '||' + model;
-      const modelOpen   = !COMP_MODEL_COLLAPSED.has(modelKey);
-
-      html += `<details class="prod-spec-group batch-model-group"
-                       data-line="${escapeHtml(line)}"
-                       data-model="${escapeHtml(model)}"
-                       ${modelOpen ? 'open' : ''}>
-        <summary class="prod-spec-header">
-          <span class="spec-name">${escapeHtml(model)}</span>
-          <span class="spec-count">
-            ${modelRows.length} batch${modelRows.length === 1 ? '' : 'es'} ·
-            ${colorMap.size} colour${colorMap.size === 1 ? '' : 's'} ·
-            <b>${fmt(modelQty)}</b> planned ·
-            <b>${fmt(modelActual)}</b> actual ·
-            <span class="${modelDelta === 0 ? 'comp-delta-ok' : modelDelta > 0 ? 'comp-delta-pos' : 'comp-delta-neg'}">
-              ${modelDelta >= 0 ? '+' : ''}${fmt(modelDelta)} Δ
-            </span>
-          </span>
-        </summary>
-        <div class="prod-color-list">`;
-
-      const sortedColorEntries = Array.from(colorMap.entries())
-        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-
-      for (const [ckey, cg] of sortedColorEntries) {
-        const colorQty    = cg.rows.reduce((s, r) => s + r.planQty, 0);
-        const colorActual = cg.rows.reduce((s, r) => s + r.actualVins, 0);
-        const colorDelta  = colorActual - colorQty;
-        const colorKey    = line + '||' + model + '||' + ckey;
-        const colorOpen   = !COMP_COLOR_COLLAPSED.has(colorKey);
-
-        html += `<details class="prod-color-group batch-color-group"
-                         data-line="${escapeHtml(line)}"
-                         data-model="${escapeHtml(model)}"
-                         data-color="${escapeHtml(ckey)}"
-                         ${colorOpen ? 'open' : ''}>
-          <summary class="prod-color-header">
-            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
-            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
-            <span class="color-count">
-              ${cg.rows.length} batch${cg.rows.length === 1 ? '' : 'es'} ·
-              <b>${fmt(colorQty)}</b> planned ·
-              <b>${fmt(colorActual)}</b> actual ·
-              <span class="${colorDelta === 0 ? 'comp-delta-ok' : colorDelta > 0 ? 'comp-delta-pos' : 'comp-delta-neg'}">
-                ${colorDelta >= 0 ? '+' : ''}${fmt(colorDelta)} Δ
-              </span>
-            </span>
-          </summary>
-          <div class="prod-batch-list">
-            <table class="prod-batch-inner-table">
-              <thead>
-                <tr>
-                  ${innerCols.map(c =>
-                    `<th class="${c.align || ''}">${escapeHtml(c.label)}</th>`
-                  ).join('')}
-                </tr>
-              </thead>
-              <tbody>`;
-
-        const sortedRows = cg.rows.slice()
-          .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
-
-        for (const r of sortedRows) {
-          /* Status pill */
-          const statusCell = `<span class="comp-status ${r.statusKey}">${escapeHtml(r.status)}</span>`;
-
-          /* Δ qty */
-          const dv = r.qtyVariance;
-          const deltaClass = dv === 0 ? 'comp-delta-ok'
-                           : dv > 0   ? 'comp-delta-pos'
-                           : 'comp-delta-neg';
-          const deltaCell = dv === 0
-            ? '<span class="comp-delta-ok">0</span>'
-            : `<span class="${deltaClass}">${dv > 0 ? '+' : ''}${fmt(dv)}</span>`;
-
-          /* Trim-in Δ (days) */
-          const tdv = r.trimDeltaDays;
-          const trimDeltaCell = (tdv === null)
-            ? '—'
-            : tdv === 0
-              ? '<span class="comp-delta-ok">0</span>'
-              : `<span class="${tdv > 0 ? 'comp-delta-neg' : 'comp-delta-pos'}">${tdv > 0 ? '+' : ''}${tdv}</span>`;
-
-          /* Plan stage label */
-          const stageLabel = r.planStage
-            ? (STATE.config.stages[r.planStage]?.label || r.planStage)
-            : '—';
-
-          /* Line-conflict flag (only when it happens inside a batch) */
-          const innerConflict = r.planLine && r.actualLine && r.planLine !== r.actualLine;
-          const rowClass = (r.statusKey !== 'matched' || innerConflict) ? 'comp-row-issues' : '';
-
-          const cells = {
-            batch:      `<td class="mono">${escapeHtml(r.id)}</td>`,
-            status:     `<td>${statusCell}</td>`,
-            planQty:    `<td class="num">${fmt(r.planQty)}</td>`,
-            actualVins: `<td class="num">${fmt(r.actualVins)}</td>`,
-            delta:      `<td class="num">${deltaCell}</td>`,
-            progress:   `<td class="num">${r.prod ? r.progressPct + '%' : '—'}</td>`,
-            planStage:  `<td>${escapeHtml(stageLabel)}</td>`,
-            planTrim:   `<td>${r.planTrimIn ? fmtDate(r.planTrimIn) : '—'}</td>`,
-            actualTrim: `<td>${r.actualTrim ? fmtDate(new Date(r.actualTrim)) : '—'}</td>`,
-            trimDelta:  `<td class="num">${trimDeltaCell}</td>`
-          };
-
-          html += `<tr class="${rowClass}" data-batch="${escapeHtml(r.id)}"
-                       ${innerConflict
-                         ? `title="Plan line ${escapeHtml(r.planLine)} ≠ execution line ${escapeHtml(r.actualLine)}"`
-                         : ''}>
-            ${innerCols.map(c => cells[c.id] || '<td></td>').join('')}
-          </tr>`;
+        if (!sc.workflow) {
+            sc.workflow = { nodes: [], connections: [] };
         }
-
-        html += `</tbody></table></div></details>`;
-      }
-
-      html += `</div></details>`;
-    }
-
-    html += `</div></details>`;
-  }
-
-  tree.innerHTML = html;
-
-  /* --- Persist collapse state --- */
-  tree.querySelectorAll('details.batch-line-group').forEach(d => {
-    d.addEventListener('toggle', () => {
-      const key = d.dataset.line;
-      if (d.open) COMP_LINE_COLLAPSED.delete(key);
-      else        COMP_LINE_COLLAPSED.add(key);
-    });
-  });
-  tree.querySelectorAll('details.batch-model-group').forEach(d => {
-    d.addEventListener('toggle', () => {
-      const key = d.dataset.line + '||' + d.dataset.model;
-      if (d.open) COMP_MODEL_COLLAPSED.delete(key);
-      else        COMP_MODEL_COLLAPSED.add(key);
-    });
-  });
-  tree.querySelectorAll('details.batch-color-group').forEach(d => {
-    d.addEventListener('toggle', () => {
-      const key = d.dataset.line + '||' + d.dataset.model + '||' + d.dataset.color;
-      if (d.open) COMP_COLOR_COLLAPSED.delete(key);
-      else        COMP_COLOR_COLLAPSED.add(key);
-    });
-  });
-}
-
-function compExpandAll() {
-  COMP_LINE_COLLAPSED.clear();
-  COMP_MODEL_COLLAPSED.clear();
-  COMP_COLOR_COLLAPSED.clear();
-  renderComparison();
-}
-
-function compCollapseAll() {
-  const rows = buildComparisonRows();
-  const lineSet  = new Set();
-  const modelSet = new Set();
-
-  for (const r of rows) {
-    const line  = r.planLine  || r.actualLine  || '(no line)';
-    const model = r.planModel || r.actualModel || '(no model)';
-    const color = r.planColor || r.actualColor || '(no colour)';
-    const ccode = r.planColorCode || '';
-
-    lineSet.add(line);
-    modelSet.add(line + '||' + model);
-    COMP_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + ccode);
-  }
-  for (const l of lineSet)  COMP_LINE_COLLAPSED.add(l);
-  for (const m of modelSet) COMP_MODEL_COLLAPSED.add(m);
-
-  renderComparison();
-}
-/* Excel export of the comparison table. */
-function exportComparison() {
-  const rows = buildComparisonRows()
-    .slice()
-    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
-
-  if (!rows.length) {
-    alert('Nothing to export.');
-    return;
-  }
-
-  const aoa = [[
-    'Batch', 'Status', 'Line', 'Model', 'Colour', 'Colour Code',
-    'Plan Qty', 'Actual VINs', 'Δ Qty', 'Progress %',
-    'Plan Stage',
-    'Plan Trim-in', 'Actual Trim-in', 'Trim Δ (days)',
-    'Plan Arrival', 'Plan Decanting',
-    'Actual 005 De-vanning', 'Actual 020 Trim-in', 'Actual 030 Off-line OK',
-    'Actual Buy-off OK', 'Actual Compound Gate-in', 'Actual Compound Gate-out OK'
-  ]];
-
-  for (const r of rows) {
-    aoa.push([
-      r.id, r.status, r.planLine || r.actualLine,
-      r.planModel || r.actualModel, r.planColor || r.actualColor, r.planColorCode,
-      r.planQty, r.actualVins, r.qtyVariance,
-      r.prod ? r.progressPct : '',
-      r.planStage,
-      r.planTrimIn ? fmtDate(r.planTrimIn) : '',
-      r.actualTrim ? fmtDate(new Date(r.actualTrim)) : '',
-      r.trimDeltaDays === null ? '' : r.trimDeltaDays,
-      r.planArrival   ? fmtDate(r.planArrival)   : '',
-      r.planDecanting ? fmtDate(r.planDecanting) : '',
-      r.actualDev    ? fmtDate(new Date(r.actualDev))    : '',
-      r.actualTrim   ? fmtDate(new Date(r.actualTrim))   : '',
-      r.actualOff    ? fmtDate(new Date(r.actualOff))    : '',
-      r.actualBuyOff ? fmtDate(new Date(r.actualBuyOff)) : '',
-      r.actualCin    ? fmtDate(new Date(r.actualCin))    : '',
-      r.actualCot    ? fmtDate(new Date(r.actualCot))    : ''
-    ]);
-  }
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Plan vs Execution');
-  downloadWorkbook(wb, `Plan_vs_Execution_${dateStamp()}.xlsx`);
-}
-
-/* Bind comparison tab UI. */
-function bindComparison() {
-  $('#compSearch')?.addEventListener('input', renderComparison);
-  $('#compStatus')?.addEventListener('change', renderComparison);
-  $('#compExpandAll')?.addEventListener('click', compExpandAll);
-  $('#compCollapseAll')?.addEventListener('click', compCollapseAll);
-  $('#compClear')?.addEventListener('click', () => {
-    const s = $('#compSearch'); if (s) s.value = '';
-    const st = $('#compStatus'); if (st) st.value = 'all';
-    renderComparison();
-  });
-  $('#compExport')?.addEventListener('click', exportComparison);
-}
-
-/* Permission helpers — safe on browsers without FSA. */
-
-
-/* =========================================================
-   STORED FILES — unified registry & IndexedDB accessors
-   ========================================================= */
-const FILE_DB    = 'mrp.fileHandles.v2';
-const FILE_STORE = 'files';
-
-const STORED_SLOTS = {
-  bomFolder:      { label: 'BOM folder',                kind: 'directory', mode: 'read',
-                    tab: 'bomlist',    chipEl: '#fileChip-bomFolder',
-                    pickFn: 'pickBomFolder',        reloadFn: 'reloadBomFolderFromHandle' },
-  batchFile:      { label: 'Batch / shipment file',     kind: 'file',      mode: 'read',
-                    tab: 'inventory',  chipEl: '#fileChip-batchFile',
-                    pickFn: 'pickBatchFile',        reloadFn: 'reloadBatchFromHandle' },
-  productionFile: { label: 'Production tracking file',  kind: 'file',      mode: 'read',
-                    tab: 'production', chipEl: '#fileChip-productionFile',
-                    pickFn: 'pickProductionFile',   reloadFn: 'reloadProductionFromHandle' },
-  exportFolder:   { label: 'XML export folder',         kind: 'directory', mode: 'readwrite',
-                    tab: 'production', chipEl: '#fileChip-exportFolder',
-                    pickFn: 'pickExportFolder',     reloadFn: 'reloadExportFolderFromHandle' },
-   scrapFile:    {  label: 'Scrap Log File', kind: 'file', mode: 'read',
-                    tab: 'scrap', chipEl: '#fileChip-scrapFile',
-                    pickFn: 'pickScrapFile', reloadFn: 'reloadScrapFileFromHandle' },
-  scrapImageFolder: { label: 'Scrap Image Folder', kind: 'directory', mode: 'read',
-                      tab: 'scrap', chipEl: '#fileChip-scrapImageFolder',
-                      pickFn: 'pickScrapImageFolder', reloadFn: 'reloadScrapImageFolderFromHandle' }
-};
-
-function openFileDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(FILE_DB, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(FILE_STORE)) db.createObjectStore(FILE_STORE);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
-}
-async function saveFileHandle(key, handle) {
-  const db = await openFileDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(FILE_STORE, 'readwrite');
-    tx.objectStore(FILE_STORE).put(handle, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror    = () => reject(tx.error);
-  });
-}
-async function loadFileHandle(key) {
-  const db = await openFileDB();
-  return new Promise((resolve, reject) => {
-    const tx  = db.transaction(FILE_STORE, 'readonly');
-    const req = tx.objectStore(FILE_STORE).get(key);
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror   = () => reject(req.error);
-  });
-}
-async function removeFileHandle(key) {
-  const db = await openFileDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(FILE_STORE, 'readwrite');
-    tx.objectStore(FILE_STORE).delete(key);
-    tx.oncomplete = () => resolve();
-    tx.onerror    = () => reject(tx.error);
-  });
-}
-async function getSlotStatus(slotKey) {
-  const slot = STORED_SLOTS[slotKey];
-  const handle = await loadFileHandle(slotKey);
-  if (!handle) return { handle: null, perm: 'absent' };
-  const perm = await handle.queryPermission({ mode: slot.mode });
-  return { handle, perm };
-}
-
-/* ---------- Pickers with persistence ---------- */
-async function pickBatchFile() {
-  if (typeof window.showOpenFilePicker !== 'function') { $('#batchInput').click(); return; }
-  try {
-    const [handle] = await window.showOpenFilePicker({
-      types: [{ description: 'Batch / shipment file',
-                accept: { 'text/csv': ['.csv', '.tsv'],
-                          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-                          'application/vnd.ms-excel': ['.xls'] } }]
-    });
-    await saveFileHandle('batchFile', handle);
-    await reloadBatchFromHandle(handle);
-    renderAllFileChips(); renderStoredFilesTab();
-  } catch (e) {
-    if (e.name !== 'AbortError') { console.error(e); alert('Failed to pick file: ' + e.message); }
-  }
-}
-async function reloadBatchFromHandle(handle) {
-  if (!handle) return;
-  let perm = await handle.queryPermission({ mode: 'read' });
-  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
-  if (perm !== 'granted') return;
-
-  const f = await handle.getFile();
-  const p = $('#batchFilePath'); if (p) p.value = f.name;
-  const i = $('#batchFileInfo'); if (i) i.textContent = `Loading ${f.name}…`;
-
-  await handleBatchFiles([f]);
-
-  if (i) i.textContent = `Loaded — ${STATE.batches.length} batches.`;
-  await renderAllFileChips();
-  await renderStoredFilesTab();
-}
-
-async function pickProductionFile() {
-  if (typeof window.showOpenFilePicker !== 'function') { $('#prodInput').click(); return; }
-  try {
-    const [handle] = await window.showOpenFilePicker({
-      types: [{ description: 'Production tracking file',
-                accept: { 'text/csv': ['.csv', '.tsv'], 'text/plain': ['.txt'] } }]
-    });
-    await saveFileHandle('productionFile', handle);
-    await reloadProductionFromHandle(handle);
-    renderAllFileChips(); renderStoredFilesTab();
-  } catch (e) {
-    if (e.name !== 'AbortError') { console.error(e); alert('Failed to pick file: ' + e.message); }
-  }
-}
-async function reloadProductionFromHandle(handle) {
-  if (!handle) return;
-  let perm = await handle.queryPermission({ mode: 'read' });
-  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
-  if (perm !== 'granted') return;
-
-  const f = await handle.getFile();
-  const p = $('#prodFilePath'); if (p) p.value = f.name;
-  const i = $('#prodFileInfo'); if (i) i.textContent = `Loading ${f.name}…`;
-
-  await handleProductionFiles([f]);
-
-  if (i) i.textContent =
-    `Loaded — ${STATE.production.records.length} VINs · ` +
-    `${STATE.production.batches.size} batches.`;
-  await renderAllFileChips();
-  await renderStoredFilesTab();
-}
-
-async function reloadBomFolderFromHandle(handle) {
-  if (!handle) return;
-  let perm = await handle.queryPermission({ mode: 'read' });
-  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
-  if (perm !== 'granted') return;
-  _bomFolderHandle = handle;
-  _bomFolderFiles = [];
-  $('#bomFolderPath').value = '/' + handle.name + '/';
-  $('#bomFolderInfo').textContent = 'Scanning stored folder…';
-  $('#bomFolderProcess').disabled = true;
-  await walkDirectory(handle, '');
-  updateFolderInfo();
-  await processBomFolder();
-}
-
-async function reloadExportFolderFromHandle(handle) {
-  if (!handle) return;
-  let perm = await handle.queryPermission({ mode: 'readwrite' });
-  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' });
-  if (perm !== 'granted') return;
-  _exportFolderHandle = handle;
-  $('#exportFolderPath').value = '/' + handle.name + '/';
-}
-
-async function reloadSlot(key, handle) {
-  switch (key) {
-    case 'bomFolder':      return reloadBomFolderFromHandle(handle);
-    case 'batchFile':      return reloadBatchFromHandle(handle);
-    case 'productionFile': return reloadProductionFromHandle(handle);
-    case 'exportFolder':   return reloadExportFolderFromHandle(handle);
-  }
-}
-
-/* ---------- Per-tab chips ---------- */
-async function renderTabFileChip(slotKey) {
-  const slot = STORED_SLOTS[slotKey];
-  if (!slot || !slot.chipEl) return;
-  const el = $(slot.chipEl);
-  if (!el) return;
-
-  const { handle, perm } = await getSlotStatus(slotKey);
-  const dotClass = perm === 'granted' ? 'connected'
-                 : perm === 'prompt'  ? 'prompt'
-                 : perm === 'denied'  ? 'denied'
-                 : 'absent';
-  const hint = perm === 'granted' ? 'Connected'
-             : perm === 'prompt'  ? 'Click to reconnect'
-             : perm === 'denied'  ? 'Permission denied'
-             : 'No file selected';
-
-  let button = '';
-  if (!handle)                  button = `<button class="fc-action" data-role="chip-pick"      data-slot="${slotKey}">Choose file</button>`;
-  else if (perm === 'granted')  button = `<button class="fc-action" data-role="chip-reload"    data-slot="${slotKey}">Reload</button>`;
-  else if (perm === 'prompt')   button = `<button class="fc-action" data-role="chip-reconnect" data-slot="${slotKey}">Reconnect</button>`;
-  else                          button = `<button class="fc-action" data-role="chip-pick"      data-slot="${slotKey}">Re-pick</button>`;
-
-  el.innerHTML = `
-    <span class="file-chip ${dotClass}">
-      <span class="fc-dot"></span>
-      <span class="fc-label">${escapeHtml(slot.label)}</span>
-      <span class="fc-name" title="${handle ? escapeHtml(handle.name) : ''}">${handle ? escapeHtml(handle.name) : '—'}</span>
-      <span class="fc-hint">${escapeHtml(hint)}</span>
-      ${button}
-    </span>`;
-
-  el.querySelector('button[data-role]')?.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const role     = e.target.dataset.role;
-    const slotKey2 = e.target.dataset.slot;
-    const slot2    = STORED_SLOTS[slotKey2];
-
-    if (role === 'chip-pick') {
-      const fn = window[slot2.pickFn];
-      if (typeof fn === 'function') fn();
-      return;
-    }
-    const h = await loadFileHandle(slotKey2);
-    if (!h) return;
-    if (role === 'chip-reconnect') {
-      const p = await h.requestPermission({ mode: slot2.mode });
-      if (p !== 'granted') { await renderTabFileChip(slotKey2); return; }
-    }
-    const fn = window[slot2.reloadFn];
-    if (typeof fn === 'function') await fn(h);
-    await renderAllFileChips();
-  });
-}
-async function renderAllFileChips() {
-  for (const k of Object.keys(STORED_SLOTS)) await renderTabFileChip(k);
-}
-
-/* ---------- Stored Files tab ---------- */
-async function renderStoredFilesTab() {
-  const tbl = $('#sfTable');
-  if (!tbl) return;
-
-  const rows = [];
-  for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
-    const { handle, perm } = await getSlotStatus(slotKey);
-    let size = '—', modified = '—';
-    if (handle && handle.kind === 'file' && perm !== 'absent') {
-      try {
-        const f = await handle.getFile();
-        size     = f.size < 1048576
-          ? (f.size / 1024).toFixed(1) + ' KB'
-          : (f.size / 1048576).toFixed(2) + ' MB';
-        modified = fmtDateTime(new Date(f.lastModified));
-      } catch { size = 'n/a'; modified = 'n/a'; }
-    }
-    rows.push({ slotKey, slot, handle, perm, size, modified });
-  }
-
-  const badge = p =>
-    p === 'granted' ? '<span class="sf-badge ok">Connected</span>' :
-    p === 'prompt'  ? '<span class="sf-badge prompt">Reconnect needed</span>' :
-    p === 'denied'  ? '<span class="sf-badge denied">Denied</span>' :
-                      '<span class="sf-badge absent">Not stored</span>';
-
-  tbl.innerHTML = `
-    <thead><tr>
-      <th>File</th><th>Used in tab</th><th>Name</th><th>Type</th>
-      <th>Status</th><th>Size</th><th>Last modified</th>
-      <th style="text-align:right">Actions</th>
-    </tr></thead>
-    <tbody>
-      ${rows.map(r => {
-        const tabLabel = {
-          bomlist: 'BOM List', inventory: 'Inventory & Stock', production: 'Production Monitoring'
-        }[r.slot.tab] || r.slot.tab;
-
-        const actions = [];
-        if (r.handle) {
-          if (r.perm === 'granted')
-            actions.push(`<button class="btn tiny" data-role="reload" data-slot="${r.slotKey}">↻ Reload</button>`);
-          else if (r.perm === 'prompt')
-            actions.push(`<button class="btn tiny primary" data-role="reconnect" data-slot="${r.slotKey}">🔓 Reconnect</button>`);
-          else
-            actions.push(`<button class="btn tiny" data-role="repick" data-slot="${r.slotKey}">🔄 Re-pick</button>`);
-          actions.push(`<button class="btn tiny danger" data-role="forget" data-slot="${r.slotKey}">✕ Forget</button>`);
-        } else {
-          actions.push(`<button class="btn tiny primary" data-role="repick" data-slot="${r.slotKey}">📁 Choose file</button>`);
+        normalizeWorkflowData(sc.workflow);
+        if (sc.workflow && sc.workflow.nodes) {
+            enforceSimpleNodeIds(sc.workflow);
+            //ensureUniqueNodeIds(sc.workflow);
+            sortWorkflowNodes(sc.workflow);
         }
+        if (sc.workflow && sc.workflow.nodeIdCounter !== undefined) {
+            if (Array.isArray(sc.workflow.nodeIdCounter)) {
+                sc.workflow.nodeIdCounter = sc.workflow.nodeIdCounter[0] || 0;
+            }
+            if (typeof sc.workflow.nodeIdCounter !== 'number') {
+                sc.workflow.nodeIdCounter = parseInt(sc.workflow.nodeIdCounter) || 0;
+            }
+        }
+        if (!sc.workflow.nodes || !Array.isArray(sc.workflow.nodes)) {
+            sc.workflow.nodes = [];
+        }
+        if (!sc.workflow.connections || !Array.isArray(sc.workflow.connections)) {
+            sc.workflow.connections = [];
+        }
+    }
 
-        return `
-          <tr>
-            <td>${escapeHtml(r.slot.label)}</td>
-            <td>${escapeHtml(tabLabel)}</td>
-            <td class="mono">${r.handle ? escapeHtml(r.handle.name) : '—'}</td>
-            <td><span class="sf-badge kind">${escapeHtml(r.slot.kind)}</span></td>
-            <td>${badge(r.perm)}</td>
-            <td class="num">${escapeHtml(r.size)}</td>
-            <td>${escapeHtml(r.modified)}</td>
-            <td style="text-align:right"><span class="sf-actions">${actions.join('')}</span></td>
-          </tr>`;
-      }).join('')}
-    </tbody>`;
+    if (!data.currentScenarioId && data.scenarios.length > 0) {
+        data.currentScenarioId = data.scenarios[0].id || 'default';
+    }
 
-  tbl.querySelectorAll('button[data-role]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const slotKey = btn.dataset.slot;
-      const slot    = STORED_SLOTS[slotKey];
-      const role    = btn.dataset.role;
+    if (!data.departments || !Array.isArray(data.departments)) {
+        data.departments = ['Sales', 'Production Planning', 'Material Planning', 'Material Handling', 'Purchase', 'Production Execution', 'Parts Quality', 'Vehicle Quality', 'Finance', 'Trade & Compliance'];
+    }
 
-      if (role === 'forget') {
-        if (!confirm(`Forget the stored handle for "${slot.label}"?`)) return;
-        await removeFileHandle(slotKey);
-        await renderAllFileChips();
-        await renderStoredFilesTab();
-        return;
-      }
-      if (role === 'repick') {
-        const fn = window[slot.pickFn];
-        if (typeof fn === 'function') fn();
-        return;
-      }
-      const h = await loadFileHandle(slotKey);
-      if (!h) return;
-      let p = await h.queryPermission({ mode: slot.mode });
-      if (p !== 'granted') p = await h.requestPermission({ mode: slot.mode });
-      if (p !== 'granted') { renderStoredFilesTab(); return; }
-      const fn = window[slot.reloadFn];
-      if (typeof fn === 'function') {
-        btn.disabled = true;
-        const orig = btn.textContent;
-        btn.textContent = '…';
-        try { await fn(h); }
-        catch (e) { console.error(e); alert('Reload failed: ' + e.message); }
-        btn.disabled = false;
-        btn.textContent = orig;
-      }
-      await renderAllFileChips();
-      await renderStoredFilesTab();
+    if (!data.sysNameList || !Array.isArray(data.sysNameList)) {
+        data.sysNameList = ['SAP', 'LES', 'MES', 'KAPTURE', 'WMS', 'To Be Determined'];
+    }
+
+    if (!data.sysStatusList || !Array.isArray(data.sysStatusList)) {
+        data.sysStatusList = [
+            { value: 'Operational', color: 'green' },
+            { value: 'Completed', color: 'green' },
+            { value: 'Offline', color: 'red' },
+            { value: 'To Be Implemented', color: 'red' },
+            { value: 'Work in Progress', color: 'yellow' }
+        ];
+    }
+
+    if (!data.businessStatuses || !Array.isArray(data.businessStatuses)) {
+        data.businessStatuses = [
+            { value: 'Not Defined', color: 'red' },
+            { value: 'In Progress', color: 'yellow' },
+            { value: 'Completed', color: 'green' }
+        ];
+    }
+
+    if (!data.sysRespList || !Array.isArray(data.sysRespList)) {
+        data.sysRespList = [];
+    }
+
+    console.log('✅ Data normalized successfully, scenarios:', data.scenarios.length);
+    return data;
+}
+
+// ============================
+// Sort the workflow nodes array 
+// ============================
+
+
+function sortWorkflowNodes(workflow) {
+    if (!workflow || !workflow.nodes || !Array.isArray(workflow.nodes)) return;
+    workflow.nodes.sort((a, b) => {
+        // Sort by id – this is stable and unique (if duplicates are fixed)
+        return (a.id || '').localeCompare(b.id || '');
     });
-  });
 }
+function syncWorkflowNodesWithProcesses(scenario) {
+    if (!scenario || !scenario.processes || !scenario.workflow) return 0;
+    const processes = scenario.processes;
+    const nodes = scenario.workflow.nodes || [];
+    const connections = scenario.workflow.connections || [];
 
-function bindStoredFilesTab() {
-  $('#sfReloadAll')?.addEventListener('click', async () => {
-    for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
-      const { handle, perm } = await getSlotStatus(slotKey);
-      if (!handle || perm !== 'granted') continue;
-      const fn = window[slot.reloadFn];
-      if (typeof fn === 'function') {
-        try { await fn(handle); } catch (e) { console.error(slotKey, e); }
-      }
-    }
-    await renderAllFileChips();
-    await renderStoredFilesTab();
-  });
-  $('#sfForgetAll')?.addEventListener('click', async () => {
-    if (!confirm('Forget every stored file handle? You will need to pick them again next session.')) return;
-    for (const k of Object.keys(STORED_SLOTS)) await removeFileHandle(k);
-    _bomFolderHandle    = null;
-    _exportFolderHandle = null;
-    await renderAllFileChips();
-    await renderStoredFilesTab();
-  });
-}
-/* Wire the Choose file / Process file buttons in the Inventory and
-   Production Monitoring sections. */
-function bindPersistentFileSlots() {
+    // Get set of valid process IDs
+    const processIds = new Set(processes.map(p => p.id));
+    const specialTypes = new Set(['start', 'end', 'decision', 'parallel']);
 
-  /* ---- Inventory & Stock — Batch file ---- */
-  const bPick    = $('#batchFilePick');
-  const bProcess = $('#batchFileProcess');
-  const bInfo    = $('#batchFileInfo');
-
-  bPick?.addEventListener('click', () => pickBatchFile());
-
-  bProcess?.addEventListener('click', async () => {
-    const { handle, perm } = await getSlotStatus('batchFile');
-    if (!handle) { alert('No batch file stored yet. Click Choose file.'); return; }
-
-    let p = perm;
-    if (p !== 'granted') {
-      p = await handle.requestPermission({ mode: 'read' });
-    }
-    if (p !== 'granted') {
-      if (bInfo) bInfo.textContent = 'Permission denied — click Choose file to re-select.';
-      return;
-    }
-    if (bInfo) bInfo.textContent = 'Loading…';
-    try {
-      const file = await handle.getFile();
-      await handleBatchFiles([file]);
-      if (bInfo) bInfo.textContent = `Loaded — ${STATE.batches.length} batches.`;
-    } catch (e) {
-      console.error(e);
-      if (bInfo) bInfo.textContent = 'Load failed: ' + (e.message || e);
-    }
-    renderAllFileChips();
-  });
-
-  /* ---- Production Monitoring — Tracking file ---- */
-  const pPick    = $('#prodFilePick');
-  const pProcess = $('#prodFileProcess');
-  const pInfo    = $('#prodFileInfo');
-
-  pPick?.addEventListener('click', () => pickProductionFile());
-
-  pProcess?.addEventListener('click', async () => {
-    const { handle, perm } = await getSlotStatus('productionFile');
-    if (!handle) { alert('No production file stored yet. Click Choose file.'); return; }
-
-    let p = perm;
-    if (p !== 'granted') {
-      p = await handle.requestPermission({ mode: 'read' });
-    }
-    if (p !== 'granted') {
-      if (pInfo) pInfo.textContent = 'Permission denied — click Choose file to re-select.';
-      return;
-    }
-    if (pInfo) pInfo.textContent = 'Parsing…';
-    try {
-      const file = await handle.getFile();
-      await handleProductionFiles([file]);
-      if (pInfo) pInfo.textContent =
-        `Loaded — ${STATE.production.records.length} VINs · ` +
-        `${STATE.production.batches.size} batches.`;
-    } catch (e) {
-      console.error(e);
-      if (pInfo) pInfo.textContent = 'Load failed: ' + (e.message || e);
-    }
-    renderAllFileChips();
-  });
-}
-/* ---------- Boot & tab switch ---------- */
-async function autoReloadStoredFiles() {
-  if (typeof window.showOpenFilePicker !== 'function') return;
-  for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
-    const { handle, perm } = await getSlotStatus(slotKey);
-    if (!handle || perm !== 'granted') continue;
-    const fn = window[slot.reloadFn];
-    if (typeof fn === 'function') {
-      try { await fn(handle); } catch (e) { console.error(`Auto-reload ${slotKey}:`, e); }
-    }
-  }
-  await renderAllFileChips();
-}
-/* =========================================================
-   MATERIAL AVAILABILITY CALCULATOR (Production Planning)
-   Multi-model · multi-variant · multi-quantity demands
-   ========================================================= */
-STATE.mrpStock = {
-  items: [],        // [{ partNo, qty }]
-  byPartNo: {},     // { partNo: totalQty }
-  loaded: false,
-  fileName: '',
-  // Staging values for the “+ Add demand” form:
-  model: '',
-  variantKey: '',   // "colorCode::bomId"  — composite key, unique per spec
-  // Demand list — each entry = independent model/variant/qty request
-  demands: []       // [{ id, model, colorCode, bomId, qty }]
-};
-
-/* ---------- Composite variant key helpers ---------- */
-function stockVariantKey(colorCode, bomId) {
-  return (colorCode || '') + '::' + (bomId || '');
-}
-function parseStockVariantKey(key) {
-  const parts = String(key || '').split('::');
-  return { colorCode: parts[0] || '', bomId: parts.slice(1).join('::') || '' };
-}
-/* Locate a specific BOM by (colorCode, bomId) inside a spec — never by bomId alone. */
-function findStockBom(spec, colorCode, bomId) {
-  if (!spec) return null;
-  const cc = colorCode || '';
-  return spec.boms.find(b =>
-    (b.bomId || '') === (bomId || '') &&
-    colorCodeOf(b.vehicleMatNo) === cc
-  ) || null;
-}
-/* ---------- File parsing ---------- */
-function parseStockFile(rows) {
-  if (!rows || !rows.length) return [];
-  const header = rows[0].map(h =>
-    String(h || '').replace(/\u00a0/g, ' ').replace(/\u200b/g, '').trim().toLowerCase()
-  );
-  const idx = (names, exclude = []) => {
-    const isEx = i => exclude.includes(i);
-    for (const n of names) {
-      const i = header.findIndex((h, j) => !isEx(j) && h === n.toLowerCase());
-      if (i >= 0) return i;
-    }
-    for (const n of names) {
-      const i = header.findIndex((h, j) => !isEx(j) && h.includes(n.toLowerCase()));
-      if (i >= 0) return i;
-    }
-    return -1;
-  };
-  const cPart = idx(['material number', 'material no', 'part number', 'part no', 'partno', 'matnr', 'material']);
-  const cQty  = idx(['quantity', 'qty', 'cantidad', 'on hand', 'stock']);
-
-  if (cPart < 0 || cQty < 0) throw new Error('Columns "Material Number" and "Quantity" are required');
-
-  const items = [];
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i];
-    if (!r || !r.length) continue;
-    const partNo = String(r[cPart] || '').trim();
-    if (!partNo) continue;
-    const raw = String(r[cQty]).replace(/[^0-9.\-]/g, '');
-    const qty = Number(raw);
-    if (!isFinite(qty) || qty === 0) continue;
-    items.push({ partNo, qty });
-  }
-  return items;
-}
-
-function buildStockIndex(items) {
-  const byPartNo = {};
-  for (const it of items) {
-    byPartNo[it.partNo] = (byPartNo[it.partNo] || 0) + it.qty;
-  }
-  return byPartNo;
-}
-
-/* ---------- File ingestion ---------- */
-async function handleStockFiles(files) {
-  const f = files[0];
-  if (!f) return;
-  try {
-    const sheets = await fileToSheetRows(f);
-    let rows;
-    if (sheets.length === 1) {
-      rows = sheets[0].rows;
-    } else {
-      const picked = await promptSheetSelection(sheets, f.name);
-      if (!picked || !picked.length) return;
-      rows = picked[0].rows;
-    }
-    const items = parseStockFile(rows);
-    if (!items.length) {
-      alert('No valid stock rows found. Each row needs a Material Number and a non-zero Quantity.');
-      return;
-    }
-
-    STATE.mrpStock.items     = items;
-    STATE.mrpStock.byPartNo  = buildStockIndex(items);
-    STATE.mrpStock.loaded    = true;
-    STATE.mrpStock.fileName  = f.name;
-
-    $('#stockFilePath').value = f.name;
-    $('#stockFileInfo').textContent =
-      `Loaded — ${items.length} part${items.length === 1 ? '' : 's'} · ` +
-      `${Object.keys(STATE.mrpStock.byPartNo).length} unique`;
-
-    populateStockModelSelect();
-    populateStockBomSelect();
-    renderStockFeasibility();
-  } catch (e) {
-    console.error(e);
-    alert('Failed to parse stock file: ' + e.message);
-  }
-}
-
-/* ---------- Model / BOM dropdowns (staging) ---------- */
-function getStockModelOptions() {
-  const bySpec = new Map();
-  for (const bom of STATE.boms) {
-    const sk = specKeyOf(bom.vehicleMatNo);
-    if (!bySpec.has(sk)) bySpec.set(sk, { specKey: sk, boms: [] });
-    bySpec.get(sk).boms.push(bom);
-  }
-  const out = [];
-  for (const [sk, g] of bySpec) {
-    g.specName = deriveSpecName(g.boms);
-    out.push({ key: sk, name: g.specName, boms: g.boms });
-  }
-  out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  return out;
-}
-
-function populateStockModelSelect() {
-  const sel = $('#stockModel');
-  if (!sel) return;
-  const models = getStockModelOptions();
-  if (!models.length) {
-    sel.innerHTML = '<option value="">— load BOMs first —</option>';
-    STATE.mrpStock.model = '';
-    return;
-  }
-  const current = STATE.mrpStock.model || '';
-  sel.innerHTML = models.map(m =>
-    `<option value="${escapeHtml(m.key)}" ${m.key === current ? 'selected' : ''}>` +
-    `${escapeHtml(m.name)} — ${m.boms.length} variant${m.boms.length === 1 ? '' : 's'}</option>`
-  ).join('');
-  if (!current || !models.some(m => m.key === current)) {
-    STATE.mrpStock.model = models[0].key;
-    sel.value = models[0].key;
-  }
-}
-
-function populateStockBomSelect() {
-  const sel = $('#stockBom');
-  if (!sel) return;
-  const models = getStockModelOptions();
-  const spec = models.find(m => m.key === STATE.mrpStock.model);
-  if (!spec) {
-    sel.innerHTML = '<option value="">— pick a model —</option>';
-    STATE.mrpStock.variantKey = '';
-    return;
-  }
-
-  /* Deduplicate BOMs by their composite key (colorCode::bomId).
-     Two BOMs loaded from different sales batches with the same vehicleMatNo
-     and identical parts share the same bomId — they must appear once. */
-  const seenKeys = new Set();
-  const boms = [];
-  for (const b of spec.boms) {
-    const key = stockVariantKey(colorCodeOf(b.vehicleMatNo), b.bomId || '');
-    if (seenKeys.has(key)) continue;
-    seenKeys.add(key);
-    boms.push(b);
-  }
-
-  /* Sort by BOM number, then colour code — stable order in the dropdown. */
-  boms.sort((a, b) => {
-    const n = String(a.bomId || '').localeCompare(String(b.bomId || ''), undefined, { numeric: true });
-    if (n) return n;
-    return colorCodeOf(a.vehicleMatNo).localeCompare(colorCodeOf(b.vehicleMatNo));
-  });
-
-  const current = STATE.mrpStock.variantKey || '';
-
-  sel.innerHTML = boms.map(b => {
-    const cc    = colorCodeOf(b.vehicleMatNo);
-    const key   = stockVariantKey(cc, b.bomId || '');
-    const color = deriveColorName([b], spec.name) || b.vehicleDesc || b.vehicleMatNo;
-    return `<option value="${escapeHtml(key)}" ${key === current ? 'selected' : ''}>` +
-           `${escapeHtml(b.bomId || '?')} — ${escapeHtml(color)} (${b.parts.length} parts)</option>`;
-  }).join('');
-
-  if (!current || !boms.some(b =>
-        stockVariantKey(colorCodeOf(b.vehicleMatNo), b.bomId || '') === current)) {
-    const first = boms[0];
-    if (first) {
-      STATE.mrpStock.variantKey =
-        stockVariantKey(colorCodeOf(first.vehicleMatNo), first.bomId || '');
-      sel.value = STATE.mrpStock.variantKey;
-    } else {
-      STATE.mrpStock.variantKey = '';
-    }
-  }
-}
-
-/* ---------- Aggregation ---------- */
-/* Walk every demand, aggregate per-vehicle part quantities (a BOM may list the
-   same part twice), multiply by the demand qty, and sum across demands.
-   Returns:
-     required   — { partNo: totalQty }
-     usedIn     — { partNo: [{ demandId, qty }] }
-     totalVehicles */
-function aggregateDemands(demands, _byPartNo) {
-  const required  = {};
-  const usedIn    = {};
-  let totalVehicles = 0;
-
-  const models = getStockModelOptions();
-  const modelByKey = new Map(models.map(m => [m.key, m]));
-
-  for (const d of demands) {
-    const spec = modelByKey.get(d.model);
-    if (!spec) continue;
-    /* Lookup by the composite key — NOT by bomId alone. */
-    const bom = findStockBom(spec, d.colorCode, d.bomId);
-    if (!bom || !bom.parts) continue;
-
-    totalVehicles += d.qty;
-
-    const perVeh = {};
-    for (const p of bom.parts) {
-      const q = Number(p.qty) || 0;
-      if (!q) continue;
-      perVeh[p.partNo] = (perVeh[p.partNo] || 0) + q;
-    }
-    for (const [partNo, pv] of Object.entries(perVeh)) {
-      const need = pv * d.qty;
-      required[partNo] = (required[partNo] || 0) + need;
-      if (!usedIn[partNo]) usedIn[partNo] = [];
-      usedIn[partNo].push({ demandId: d.id, qty: need });
-    }
-  }
-  return { required, usedIn, totalVehicles };
-}
-
-function sanitizeDemands() {
-  const models = getStockModelOptions();
-  const modelByKey = new Map(models.map(m => [m.key, m]));
-  STATE.mrpStock.demands = (STATE.mrpStock.demands || []).filter(d => {
-    const spec = modelByKey.get(d.model);
-    if (!spec) return false;
-    /* A demand survives only if BOTH its colourCode and its bomId still exist. */
-    return !!findStockBom(spec, d.colorCode, d.bomId);
-  });
-}
-/* ---------- Demand list render ---------- */
-function renderStockDemandList() {
-  const wrap = $('#stockDemandList');
-  if (!wrap) return;
-  const demands = STATE.mrpStock.demands || [];
-  if (!demands.length) {
-    wrap.innerHTML =
-      '<div class="hint" style="margin:0">No demands yet. Pick a model, variant and quantity above, then click “+ Add demand”.</div>';
-    return;
-  }
-  const models = getStockModelOptions();
-  const modelByKey = new Map(models.map(m => [m.key, m]));
-
-  wrap.innerHTML = demands.map((d, i) => {
-    const spec = modelByKey.get(d.model);
-    const modelName = spec ? spec.name : d.model;
-    const bom = findStockBom(spec, d.colorCode, d.bomId);
-    const colorName = bom ? (deriveColorName([bom], spec.name) || bom.vehicleDesc || bom.vehicleMatNo) : '';
-    const parts = bom ? bom.parts.length : 0;
-    return `
-      <div class="mrp-demand-item" data-id="${d.id}">
-        <span class="md-idx">${i + 1}</span>
-        <span class="md-model" title="${escapeHtml(modelName)}">${escapeHtml(modelName)}</span>
-        <span class="md-bom">${escapeHtml(d.bomId || '?')}</span>
-        <span class="md-color" title="${escapeHtml(colorName)}">
-          ${d.colorCode ? `<span class="color-code" style="${colorBadgeStyle(d.colorCode)}">${escapeHtml(d.colorCode)}</span> ` : ''}
-          ${escapeHtml(colorName)}
-        </span>
-        <span class="md-qty">
-          <input type="number" min="0" step="1" value="${d.qty}"
-                 data-id="${d.id}" class="md-qty-input" />
-          <small>veh</small>
-        </span>
-        <span class="md-parts">${parts} parts</span>
-        <button class="md-del" data-id="${d.id}" title="Remove">✕</button>
-      </div>`;
-  }).join('');
-
-  wrap.querySelectorAll('.md-del').forEach(btn => {
-    btn.addEventListener('click', () => {
-      STATE.mrpStock.demands = STATE.mrpStock.demands.filter(x => x.id !== btn.dataset.id);
-      renderStockFeasibility();
+    // Filter out orphan nodes (remove nodes whose processId no longer exists)
+    const originalCount = nodes.length;
+    const filteredNodes = nodes.filter(n => {
+        // If node has no processId, keep it ONLY if it's a special type
+        if (!n.processId) {
+            return specialTypes.has(n.type);
+        }
+        // If node has a processId, keep it only if that process still exists
+        return processIds.has(n.processId);
     });
-  });
-  wrap.querySelectorAll('.md-qty-input').forEach(inp => {
-    inp.addEventListener('change', () => {
-      const d = STATE.mrpStock.demands.find(x => x.id === inp.dataset.id);
-      if (!d) return;
-      d.qty = Math.max(0, Number(inp.value) || 0);
-      renderStockFeasibility();
+    const removedCount = originalCount - filteredNodes.length;
+
+    // Build map of kept nodes
+    const keptProcessNodeMap = {};
+    filteredNodes.forEach(n => { if (n.processId) keptProcessNodeMap[n.processId] = n; });
+
+    // Determine max counter for new node IDs
+    let maxCounter = 0;
+    filteredNodes.forEach(n => {
+        const match = n.id.match(/node-(\d+)/);
+        if (match) maxCounter = Math.max(maxCounter, parseInt(match[1]) + 1);
     });
-  });
-}
-/* ---------- Main render ---------- */
-function renderStockFeasibility() {
-  const tbl = $('#stockTable');
-  const sum = $('#stockSummary');
-  if (!tbl) return;
+    let counter = maxCounter;
 
-  sanitizeDemands();
-  const demands = STATE.mrpStock.demands || [];
-  const byPartNo = STATE.mrpStock.byPartNo || {};
-
-  if (!STATE.boms.length) {
-    tbl.innerHTML = `<thead><tr><th>Load BOM files first</th></tr></thead>`;
-    if (sum) sum.innerHTML = '';
-    renderStockDemandList();
-    return;
-  }
-  if (!STATE.mrpStock.loaded) {
-    tbl.innerHTML = `<thead><tr><th>Load a stock file to begin</th></tr></thead>`;
-    if (sum) sum.innerHTML = '';
-    renderStockDemandList();
-    return;
-  }
-  if (!demands.length) {
-    tbl.innerHTML = `<thead><tr><th>Add at least one demand (model · variant · quantity)</th></tr></thead>`;
-    if (sum) {
-      sum.innerHTML = `
-        <div class="stat">
-          <div class="label">Stock file</div>
-          <div class="value">${fmt(Object.keys(byPartNo).length)}</div>
-          <div class="sub">parts on hand from <b>${escapeHtml(STATE.mrpStock.fileName || '—')}</b></div>
-        </div>
-        <div class="stat">
-          <div class="label">Demands</div>
-          <div class="value">0</div>
-          <div class="sub">pick a model above and click “+ Add demand”</div>
-        </div>`;
-    }
-    renderStockDemandList();
-    return;
-  }
-
-  const { required, usedIn, totalVehicles } = aggregateDemands(demands, byPartNo);
-
-  /* Union of required parts and stock parts, so we also see dead stock that
-     the current demands never consume (Required = 0). */
-  const allParts = new Set([...Object.keys(required), ...Object.keys(byPartNo)]);
-  const parts = [];
-  for (const partNo of allParts) {
-    const req      = required[partNo] || 0;
-    const avail    = byPartNo[partNo] || 0;
-    const leftover = avail - req;
-    const shortage = leftover < 0 ? -leftover : 0;
-    const info     = STATE.partIndex[partNo] || {};
-    parts.push({
-      partNo,
-      name:  info.nameEN || info.nameCN || '',
-      uom:   info.uom   || '',
-      available: avail,
-      required:  req,
-      leftover,
-      shortage,
-      usedIn: usedIn[partNo] || []
+    // Add missing nodes for processes that don't have one
+    const cols = 6, spacingX = 160, spacingY = 110;
+    let idx = 0;
+    const newNodes = [...filteredNodes];
+    processes.forEach(p => {
+        if (!keptProcessNodeMap[p.id]) {
+            const isSub = p.seq && p.seq.includes('.');
+            const node = {
+                id: 'node-' + counter++,
+                processId: p.id,
+                type: isSub ? 'sub' : 'main',
+                x: 100 + (idx % cols) * spacingX,
+                y: 100 + Math.floor(idx / cols) * spacingY,
+                label: p.name || 'Unnamed',
+                hidden: false
+            };
+            newNodes.push(node);
+            idx++;
+        }
     });
-  }
 
-  parts.sort((a, b) => {
-    if ((a.shortage > 0) !== (b.shortage > 0)) return a.shortage > 0 ? -1 : 1;
-    if (a.shortage !== b.shortage) return b.shortage - a.shortage;
-    if ((a.required > 0) !== (b.required > 0)) return a.required > 0 ? -1 : 1;
-    return a.partNo.localeCompare(b.partNo, undefined, { numeric: true });
-  });
+    // Update scenario
+    scenario.workflow.nodes = newNodes;
+    scenario.workflow.nodeIdCounter = counter;
 
-  const shortages       = parts.filter(p => p.shortage > 0);
-  const totalShort      = shortages.reduce((s, p) => s + p.shortage, 0);
-  const partsWithDemand = parts.filter(p => p.required > 0).length;
+    // Clean up connections that reference deleted nodes
+    const validNodeIds = new Set(newNodes.map(n => n.id));
+    scenario.workflow.connections = (scenario.workflow.connections || [])
+        .filter(c => validNodeIds.has(c.from) && validNodeIds.has(c.to));
 
-  if (sum) {
-    sum.innerHTML = `
-      <div class="stat">
-        <div class="label">Demands</div>
-        <div class="value">${fmt(demands.length)}</div>
-        <div class="sub"><b>${fmt(totalVehicles)}</b> vehicles in total</div>
-      </div>
-      <div class="stat">
-        <div class="label">Distinct materials required</div>
-        <div class="value">${fmt(partsWithDemand)}</div>
-        <div class="sub">across all demands</div>
-      </div>
-      <div class="stat">
-        <div class="label">Parts short</div>
-        <div class="value" style="color:${shortages.length ? 'var(--danger)' : 'var(--ok)'}">
-          ${fmt(shortages.length)}
-        </div>
-        <div class="sub">${totalShort
-          ? `<b>${fmt(totalShort)}</b> units short in total`
-          : 'no shortage'}</div>
-      </div>
-      <div class="stat">
-        <div class="label">Stock file</div>
-        <div class="value">${fmt(Object.keys(byPartNo).length)}</div>
-        <div class="sub">parts on hand from <b>${escapeHtml(STATE.mrpStock.fileName || '—')}</b></div>
-      </div>`;
-  }
+    // Return the count of removed nodes
+    return removedCount;
+}
+// ============================
+// 5. Token Management
+// ============================
 
-  const head = `
-    <thead><tr>
-      <th>Material Number</th>
-      <th>Description</th>
-      <th>UOM</th>
-      <th class="num">On Hand</th>
-      <th class="num">Required</th>
-      <th class="num">Leftover</th>
-      <th class="num">Shortage</th>
-      <th class="num">Used In</th>
-    </tr></thead>`;
-
-  const body = parts.map(p => {
-    const shortCell = p.shortage > 0
-      ? `<span style="color:var(--danger);font-weight:600">−${fmt(p.shortage)}</span>`
-      : '—';
-    const usedInCell = p.usedIn.length
-      ? `<button class="btn tiny" data-role="used-in" data-partno="${escapeHtml(p.partNo)}">
-           ${p.usedIn.length} demand${p.usedIn.length === 1 ? '' : 's'}
-         </button>`
-      : '—';
-    return `
-      <tr class="${p.shortage > 0 ? 'stock-short-row' : ''}">
-        <td class="mono">${escapeHtml(p.partNo)}</td>
-        <td>${escapeHtml(p.name)}</td>
-        <td>${escapeHtml(p.uom)}</td>
-        <td class="num">${fmt(p.available)}</td>
-        <td class="num">${fmt(p.required)}</td>
-        <td class="num" style="color:${p.leftover < 0 ? 'var(--danger)' : 'inherit'};font-weight:${p.leftover < 0 ? '600' : '400'}">
-          ${fmt(p.leftover)}
-        </td>
-        <td class="num">${shortCell}</td>
-        <td class="num">${usedInCell}</td>
-      </tr>`;
-  }).join('');
-
-  tbl.innerHTML = head + `<tbody>${body ||
-    '<tr><td colspan="8" style="text-align:center;color:#6b7280;padding:16px">No materials to compute</td></tr>'}</tbody>`;
-
-  /* “Used In” breakdown */
-   tbl.querySelectorAll('button[data-role=used-in]').forEach(btn => {
-     btn.addEventListener('click', () => {
-       const partNo = btn.dataset.partno;
-       const p = parts.find(x => x.partNo === partNo);
-       if (!p) return;
-       const models = getStockModelOptions();
-       const modelByKey = new Map(models.map(m => [m.key, m]));
-       const lines = p.usedIn.map(u => {
-         const d = demands.find(x => x.id === u.demandId);
-         if (!d) return '';
-         const spec = modelByKey.get(d.model);
-         const label = spec ? spec.name : d.model;
-         const bom = findStockBom(spec, d.colorCode, d.bomId);
-         const color = bom ? (deriveColorName([bom], spec.name) || bom.vehicleDesc || '') : '';
-         const ccLabel = d.colorCode ? `[${d.colorCode}] ` : '';
-         const unit  = p.uom ? ' ' + p.uom : '';
-         return `• ${label} · ${d.bomId} · ${ccLabel}${color} — ${fmt(d.qty)} veh → ${fmt(u.qty)}${unit}`;
-       }).filter(Boolean).join('\n');
-       alert(`Used In — ${partNo}\n\n${lines}\n\nTotal required: ${fmt(p.required)}${p.uom ? ' ' + p.uom : ''}`);
-     });
-   });
-
-  renderStockDemandList();
+function getGitHubToken() {
+    return localStorage.getItem('github_token');
 }
 
-/* ---------- Export ---------- */
-function exportStockCalc() {
-  const demands = STATE.mrpStock.demands || [];
-  if (!demands.length)        { alert('Add at least one demand first.'); return; }
-  if (!STATE.mrpStock.loaded) { alert('Load a stock file first.');     return; }
-
-  const byPartNo = STATE.mrpStock.byPartNo;
-  const { required, totalVehicles } = aggregateDemands(demands, byPartNo);
-  const models = getStockModelOptions();
-  const modelByKey = new Map(models.map(m => [m.key, m]));
-
-  const aoa = [
-    ['Material availability — aggregated demand vs stock'],
-    ['Stock file', STATE.mrpStock.fileName || ''],
-    ['Total demands', demands.length],
-    ['Total vehicles', totalVehicles],
-    [],
-    ['#', 'Model', 'BOM variant', 'Colour code', 'Colour', 'Quantity (vehicles)']
-  ];
-  demands.forEach((d, i) => {
-    const spec = modelByKey.get(d.model);
-    const modelName = spec ? spec.name : d.model;
-    const bom = findStockBom(spec, d.colorCode, d.bomId);
-    const colorName = bom ? (deriveColorName([bom], spec.name) || bom.vehicleDesc || bom.vehicleMatNo) : '';
-    aoa.push([i + 1, modelName, d.bomId, d.colorCode || '', colorName, d.qty]);
-  });
-  aoa.push([]);
-  aoa.push(['Material Number', 'Description', 'UOM', 'On Hand', 'Required', 'Leftover', 'Shortage']);
-
-  const allParts = new Set([...Object.keys(required), ...Object.keys(byPartNo)]);
-  const rows = [];
-  for (const partNo of allParts) {
-    const req      = required[partNo] || 0;
-    const avail    = byPartNo[partNo] || 0;
-    const leftover = avail - req;
-    const shortage = leftover < 0 ? -leftover : 0;
-    const info     = STATE.partIndex[partNo] || {};
-    rows.push({
-      partNo,
-      name:  info.nameEN || info.nameCN || '',
-      uom:   info.uom || '',
-      avail, req, leftover, shortage
-    });
-  }
-  rows.sort((a, b) => {
-    if (a.shortage !== b.shortage) return b.shortage - a.shortage;
-    return a.partNo.localeCompare(b.partNo, undefined, { numeric: true });
-  });
-  for (const r of rows) {
-    aoa.push([
-      r.partNo, r.name, r.uom,
-      round3(r.avail), round3(r.req), round3(r.leftover), round3(r.shortage)
-    ]);
-  }
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Demand vs Stock');
-  downloadWorkbook(wb, `Stock_Demand_${dateStamp()}.xlsx`);
-}
-/* ---------- Bindings ---------- */
-function bindStockCalc() {
-  /* Native FSA picker, with fallback to <input type=file> */
-  $('#stockFilePick')?.addEventListener('click', async () => {
-    if (typeof window.showOpenFilePicker !== 'function') { $('#stockInput').click(); return; }
-    try {
-      const [handle] = await window.showOpenFilePicker({
-        types: [{
-          description: 'Stock list',
-          accept: {
-            'text/csv': ['.csv', '.tsv'],
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-            'application/vnd.ms-excel': ['.xls']
-          }
-        }]
-      });
-      const f = await handle.getFile();
-      await handleStockFiles([f]);
-    } catch (e) {
-      if (e.name !== 'AbortError') { console.error(e); alert('Failed to open file: ' + e.message); }
+function setGitHubToken(token) {
+    if (token && token.trim()) {
+        localStorage.setItem('github_token', token.trim());
+        return true;
     }
-  });
-
-  $('#stockInput')?.addEventListener('change', e => {
-    const f = e.target.files?.[0];
-    if (f) handleStockFiles([f]);
-    e.target.value = '';
-  });
-
-  const dz = $('#stockDrop');
-  if (dz) {
-    ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
-      e.preventDefault(); dz.classList.add('drag');
-    }));
-    ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
-      e.preventDefault(); dz.classList.remove('drag');
-    }));
-    dz.addEventListener('drop', e => {
-      const f = e.dataTransfer.files?.[0];
-      if (f) handleStockFiles([f]);
-    });
-  }
-
-   $('#stockFileClear')?.addEventListener('click', () => {
-     STATE.mrpStock.items      = [];
-     STATE.mrpStock.byPartNo   = {};
-     STATE.mrpStock.loaded     = false;
-     STATE.mrpStock.fileName   = '';
-     /* Demands survive — user may re-upload a new stock file for the same demands. */
-     const p = $('#stockFilePath'); if (p) p.value = '';
-     const i = $('#stockFileInfo'); if (i) i.textContent = 'No stock file loaded.';
-     renderStockFeasibility();
-   });
-
-   $('#stockModel')?.addEventListener('change', e => {
-  STATE.mrpStock.model = e.target.value || '';
-  STATE.mrpStock.variantKey = '';    // model changed → drop the staged variant
-  populateStockBomSelect();
-});
-
-$('#stockBom')?.addEventListener('change', e => {
-  STATE.mrpStock.variantKey = e.target.value || '';
-});
-
-$('#stockAddDemand')?.addEventListener('click', () => {
-  const model      = STATE.mrpStock.model;
-  const variantKey = STATE.mrpStock.variantKey || '';
-  const { colorCode, bomId } = parseStockVariantKey(variantKey);
-
-  const qtyIn = $('#stockQty');
-  const qty   = Number(qtyIn?.value);
-
-  if (!model)                 { alert('Pick a model.');                 return; }
-  if (!bomId)                 { alert('Pick a BOM variant.');           return; }
-  if (!qty || qty <= 0)       { alert('Enter a positive quantity.');    return; }
-
-  STATE.mrpStock.demands.push({
-    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
-    model, colorCode, bomId, qty
-  });
-  if (qtyIn) qtyIn.value = '';
-  renderStockFeasibility();
-});
-   
-  $('#stockDemandClear')?.addEventListener('click', () => {
-    if (!STATE.mrpStock.demands.length) return;
-    if (!confirm('Remove all demands?')) return;
-    STATE.mrpStock.demands = [];
-    renderStockFeasibility();
-  });
-
-  $('#stockExport')?.addEventListener('click', exportStockCalc);
-}
-/* =========================================================
-   DIAGNOSTICS: Compare BOMs
-   ========================================================= */
-function openCompareBomModal(specKey, specName) {
-  const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
-  const uniqueBoms = Array.from(new Set(boms.map(b => b.bomId))).sort();
-
-  if (uniqueBoms.length < 2) return;
-
-  let modal = document.getElementById('compareBomModal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'compareBomModal';
-    modal.className = 'modal-overlay hidden';
-    modal.innerHTML = `
-      <div class="modal-box" style="width:min(900px,100%)">
-        <div class="modal-header">
-          <div>
-            <h3>Compare BOMs — ${escapeHtml(specName)}</h3>
-            <div class="bdm-subtitle">Select two BOMs to see exactly what differs between them.</div>
-          </div>
-          <button class="modal-close" onclick="document.getElementById('compareBomModal').classList.add('hidden');document.body.style.overflow='';">✕</button>
-        </div>
-        <div class="modal-body" style="padding:16px 20px; overflow-y:auto; max-height:80vh;">
-          <div style="display:flex; gap:16px; margin-bottom:16px; align-items:center;">
-            <label>BOM A: <select id="compareBomA" class="prod-period-select">${uniqueBoms.map(b => `<option value="${b}">${b}</option>`).join('')}</select></label>
-            <span>vs</span>
-            <label>BOM B: <select id="compareBomB" class="prod-period-select">${uniqueBoms.map((b, i) => `<option value="${b}" ${i===1?'selected':''}>${b}</option>`).join('')}</select></label>
-          </div>
-          <div id="compareBomResults" class="table-wrap" style="border:none;"></div>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(modal);
-    
-    document.getElementById('compareBomA').addEventListener('change', () => runBomDiff(specKey));
-    document.getElementById('compareBomB').addEventListener('change', () => runBomDiff(specKey));
-  }
-
-  modal.querySelector('h3').textContent = `Compare BOMs — ${specName}`;
-  modal.classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
-  
-  setTimeout(() => runBomDiff(specKey), 10);
+    return false;
 }
 
-/* =========================================================
-   DIAGNOSTICS: Compare BOMs & Export
-   ========================================================= */
-let _lastBomDiffRows = [];
-let _lastBomDiffIds = { idA: '', idB: '' };
-
-function openCompareBomModal(specKey, specName) {
-  const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
-  const uniqueBoms = Array.from(new Set(boms.map(b => b.bomId))).sort();
-
-  if (uniqueBoms.length < 2) return;
-
-  let modal = document.getElementById('compareBomModal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'compareBomModal';
-    modal.className = 'modal-overlay hidden';
-    modal.innerHTML = `
-      <div class="modal-box" style="width:min(900px,100%)">
-        <div class="modal-header">
-          <div>
-            <h3>Compare BOMs — ${escapeHtml(specName)}</h3>
-            <div class="bdm-subtitle">Select two BOMs to see exactly what differs between them.</div>
-          </div>
-          <button class="modal-close" onclick="document.getElementById('compareBomModal').classList.add('hidden');document.body.style.overflow='';">✕</button>
-        </div>
-        <div class="modal-body" style="padding:16px 20px; overflow-y:auto; max-height:80vh;">
-          <div style="display:flex; gap:16px; margin-bottom:16px; align-items:center;">
-            <label>BOM A: <select id="compareBomA" class="prod-period-select">${uniqueBoms.map(b => `<option value="${b}">${b}</option>`).join('')}</select></label>
-            <span>vs</span>
-            <label>BOM B: <select id="compareBomB" class="prod-period-select">${uniqueBoms.map((b, i) => `<option value="${b}" ${i===1?'selected':''}>${b}</option>`).join('')}</select></label>
-            <button class="btn primary" id="exportCompareBomBtn" style="margin-left:auto;">⤓ Export to Excel</button>
-          </div>
-          <div id="compareBomResults" class="table-wrap" style="border:none;"></div>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(modal);
-    
-    document.getElementById('compareBomA').addEventListener('change', () => runBomDiff(specKey));
-    document.getElementById('compareBomB').addEventListener('change', () => runBomDiff(specKey));
-    document.getElementById('exportCompareBomBtn').addEventListener('click', exportBomDiff);
-  }
-
-  modal.querySelector('h3').textContent = `Compare BOMs — ${specName}`;
-  modal.classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
-  
-  setTimeout(() => runBomDiff(specKey), 10);
+function clearGitHubToken() {
+    localStorage.removeItem('github_token');
 }
 
-function runBomDiff(specKey) {
-  const idA = document.getElementById('compareBomA').value;
-  const idB = document.getElementById('compareBomB').value;
-  const res = document.getElementById('compareBomResults');
-
-  if (idA === idB) {
-    res.innerHTML = '<div class="hint">Please select two different BOMs.</div>';
-    _lastBomDiffRows = [];
-    return;
-  }
-
-  const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
-  const bomA = boms.find(b => b.bomId === idA);
-  const bomB = boms.find(b => b.bomId === idB);
-
-  if (!bomA || !bomB) return;
-
-  const getPartsMap = (bom) => {
-    const map = new Map();
-    for (const p of bom.parts) {
-      const raw = String(p.partNo || '').trim();
-      const ext = colorCodeOf(bom.vehicleMatNo);
-      const nrm = (isColourPartNo(raw) && suffixOfColourPart(raw) === ext) ? prefixOfColourPart(raw) + 'XX' : raw;
-      
-      const uom = (p.uom || '').trim();
-      const key = `${nrm}||${uom}`;
-      
-      if (!map.has(key)) {
-        map.set(key, { pn: nrm, uom: uom, qty: 0, desc: p.nameEN || p.nameCN, mwos: new Set() });
-      }
-      
-      const entry = map.get(key);
-      entry.qty += (Number(p.qty) || 0);
-      
-      if (p.mwo && String(p.mwo).trim()) {
-        entry.mwos.add(String(p.mwo).trim());
-      }
-    }
-
-    for (const entry of map.values()) {
-      entry.mwoStr = Array.from(entry.mwos).sort().join(', ') || '—';
-    }
-    return map;
-  };
-
-  const mapA = getPartsMap(bomA);
-  const mapB = getPartsMap(bomB);
-
-  const allKeys = new Set([...mapA.keys(), ...mapB.keys()]);
-  const diffs = [];
-
-  for (const key of allKeys) {
-    const a = mapA.get(key);
-    const b = mapB.get(key);
-    
-    if (a && !b) {
-      diffs.push({ status: 'missing_b', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: 0, desc: a.desc, mwoA: a.mwoStr, mwoB: '—', mwoDiff: false });
-    } else if (b && !a) {
-      diffs.push({ status: 'missing_a', pn: b.pn, uom: b.uom, qtyA: 0, qtyB: b.qty, desc: b.desc, mwoA: '—', mwoB: b.mwoStr, mwoDiff: false });
-    } else if (a.qty !== b.qty) {
-      diffs.push({ status: 'qty_diff', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: b.qty, desc: a.desc || b.desc, mwoA: a.mwoStr, mwoB: b.mwoStr, mwoDiff: a.mwoStr !== b.mwoStr });
-    } else if (a.mwoStr !== b.mwoStr) {
-      diffs.push({ status: 'mwo_diff', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: b.qty, desc: a.desc || b.desc, mwoA: a.mwoStr, mwoB: b.mwoStr, mwoDiff: true });
-    }
-  }
-
-  _lastBomDiffRows = diffs;
-  _lastBomDiffIds = { idA, idB };
-
-  if (!diffs.length) {
-    res.innerHTML = '<div class="hint" style="color:var(--ok)">✅ No differences found after aggregation. If they are still separate BOMs, check for hidden formatting issues.</div>';
-    return;
-  }
-
-  const html = `
-    <table class="compact" style="width:100%">
-      <thead><tr>
-        <th>Diff</th>
-        <th>Normalised Part</th>
-        <th>Description</th>
-        <th class="num">Qty (${idA})</th>
-        <th class="num">Qty (${idB})</th>
-        <th>MWO (${idA})</th>
-        <th>MWO (${idB})</th>
-      </tr></thead>
-      <tbody>
-        ${diffs.map(d => `
-          <tr>
-            <td style="color:${d.status === 'qty_diff' || d.status === 'mwo_diff' ? 'var(--warn)' : 'var(--danger)'}; font-weight:600;">
-              ${d.status === 'missing_a' ? 'Only in ' + idB : d.status === 'missing_b' ? 'Only in ' + idA : d.status === 'qty_diff' ? 'Qty Mismatch' : 'MWO Mismatch'}
-            </td>
-            <td class="mono">${escapeHtml(d.pn)}</td>
-            <td>${escapeHtml(d.desc || '')}</td>
-            <td class="num ${d.status === 'missing_a' ? 'empty-cell' : ''}">${fmt(d.qtyA)} <span style="font-size:10px;color:#999">${escapeHtml(d.uom)}</span></td>
-            <td class="num ${d.status === 'missing_b' ? 'empty-cell' : ''}">${fmt(d.qtyB)} <span style="font-size:10px;color:#999">${escapeHtml(d.uom)}</span></td>
-            <td class="mono" style="${d.mwoDiff ? 'color:var(--danger);font-weight:600;' : ''}">${escapeHtml(d.mwoA)}</td>
-            <td class="mono" style="${d.mwoDiff ? 'color:var(--danger);font-weight:600;' : ''}">${escapeHtml(d.mwoB)}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-  `;
-  
-  res.innerHTML = `<div class="hint" style="margin:0 0 8px">Found <b>${diffs.length}</b> difference${diffs.length===1?'':'s'} between ${idA} and ${idB}:</div>` + html;
-}
-
-function exportBomDiff() {
-  if (!_lastBomDiffRows || !_lastBomDiffRows.length) {
-    alert('No differences to export.');
-    return;
-  }
-
-  const { idA, idB } = _lastBomDiffIds;
-  const aoa = [
-    ['Diff', 'Normalised Part', 'Description', `Qty (${idA})`, 'UoM', `Qty (${idB})`, `MWO (${idA})`, `MWO (${idB})`]
-  ];
-
-  _lastBomDiffRows.forEach(d => {
-    let diffLabel = '';
-    if (d.status === 'missing_b') diffLabel = `Only in ${idA}`;
-    else if (d.status === 'missing_a') diffLabel = `Only in ${idB}`;
-    else if (d.status === 'qty_diff') diffLabel = 'Qty Mismatch';
-    else if (d.status === 'mwo_diff') diffLabel = 'MWO Mismatch';
-
-    aoa.push([
-      diffLabel,
-      d.pn,
-      d.desc || '',
-      d.qtyA,
-      d.uom,
-      d.qtyB,
-      d.mwoA,
-      d.mwoB
-    ]);
-  });
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'BOM Diff');
-  downloadWorkbook(wb, `BOM_Compare_${dateStamp()}.xlsx`);
-}
-
-/* Wire up the compare buttons */
-document.addEventListener('click', e => {
-  const btn = e.target.closest('button[data-role=compare-boms]');
-  if (btn) {
-    e.preventDefault();
-    e.stopPropagation();
-    openCompareBomModal(btn.dataset.speckey, btn.dataset.specname);
-  }
-});
-/* ---------------------------------------------------------
-   Restore-session banner
-   When Chrome/Edge blocks auto-reload of FSA handles on a fresh
-   session, we show a small card the user can click once to grant
-   permissions for every pending slot and reload them.
-   --------------------------------------------------------- */
-async function showRestoreSessionBanner() {
-  if (document.getElementById('restoreBanner')) return;
-
-  /* Collect slots stuck on 'prompt' or 'denied'. */
-  const pending = [];
-  for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
-    const { handle, perm } = await getSlotStatus(slotKey);
-    if (handle && perm !== 'granted' && perm !== 'absent') {
-      pending.push({ slotKey, slot, perm });
-    }
-  }
-  if (!pending.length) return;
-
-  const banner = document.createElement('div');
-  banner.id = 'restoreBanner';
-  banner.style.cssText = `
-    position: fixed; top: 72px; right: 20px; z-index: 250;
-    background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px;
-    padding: 14px 18px; box-shadow: 0 8px 24px rgba(16,24,40,.14);
-    max-width: 380px; font-size: 13px; line-height: 1.5;`;
-  banner.innerHTML = `
-    <div style="font-weight:600;color:#92400e;margin-bottom:6px">
-      ⚠ Stored files need reconnection
-    </div>
-    <div style="color:#78350f;margin-bottom:10px">
-      The browser blocked automatic reload of ${pending.length}
-      stored file${pending.length === 1 ? '' : 's'}.
-      Click below to reconnect and reload them in one go.
-    </div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button id="restoreDismiss" style="
-        padding:5px 10px;border:1px solid #e5e7eb;background:#fff;
-        border-radius:6px;cursor:pointer;font-size:12px">Dismiss</button>
-      <button id="restoreAll" style="
-        padding:5px 12px;border:1px solid #f59e0b;background:#f59e0b;
-        color:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600">
-        🔓 Reconnect &amp; Reload</button>
-    </div>`;
-  document.body.appendChild(banner);
-
-  document.getElementById('restoreDismiss').addEventListener('click', () => banner.remove());
-  document.getElementById('restoreAll').addEventListener('click', async () => {
-    banner.remove();
-    for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
-      const { handle, perm } = await getSlotStatus(slotKey);
-      if (!handle || perm === 'granted') continue;
-      /* We are inside a click handler, so requestPermission is allowed. */
-      let p = await handle.queryPermission({ mode: slot.mode });
-      if (p !== 'granted') p = await handle.requestPermission({ mode: slot.mode });
-      if (p !== 'granted') continue;
-      const fn = window[slot.reloadFn];
-      if (typeof fn === 'function') {
-        try { await fn(handle); } catch (e) { console.error('Restore ' + slotKey, e); }
-      }
-    }
-    await renderAllFileChips();
-    await renderStoredFilesTab();
-  });
-}
-/* =========================================================
-   MATERIAL READINESS MODULE (Shipment vs Vehicle Allocation)
-   ========================================================= */
-const LS_WH_MAPPING = 'mrp.providerWhMappings.v1';
-let _mrFolderFiles = [];
-
-STATE.materialReadiness = {
-  packingList: [], // { shipmentBatch, containerId, partNo, totalQty, provider, warehouseId, allocatedQty }
-  allocations: [], // { id, vehicleBatch, shipmentBatch, containerId, partNo, qty, date }
-  pendingUpload: [], // Temporarily holds parsed data before warehouse confirmation
-  selectedVehicleBatch: ''
-};
-
-function initMaterialReadiness() {
-  /* 1. Inject Tab Button (Right after Material List) */
-  const tabs = document.querySelector('.tabs');
-  const tabBtn = document.createElement('button');
-  tabBtn.className = 'tab';
-  tabBtn.dataset.tab = 'readiness';
-  tabBtn.textContent = 'Material Readiness';
-  
-  const materialTab = document.querySelector('.tab[data-tab="bom"]');
-  if (materialTab) {
-    materialTab.insertAdjacentElement('afterend', tabBtn);
-  } else {
-    tabs.insertBefore(tabBtn, tabs.lastElementChild); // Fallback
-  }
-
-  /* 2. Inject Panel HTML */
-  const main = document.querySelector('main');
-  const panel = document.createElement('section');
-  panel.className = 'tab-panel';
-  panel.id = 'panel-readiness';
-  panel.innerHTML = `
-    <div class="card">
-      <h2>1. Shipment Packing Lists</h2>
-      <p class="hint">Select a folder containing packing list files. Subfolders are scanned recursively for <code>.xlsx</code>, <code>.xls</code>, and <code>.csv</code>. You will be prompted to assign a warehouse to the shipments.</p>
-      
-      <div class="folder-loader">
-        <div class="folder-path-row">
-          <input id="mrFolderPath" type="text" readonly placeholder="No folder selected…" />
-          <button class="btn" id="mrFolderPick">📁 Choose folder</button>
-          <button class="btn primary" id="mrFolderProcess" disabled>▶ Process files</button>
-        </div>
-        <div class="folder-hint" id="mrFolderInfo">No folder selected yet.</div>
-        
-        <!-- hidden fallback picker -->
-        <input type="file" id="mrFolderFallback" webkitdirectory directory multiple hidden />
-      </div>
-
-      <div id="mrPendingWrap" class="hidden" style="margin-top:16px; border-top:1px dashed #e2e8f0; padding-top:16px;">
-        <h3 style="font-size:14px; margin-bottom:10px;">Assign Warehouses</h3>
-        <div id="mrPendingList" style="max-height:400px; overflow-y:auto; padding-right:8px;"></div>
-        <div class="row-2" style="margin-top:12px;">
-          <button class="btn primary" id="mrConfirmUpload">✓ Confirm & Load</button>
-          <button class="btn ghost" id="mrCancelUpload">✕ Cancel</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>2. Build Readiness</h2>
-      <div class="toolbar">
-        <select id="mrVehicleSelect" style="flex:1; max-width:300px;">
-          <option value="">— select vehicle batch —</option>
-        </select>
-        <button class="btn primary" id="mrCheckBtn">Check Readiness</button>
-        <button class="btn ghost" id="mrAutoCheckBtn">Auto-Link All</button>
-      </div>
-      <div class="stats" id="mrStats" style="margin-bottom:14px;"></div>
-      <div class="table-wrap" style="max-height:500px;">
-        <table id="mrTable"></table>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>3. Allocation Ledger (Traceability)</h2>
-      <div class="toolbar">
-        <input id="mrLedgerSearch" type="search" placeholder="Search by Vehicle Batch, Shipment Batch, or Part No..." />
-        <button class="btn" id="mrLedgerExport">⤓ Export Ledger</button>
-      </div>
-      <div class="table-wrap" style="max-height:500px;">
-        <table id="mrLedgerTable"></table>
-      </div>
-    </div>
-  `;
-  main.appendChild(panel);
-
-  /* 3. Bind Events */
-  bindTabs(); // Re-bind tabs to include the new one
-  
-  document.getElementById('mrFolderPick').addEventListener('click', pickMrFolder);
-  document.getElementById('mrFolderProcess').addEventListener('click', processMrFolder);
-  document.getElementById('mrFolderFallback').addEventListener('change', handleMrFolderFallback);
-  
-  document.getElementById('mrConfirmUpload').addEventListener('click', confirmMrUpload);
-  document.getElementById('mrCancelUpload').addEventListener('click', () => {
-    STATE.materialReadiness.pendingUpload = [];
-    _mrFolderFiles = [];
-    document.getElementById('mrFolderPath').value = '';
-    document.getElementById('mrFolderInfo').textContent = 'No folder selected yet.';
-    document.getElementById('mrFolderProcess').disabled = true;
-    document.getElementById('mrPendingWrap').classList.add('hidden');
-  });
-
-  document.getElementById('mrCheckBtn').addEventListener('click', renderMrReadiness);
-  document.getElementById('mrAutoCheckBtn').addEventListener('click', autoLinkReadiness);
-  
-  document.getElementById('mrLedgerSearch').addEventListener('input', renderMrLedger);
-  document.getElementById('mrLedgerExport').addEventListener('click', exportMrLedger);
-
-  populateMrVehicleSelect();
-  renderMrLedger();
-}
-
-/* =========================================================
-   FOLDER PICKING & PARSING
-   ========================================================= */
-async function pickMrFolder() {
-  if (typeof window.showDirectoryPicker === 'function') {
-    try {
-      const handle = await window.showDirectoryPicker({ mode: 'read' });
-      _mrFolderFiles = [];
-      document.getElementById('mrFolderPath').value = '/' + handle.name + '/';
-      document.getElementById('mrFolderInfo').textContent = 'Scanning folder…';
-      document.getElementById('mrFolderProcess').disabled = true;
-      
-      await walkMrDirectory(handle, '');
-      
-      const n = _mrFolderFiles.length;
-      document.getElementById('mrFolderInfo').textContent = n 
-        ? `${n} packing list file${n===1?'':'s'} found — click “Process files”.`
-        : 'No valid files found.';
-      document.getElementById('mrFolderProcess').disabled = n === 0;
-      return;
-    } catch (e) {
-      if (e.name === 'AbortError') return;
-      console.warn('showDirectoryPicker failed, falling back', e);
-    }
-  }
-  document.getElementById('mrFolderFallback').click();
-}
-
-async function walkMrDirectory(dirHandle, prefix) {
-  for await (const entry of dirHandle.values()) {
-    if (entry.kind === 'file') {
-      if (!/\.(xlsx|xls|csv)$/i.test(entry.name)) continue;
-      const file = await entry.getFile();
-      _mrFolderFiles.push({ file, path: prefix + entry.name });
-    } else if (entry.kind === 'directory') {
-      if (entry.name.startsWith('.') || entry.name.startsWith('~')) continue;
-      await walkMrDirectory(entry, prefix + entry.name + '/');
-    }
-  }
-}
-
-function handleMrFolderFallback(e) {
-  const files = Array.from(e.target.files || []);
-  _mrFolderFiles = files
-    .filter(f => /\.(xlsx|xls|csv)$/i.test(f.name))
-    .map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
-  
-  if (_mrFolderFiles.length) {
-    const first = _mrFolderFiles[0].path;
-    const root  = first.split('/')[0];
-    document.getElementById('mrFolderPath').value = '/' + root + '/';
-    document.getElementById('mrFolderInfo').textContent = `${_mrFolderFiles.length} files found — click “Process files”.`;
-    document.getElementById('mrFolderProcess').disabled = false;
-  } else {
-    document.getElementById('mrFolderPath').value = '';
-    document.getElementById('mrFolderInfo').textContent = 'No valid files found.';
-    document.getElementById('mrFolderProcess').disabled = true;
-  }
-  e.target.value = '';
-}
-
-function parseMrRows(rows) {
-  if (!rows || !rows.length) return [];
-  
-  const header = rows[0].map(h => String(h || '').replace(/\u00a0/g, ' ').trim().toLowerCase());
-  const findCol = (hints) => {
-    for (const h of hints) {
-      const i = header.findIndex(x => x === h || x.includes(h));
-      if (i >= 0) return i;
-    }
-    return -1;
-  };
-
-  const cBatch = findCol(['shipment batch', 'batch id', 'batch']);
-  const cCont  = findCol(['container', 'container id']);
-  const cPart  = findCol(['material code', 'part no', 'material number']);
-  const cQty   = findCol(['quantity', 'qty']);
-  const cProv  = findCol(['provider', 'supplier', 'vendor']);
-
-  if (cBatch < 0 || cCont < 0 || cPart < 0 || cQty < 0 || cProv < 0) {
-    console.warn('Missing required columns in file. Skipping.');
-    return [];
-  }
-
-  const out = [];
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i];
-    if (!r || !r.length) continue;
-    const partNo = String(r[cPart] || '').trim();
-    if (!partNo) continue;
-    
-    out.push({
-      shipmentBatch: String(r[cBatch] || '').trim(),
-      containerId:   String(r[cCont] || '').trim(),
-      partNo:        partNo,
-      totalQty:      Number(String(r[cQty]).replace(/[^0-9.]/g, '')) || 0,
-      provider:      String(r[cProv] || '').trim(),
-      warehouseId:   '',
-      allocatedQty:  0
-    });
-  }
-  return out;
-}
-
-async function processMrFolder() {
-  if (!_mrFolderFiles.length) return;
-  
-  const btn = document.getElementById('mrFolderProcess');
-  const info = document.getElementById('mrFolderInfo');
-  btn.disabled = true;
-  
-  let allItems = [];
-  let ok = 0, fail = 0;
-  
-  for (let i = 0; i < _mrFolderFiles.length; i++) {
-    const f = _mrFolderFiles[i];
-    info.textContent = `Processing ${i+1} / ${_mrFolderFiles.length} — ${f.path}`;
-    await yieldToUI();
-    
-    try {
-      const rows = await fileToRows(f.file);
-      const parsed = parseMrRows(rows);
-      if (parsed.length) {
-        allItems.push(...parsed);
-        ok++;
-      }
-    } catch (err) {
-      console.error(err);
-      fail++;
-    }
-  }
-  
-  if (allItems.length) {
-    STATE.materialReadiness.pendingUpload = allItems;
-    renderMrPendingAssignments();
-    info.textContent = `Loaded ${allItems.length} items from ${ok} file(s). ${fail} failed.`;
-  } else {
-    alert('No valid packing list items found in the selected folder.');
-    info.textContent = 'Processing complete. No valid data found.';
-    btn.disabled = false;
-  }
-}
-
-/* =========================================================
-   WAREHOUSE ASSIGNMENT
-   ========================================================= */
-function renderMrPendingAssignments() {
-  const wrap = document.getElementById('mrPendingWrap');
-  const list = document.getElementById('mrPendingList');
-  const pending = STATE.materialReadiness.pendingUpload;
-
-  // Group by ShipmentBatch + Provider
-  const groups = new Map();
-  for (const p of pending) {
-    const key = p.shipmentBatch + '||' + p.provider;
-    if (!groups.has(key)) groups.set(key, { shipmentBatch: p.shipmentBatch, provider: p.provider, count: 0 });
-    groups.get(key).count++;
-  }
-
-  // Load past mappings from local storage
-  let pastMappings = {};
-  try { pastMappings = JSON.parse(localStorage.getItem(LS_WH_MAPPING) || '{}'); } catch(e){}
-
-  const activeWhs = STATE.config.warehouses.filter(w => w.enabled);
-
-  list.innerHTML = Array.from(groups.values()).map(g => {
-    const savedWh = pastMappings[g.provider] || STATE.config.defaultWarehouseId || '';
-    return `
-      <div class="mr-wh-row">
-        <div>
-          <b class="mono">${escapeHtml(g.shipmentBatch)}</b> (${g.count} items) <br>
-          <small style="color:var(--muted)">Provider: ${escapeHtml(g.provider)}</small>
-        </div>
-        <select data-batch="${escapeHtml(g.shipmentBatch)}" data-provider="${escapeHtml(g.provider)}" class="mr-wh-select">
-          <option value="">— select warehouse —</option>
-          ${activeWhs.map(w => `<option value="${w.id}" ${w.id === savedWh ? 'selected' : ''}>${escapeHtml(w.name)}</option>`).join('')}
-        </select>
-      </div>
-    `;
-  }).join('');
-
-  wrap.classList.remove('hidden');
-  document.getElementById('mrFolderProcess').disabled = false;
-}
-
-function confirmMrUpload() {
-  const selects = document.querySelectorAll('.mr-wh-select');
-  const assignments = new Map();
-  let valid = true;
-
-  selects.forEach(sel => {
-    if (!sel.value) { valid = false; sel.style.borderColor = 'var(--danger)'; }
-    else {
-      sel.style.borderColor = '';
-      const key = sel.dataset.batch + '||' + sel.dataset.provider;
-      assignments.set(key, sel.value);
-    }
-  });
-
-  if (!valid) {
-    alert('Please assign a warehouse to all shipments before confirming.');
-    return;
-  }
-
-  // Save mappings for the future
-  let pastMappings = {};
-  try { pastMappings = JSON.parse(localStorage.getItem(LS_WH_MAPPING) || '{}'); } catch(e){}
-  
-  for (const [key, whId] of assignments) {
-    const [batch, prov] = key.split('||');
-    pastMappings[prov] = whId;
-  }
-  localStorage.setItem(LS_WH_MAPPING, JSON.stringify(pastMappings));
-
-  // Apply to pending data and push to main ledger
-  for (const p of STATE.materialReadiness.pendingUpload) {
-    p.warehouseId = assignments.get(p.shipmentBatch + '||' + p.provider);
-    STATE.materialReadiness.packingList.push(p);
-  }
-
-  STATE.materialReadiness.pendingUpload = [];
-  _mrFolderFiles = [];
-  document.getElementById('mrPendingWrap').classList.add('hidden');
-  document.getElementById('mrFolderPath').value = '';
-  document.getElementById('mrFolderInfo').textContent = 'Data loaded successfully. Select a new folder to load more.';
-  
-  renderMrLedger();
-  populateMrVehicleSelect();
-  if (STATE.materialReadiness.selectedVehicleBatch) renderMrReadiness();
-}
-
-/* =========================================================
-   READINESS CHECK
-   ========================================================= */
-function populateMrVehicleSelect() {
-  const sel = document.getElementById('mrVehicleSelect');
-  if (!sel) return;
-  const batches = STATE.batches || [];
-  sel.innerHTML = `<option value="">— select vehicle batch —</option>` + 
-    batches.map(b => `<option value="${escapeHtml(b.batch)}">${escapeHtml(b.batch)} (${escapeHtml(b.model)})</option>`).join('');
-}
-
-function renderMrReadiness() {
-  const batchId = document.getElementById('mrVehicleSelect').value;
-  STATE.materialReadiness.selectedVehicleBatch = batchId;
-  const tbl = document.getElementById('mrTable');
-  const stats = document.getElementById('mrStats');
-
-  if (!batchId) {
-    tbl.innerHTML = '';
-    stats.innerHTML = '';
-    return;
-  }
-
-  const batch = STATE.batches.find(b => b.batch === batchId);
-  if (!batch) return;
-
-  const bomKey = resolveBomKeyForBatch(batch);
-  const bom = STATE.boms.find(b => bomKeyOf(b) === bomKey);
-  
-  if (!bom) {
-    tbl.innerHTML = `<thead><tr><th>No BOM linked to this vehicle batch.</th></tr></thead>`;
-    stats.innerHTML = '';
-    return;
-  }
-
-  // 1. Calculate Requirements
-  const reqs = new Map();
-  for (const p of bom.parts) {
-    reqs.set(p.partNo, (reqs.get(p.partNo) || 0) + p.qty);
-  }
-
-  // 2. Compare against Shipment Ledger
-  const rows = [];
-  let totalReady = 0;
-  let totalShort = 0;
-
-  const packingList = STATE.materialReadiness.packingList || [];
-
-  for (const [partNo, reqQty] of reqs.entries()) {
-    const info = STATE.partIndex[partNo] || {};
-    
-    // Find available shipments for this part
-    const shipments = packingList.filter(s => s.partNo === partNo && (s.totalQty - s.allocatedQty) > 0);
-    const availQty = shipments.reduce((sum, s) => sum + (s.totalQty - s.allocatedQty), 0);
-    
-    const shortQty = Math.max(0, reqQty - availQty);
-    if (shortQty === 0) totalReady++;
-    else totalShort++;
-
-    rows.push({ partNo, info, reqQty, availQty, shortQty, shipments });
-  }
-
-  // Sort: Shortages first
-  rows.sort((a, b) => {
-    if (a.shortQty > 0 && b.shortQty === 0) return -1;
-    if (a.shortQty === 0 && b.shortQty > 0) return 1;
-    return a.partNo.localeCompare(b.partNo);
-  });
-
-  stats.innerHTML = `
-    <div class="stat">
-      <div class="label">Unique Materials</div>
-      <div class="value">${rows.length}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Fully Covered</div>
-      <div class="value" style="color:var(--ok)">${totalReady}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Shortages</div>
-      <div class="value" style="color:${totalShort ? 'var(--danger)' : 'inherit'}">${totalShort}</div>
-    </div>
-  `;
-
-  const head = `
-    <thead><tr>
-      <th>Material No.</th>
-      <th>Description</th>
-      <th class="num">Required</th>
-      <th class="num">Available</th>
-      <th class="num">Shortage</th>
-      <th class="num">Action</th>
-    </tr></thead>
-  `;
-
-  const body = rows.map(r => {
-    const isShort = r.shortQty > 0;
-    const btn = r.availQty > 0 
-      ? `<button class="btn tiny primary" data-part="${escapeHtml(r.partNo)}" data-req="${r.reqQty}" onclick="openMrAllocationModal('${escapeHtml(r.partNo)}', ${r.reqQty})">Link Shipment</button>`
-      : '<span class="hint">No Stock</span>';
-      
-    return `
-      <tr class="${isShort ? 'mr-short-row' : ''}">
-        <td class="mono"><b>${escapeHtml(r.partNo)}</b></td>
-        <td>${escapeHtml(r.info.nameEN || r.info.nameCN || '')}</td>
-        <td class="num">${fmt(r.reqQty)} <small>${escapeHtml(r.info.uom)}</small></td>
-        <td class="num" style="color:${r.availQty > 0 ? 'var(--ok)' : 'inherit'}">${fmt(r.availQty)}</td>
-        <td class="num" style="color:${isShort ? 'var(--danger)' : 'inherit'}; font-weight:${isShort ? '600' : '400'}">${isShort ? fmt(r.shortQty) : '—'}</td>
-        <td>${btn}</td>
-      </tr>
-    `;
-  }).join('');
-
-  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
-}
-
-/* =========================================================
-   MANUAL ALLOCATION MODAL
-   ========================================================= */
-function openMrAllocationModal(partNo, reqQty) {
-  const batchId = STATE.materialReadiness.selectedVehicleBatch;
-  if (!batchId) return;
-
-  const packingList = STATE.materialReadiness.packingList;
-  const availableShipments = packingList.filter(s => s.partNo === partNo && (s.totalQty - s.allocatedQty) > 0);
-
-  if (!availableShipments.length) return;
-
-  // Create Modal container
-  let modal = document.getElementById('mrAllocModal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'mrAllocModal';
-    modal.className = 'modal-overlay hidden';
-    modal.innerHTML = `
-      <div class="modal-box" style="width:min(700px,100%)">
-        <div class="modal-header">
-          <div>
-            <h3>Link Shipment — ${escapeHtml(partNo)}</h3>
-            <div class="bdm-subtitle">Select which containers to pull from. Required: ${fmt(reqQty)}</div>
-          </div>
-          <button class="modal-close" onclick="closeMrAllocModal()">✕</button>
-        </div>
-        <div class="modal-body" style="padding:16px 20px;">
-          <div id="mrAllocList"></div>
-        </div>
-        <div class="modal-actions">
-          <button class="btn primary" id="mrAllocConfirm">✓ Confirm Allocation</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(modal);
-  }
-
-  const list = document.getElementById('mrAllocList');
-  list.innerHTML = availableShipments.map((s, i) => {
-    const avail = s.totalQty - s.allocatedQty;
-    return `
-      <div class="mr-alloc-row" data-idx="${i}">
-        <div>
-          <b class="mono">${escapeHtml(s.shipmentBatch)}</b> / ${escapeHtml(s.containerId)} <br>
-          <small style="color:var(--muted)">${escapeHtml(s.provider)} (WH: ${escapeHtml(s.warehouseId)})</small>
-        </div>
-        <div class="num">Available: <b>${fmt(avail)}</b></div>
-        <div></div>
-        <div>
-          <input type="number" class="mr-alloc-input" data-idx="${i}" max="${avail}" min="0" value="0" />
-        </div>
-      </div>
-    `;
-  }).join('');
-
-  // Store available shipments temporarily for the confirm button
-  modal._availableShipments = availableShipments;
-  modal._reqQty = reqQty;
-  modal._partNo = partNo;
-  modal._batchId = batchId;
-
-  document.getElementById('mrAllocConfirm').onclick = confirmMrAllocation;
-
-  modal.classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
-}
-
-function closeMrAllocModal() {
-  const modal = document.getElementById('mrAllocModal');
-  if (modal) modal.classList.add('hidden');
-  document.body.style.overflow = '';
-}
-
-function confirmMrAllocation() {
-  const modal = document.getElementById('mrAllocModal');
-  const inputs = document.querySelectorAll('.mr-alloc-input');
-  const available = modal._availableShipments;
-  const batchId = modal._batchId;
-  const partNo = modal._partNo;
-
-  let totalAllocated = 0;
-  const newAllocations = [];
-
-  for (const inp of inputs) {
-    const idx = Number(inp.dataset.idx);
-    const qty = Number(inp.value) || 0;
-    if (qty > 0) {
-      const ship = available[idx];
-      newAllocations.push({ ship, qty });
-      totalAllocated += qty;
-    }
-  }
-
-  if (totalAllocated === 0) {
-    alert('Please enter a quantity to allocate.');
-    return;
-  }
-
-  // Save to Ledger
-  for (const alloc of newAllocations) {
-    const ship = alloc.ship;
-    
-    // Update packed list available qty
-    const pIdx = STATE.materialReadiness.packingList.findIndex(x => x === ship);
-    if (pIdx >= 0) STATE.materialReadiness.packingList[pIdx].allocatedQty += alloc.qty;
-
-    // Add to allocation ledger
-    STATE.materialReadiness.allocations.push({
-      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
-      vehicleBatch: batchId,
-      shipmentBatch: ship.shipmentBatch,
-      containerId: ship.containerId,
-      partNo: partNo,
-      qty: alloc.qty,
-      provider: ship.provider,
-      warehouseId: ship.warehouseId,
-      date: new Date().toISOString()
-    });
-  }
-
-  closeMrAllocModal();
-  renderMrReadiness();
-  renderMrLedger();
-}
-
-/* =========================================================
-   LEDGER (TRACEABILITY)
-   ========================================================= */
-function renderMrLedger() {
-  const tbl = document.getElementById('mrLedgerTable');
-  if (!tbl) return;
-
-  const q = (document.getElementById('mrLedgerSearch').value || '').toLowerCase();
-  let allocs = STATE.materialReadiness.allocations || [];
-
-  if (q) {
-    allocs = allocs.filter(a => 
-      a.vehicleBatch.toLowerCase().includes(q) || 
-      a.shipmentBatch.toLowerCase().includes(q) ||
-      a.partNo.toLowerCase().includes(q)
+function showTokenSetup() {
+    const currentToken = getGitHubToken() || '';
+    const newToken = prompt(
+        '🔑 Enter your GitHub Personal Access Token\n\n' +
+        'How to get one:\n' +
+        '1. GitHub Settings → Developer settings\n' +
+        '2. Personal access tokens → Tokens (classic)\n' +
+        '3. Check "repo" (all permissions)\n\n' +
+        'The token will be saved in your browser.',
+        currentToken
     );
-  }
-
-  // Sort newest first
-  allocs = allocs.slice().sort((a,b) => (b.date||'').localeCompare(a.date||''));
-
-  if (!allocs.length) {
-    tbl.innerHTML = '<thead><tr><th>No allocations found.</th></tr></thead>';
-    return;
-  }
-
-  const head = `
-    <thead><tr>
-      <th>Date</th>
-      <th>Vehicle Batch</th>
-      <th>Part No.</th>
-      <th>Qty Used</th>
-      <th>Shipment Batch</th>
-      <th>Container</th>
-      <th>Warehouse</th>
-      <th>Provider</th>
-      <th></th>
-    </tr></thead>
-  `;
-
-  const body = allocs.map(a => `
-    <tr>
-      <td>${fmtDate(new Date(a.date))}</td>
-      <td class="mono"><b>${escapeHtml(a.vehicleBatch)}</b></td>
-      <td class="mono">${escapeHtml(a.partNo)}</td>
-      <td class="num" style="font-weight:600;color:var(--brand)">${fmt(a.qty)}</td>
-      <td class="mono">${escapeHtml(a.shipmentBatch)}</td>
-      <td>${escapeHtml(a.containerId)}</td>
-      <td><span class="sf-badge kind">${escapeHtml(a.warehouseId)}</span></td>
-      <td>${escapeHtml(a.provider)}</td>
-      <td><button class="btn tiny danger" onclick="unallocateMr('${a.id}')" title="Remove Link">✕</button></td>
-    </tr>
-  `).join('');
-
-  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
+    if (newToken !== null && newToken.trim()) {
+        setGitHubToken(newToken);
+        alert('✅ Token saved to browser local storage');
+        loadData();
+    } else if (newToken === '') {
+        clearGitHubToken();
+        alert('Token cleared');
+    }
 }
-
-function unallocateMr(allocId) {
-  if (!confirm('Remove this allocation? The parts will be returned to available stock.')) return;
-
-  const allocIdx = STATE.materialReadiness.allocations.findIndex(a => a.id === allocId);
-  if (allocIdx < 0) return;
-
-  const alloc = STATE.materialReadiness.allocations[allocIdx];
-
-  // Return qty to packing list
-  const ship = STATE.materialReadiness.packingList.find(s => 
-    s.shipmentBatch === alloc.shipmentBatch && 
-    s.containerId === alloc.containerId && 
-    s.partNo === alloc.partNo
-  );
-
-  if (ship) ship.allocatedQty = Math.max(0, ship.allocatedQty - alloc.qty);
-
-  // Remove from allocations
-  STATE.materialReadiness.allocations.splice(allocIdx, 1);
-
-  renderMrLedger();
-  if (STATE.materialReadiness.selectedVehicleBatch) renderMrReadiness();
-}
-
-/* =========================================================
-   EXPORT
-   ========================================================= */
-function exportMrLedger() {
-  const allocs = STATE.materialReadiness.allocations || [];
-  if (!allocs.length) { alert('No data to export.'); return; }
-
-  const aoa = [
-    ['Allocation Traceability Ledger'],
-    ['Date', 'Vehicle Batch', 'Part No.', 'Qty Used', 'Shipment Batch', 'Container', 'Warehouse', 'Provider']
-  ];
-
-  allocs.forEach(a => {
-    aoa.push([
-      fmtDate(new Date(a.date)), a.vehicleBatch, a.partNo, a.qty, 
-      a.shipmentBatch, a.containerId, a.warehouseId, a.provider
-    ]);
-  });
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Allocation Ledger');
-  downloadWorkbook(wb, `Material_Allocation_${dateStamp()}.xlsx`);
-}
-
-/* =========================================================
-   AUTO-LINK (Helper if needed later, currently manual as requested)
-   ========================================================= */
-function autoLinkReadiness() {
-  alert('Auto-link logic requires you to confirm manual allocations first. Please use the "Link Shipment" buttons.');
-}
-
-/* Initialize the module on load */
-window.addEventListener('DOMContentLoaded', () => {
-  setTimeout(initMaterialReadiness, 100); // Slight delay ensures base UI is ready
-});
-/* =========================================================
-   BULK MATERIAL SEARCH & ADVANCED EXPORTS
-   ========================================================= */
-STATE.bulkSearchList = null; // null = inactive, Array = active search
-
-function initBulkSearch() {
-  const toolbar = document.querySelector('#panel-bom .toolbar');
-  if (!toolbar) return;
-
-  // Inject Buttons next to the existing Export button
-  const bulkBtn = document.createElement('button');
-  bulkBtn.className = 'btn primary';
-  bulkBtn.innerHTML = '📋 Bulk Search';
-  bulkBtn.onclick = openBulkSearchModal;
-
-  const masterBtn = document.createElement('button');
-  masterBtn.className = 'btn';
-  masterBtn.innerHTML = '⤓ Export Master List';
-  masterBtn.onclick = exportMasterWhereUsed;
-
-  toolbar.appendChild(bulkBtn);
-  toolbar.appendChild(masterBtn);
-}
-
-function openBulkSearchModal() {
-  let modal = document.getElementById('bulkSearchModal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'bulkSearchModal';
-    modal.className = 'modal-overlay hidden';
-    modal.innerHTML = `
-      <div class="modal-box" style="width:min(600px,100%)">
-        <div class="modal-header">
-          <div>
-            <h3>Bulk Material Search</h3>
-            <div class="bdm-subtitle">Paste material numbers below. Separate by new lines or commas.</div>
-          </div>
-          <button class="modal-close" onclick="document.getElementById('bulkSearchModal').classList.add('hidden')">✕</button>
-        </div>
-        <div class="modal-body" style="padding:16px 20px;">
-          <textarea id="bulkSearchInput" style="width:100%; height:200px; padding:10px; border:1px solid var(--border); border-radius:8px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px;" placeholder="e.g.&#10;403003460AAAXX&#10;555000001AAAXX"></textarea>
-          <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
-            <button class="btn ghost" id="bulkSearchClear" onclick="clearBulkSearch()">Clear & Reset</button>
-            <button class="btn primary" id="bulkSearchApply">Apply Search</button>
-          </div>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(modal);
-
-    document.getElementById('bulkSearchApply').onclick = () => {
-      const text = document.getElementById('bulkSearchInput').value;
-      const parts = text.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-      
-      if (!parts.length) {
-        clearBulkSearch();
+function syncNodesForCurrentScenario() {
+    if (currentMode !== 'edit') {
+        alert('Please enter Edit Mode first.');
         return;
-      }
-      
-      STATE.bulkSearchList = Array.from(new Set(parts)); // Deduplicate
-      modal.classList.add('hidden');
-      
-      // Clear standard search and filter to avoid conflicts
-      document.getElementById('bomSearch').value = '';
-      document.getElementById('bomFilter').value = 'all';
-      
-      renderBomTable();
-    };
-  }
-  
-  modal.classList.remove('hidden');
-  document.getElementById('bulkSearchInput').focus();
-}
-
-/* NEW: Global clear function */
-function clearBulkSearch() {
-  // 1. Clear state variables
-  STATE.bulkSearchList = null;
-  WHERE_USED_OPEN.clear(); // Collapse all auto-expanded rows
-  
-  // 2. Clear UI inputs
-  const searchInp = document.getElementById('bulkSearchInput');
-  if (searchInp) searchInp.value = '';
-  document.getElementById('bomSearch').value = '';
-  document.getElementById('bomFilter').value = 'all';
-  
-  // 3. Hide modal
-  const modal = document.getElementById('bulkSearchModal');
-  if (modal) modal.classList.add('hidden');
-  
-  // 4. Re-render the clean full list
-  renderBomTable();
-}
-/* =========================================================
-   EXPORT 1: BULK SEARCH RESULTS (Flattened)
-   ========================================================= */
-function exportBulkWhereUsed() {
-  if (!STATE.bulkSearchList || !STATE.bulkSearchList.length) {
-    alert('No active bulk search list to export.');
-    return;
-  }
-
-  const aoa = [
-    ['Material No.', 'Description', 'Spec Name', 'Model', 'BOM ID', 'Color Code', 'Sales Batch', 'Qty per Vehicle', 'UoM']
-  ];
-
-  // Iterate in the exact order the user pasted them
-  for (const partNo of STATE.bulkSearchList) {
-    const p = STATE.partIndex[partNo];
-    
-    // If part is not found in master data
-    if (!p) {
-      aoa.push([partNo, '⚠ NOT FOUND IN MASTER DATA', '', '', '', '', '', '', '']);
-      continue;
     }
-
-    const bomsForPart = Array.from(p.bomKeys)
-      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
-      .filter(Boolean);
-
-    if (!bomsForPart.length) {
-      aoa.push([partNo, p.nameEN || p.nameCN || '', 'No BOM data', '', '', '', '', '', '']);
-      continue;
+    const sc = getCurrentScenario();
+    if (!sc) {
+        alert('No scenario selected.');
+        return;
     }
-
-    // Flatten every BOM this part is used in
-    for (const bom of bomsForPart) {
-      const specKey = specKeyOf(bom.vehicleMatNo);
-      const specBoms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
-      const specName = deriveSpecName(specBoms);
-      const cc = colorCodeOf(bom.vehicleMatNo);
-      
-      const key = bomKeyOf(bom);
-      const qty = p.perBomQty[key] || 0;
-
-      aoa.push([
-        partNo,
-        p.nameEN || p.nameCN || '',
-        specName,
-        bom.vehicleDesc || '',
-        bom.bomId || '',
-        cc,
-        bom.batchId || '',
-        qty,
-        p.uom || ''
-      ]);
+    const processes = sc.processes || [];
+    if (processes.length === 0) {
+        alert('No processes in this scenario.');
+        return;
     }
-  }
+    let nodes = sc.workflow?.nodes || [];
+    // Map existing processId -> node
+    const processNodeMap = {};
+    nodes.forEach(n => { if (n.processId) processNodeMap[n.processId] = n; });
+    const cols = 6, spacingX = 160, spacingY = 110;
+    let addedCount = 0;
+    // Determine starting index for new node IDs
+    let maxCounter = 0;
+    nodes.forEach(n => {
+        const match = n.id.match(/^node-(\d+)$/);
+        if (match) maxCounter = Math.max(maxCounter, parseInt(match[1]) + 1);
+    });
+    let counter = maxCounter || 0;
 
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Bulk Search Results');
-  downloadWorkbook(wb, `Bulk_WhereUsed_${dateStamp()}.xlsx`);
-}
-
-/* =========================================================
-   EXPORT 2: MASTER LIST (Flattened)
-   ========================================================= */
-function exportMasterWhereUsed() {
-  const rows = Object.values(STATE.partIndex);
-  if (!rows.length) {
-    alert('No material data loaded.');
-    return;
-  }
-
-  const aoa = [
-    ['Material No.', 'Description', 'UoM', 'Type', 'Spec Name', 'Model', 'BOM ID', 'Color Code', 'Sales Batch', 'Qty per Vehicle']
-  ];
-
-  // Sort parts alphabetically
-  rows.sort((a, b) => a.partNo.localeCompare(b.partNo, undefined, { numeric: true }));
-
-  for (const p of rows) {
-    const bomsForPart = Array.from(p.bomKeys)
-      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
-      .filter(Boolean);
-
-    if (!bomsForPart.length) {
-      aoa.push([p.partNo, p.nameEN || p.nameCN || '', p.uom, p.isCommon ? 'COMMON' : 'SPECIFIC', '', '', '', '', '', '']);
-      continue;
-    }
-
-    for (const bom of bomsForPart) {
-      const specKey = specKeyOf(bom.vehicleMatNo);
-      const specBoms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
-      const specName = deriveSpecName(specBoms);
-      const cc = colorCodeOf(bom.vehicleMatNo);
-      
-      const key = bomKeyOf(bom);
-      const qty = p.perBomQty[key] || 0;
-
-      aoa.push([
-        p.partNo,
-        p.nameEN || p.nameCN || '',
-        p.uom,
-        p.isCommon ? 'COMMON' : 'SPECIFIC',
-        specName,
-        bom.vehicleDesc || '',
-        bom.bomId || '',
-        cc,
-        bom.batchId || '',
-        qty
-      ]);
-    }
-  }
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Master Where Used');
-  downloadWorkbook(wb, `Master_WhereUsed_${dateStamp()}.xlsx`);
-}
-
-/* Initialize on load */
-window.addEventListener('DOMContentLoaded', () => {
-  setTimeout(initBulkSearch, 150);
-});
-
-/* =========================================================
-   SCRAP ANALYSIS MODULE
-   ========================================================= */
-STATE.scrapAnalysis = {
-  records: [],
-  filteredRecords: [],
-  fileName: '',
-  imageFolderHandle: null,
-  charts: {},
-  // NEW: Filtering and Sorting
-  period: { from: '', to: '' },
-  pendingPeriod: { from: '', to: '' },
-  sorts: {},
-  filters: {}
-};
-
-function parseScrapDate(raw) {
-  if (!raw) return null;
-  const s = String(raw).trim();
-  if (!s || s.toLowerCase() === 'not signed') return null;
-  
-  // Handle formats like "13/9/26", "8/9/2026", "8/9/26-6"
-  const clean = s.split('-')[0].trim(); 
-  let parts = clean.split('/');
-  if (parts.length === 3) {
-    let d = parseInt(parts[0], 10);
-    let m = parseInt(parts[1], 10) - 1;
-    let y = parseInt(parts[2], 10);
-    if (y < 100) y += 2000; // 26 -> 2026
-    const dt = new Date(y, m, d);
-    return isNaN(dt) ? null : dt;
-  }
-  const dt = new Date(clean);
-  return isNaN(dt) ? null : dt;
-}
-
-async function handleScrapLogFiles(files) {
-  const f = files[0];
-  if (!f) return;
-
-  try {
-    const sheets = await fileToSheetRows(f);
-    let sheetsToProcess;
-    
-    if (sheets.length === 1) {
-      sheetsToProcess = sheets;
-    } else {
-      const picked = await promptSheetSelection(sheets, f.name);
-      if (!picked || !picked.length) return;
-      sheetsToProcess = picked;
-    }
-
-    const records = [];
-    let shiftWarnings = 0;
-
-    for (const sheet of sheetsToProcess) {
-      const rows = sheet.rows;
-      if (!rows || !rows.length) continue;
-
-      const firstRow = rows[0].map(c => String(c || '').toLowerCase());
-      const hasHeader = firstRow.some(c => c.includes('ticket') || c.includes('category') || c.includes('cantidad') || c.includes('file'));
-      const startIdx = hasHeader ? 1 : 0;
-
-      for (let i = startIdx; i < rows.length; i++) {
-        const r = rows[i];
-        if (!r || !r.length) continue;
-
-        const file     = String(r[0] || '').trim();
-        const category = String(r[1] || '').trim();
-        const ticketId = String(r[2] || '').trim();
-        const partNo   = String(r[3] || '').trim();
-        const desc     = String(r[4] || '').trim();
-        
-        let qty = Number(String(r[6]).replace(/[^0-9.-]/g, ''));
-        if (isNaN(qty) || qty === 0) qty = Number(String(r[5]).replace(/[^0-9.-]/g, ''));
-        if (isNaN(qty)) qty = 1;
-
-        let rawDate = r[9] || '';
-        let parsedDate = parseScrapDate(rawDate);
-        if (!parsedDate && r[10]) {
-          parsedDate = parseScrapDate(r[10]);
-          if (parsedDate) rawDate = r[10]; 
+    processes.forEach((p, idx) => {
+        if (!processNodeMap[p.id]) {
+            const isSub = p.seq && p.seq.includes('.');
+            const node = {
+                id: 'node-' + counter++,
+                processId: p.id,
+                type: isSub ? 'sub' : 'main',
+                x: 100 + (idx % cols) * spacingX,
+                y: 100 + Math.floor(idx / cols) * spacingY,
+                label: p.name || 'Unnamed',
+                hidden: false
+            };
+            nodes.push(node);
+            addedCount++;
         }
-        if (!parsedDate && file) shiftWarnings++; 
+    });
 
-        const reason   = String(r[8] || r[5] || 'Unknown').trim();
-        const operator = String(r[11] || '').trim();
-
-        if (file || partNo || ticketId) {
-          records.push({
-            file,
-            category,
-            ticketId,
-            partNo,
-            desc,           // section_1.codigo_componente
-            reason1: String(r[5] || '').trim(), // section_1.codigo_rechaz
-            qty,
-            area: String(r[7] || '').trim(),    // section_1.origen_area_zona
-            reason2: String(r[8] || '').trim(), // section_2.motivo_rechace
-            rawDate: String(r[9] || '').trim(),
-            date: parsedDate ? isoDate(parsedDate) : '',
-            obs: String(r[10] || '').trim(),
-            operator: String(r[11] || '').trim()
-          });
-        }
-      }
+    if (addedCount === 0) {
+        alert('All processes already have nodes.');
+        return;
     }
 
-    if (!records.length) {
-      alert('No valid scrap records found in the selected sheet(s).');
-      return;
-    }
+    sc.workflow.nodes = nodes;
+    // Update the counter in workflow
+    if (!sc.workflow) sc.workflow = {};
+    sc.workflow.nodeIdCounter = counter;
 
-    STATE.scrapAnalysis.records = records;
-    // Reset filters & set full date range
-    STATE.scrapAnalysis.filters = {};
-    STATE.scrapAnalysis.sorts = {};
-    if ($('#scrapPeriodControls').length) {
-      $('#scrapPeriodControls button[data-range="all"]').click();
-    }
-    STATE.scrapAnalysis.fileName = f.name;
-
-    const info = $('#scrapLogInfo');
-    if (info) info.innerHTML = `Loaded — ${records.length} records · <span class="${shiftWarnings ? 'quality-warn' : ''}">${shiftWarnings} date anomalies detected.</span>`;
-    
-    const cats = new Set(records.map(r => r.category).filter(Boolean));
-    $('#scrapCategoryFilter').innerHTML = '<option value="all">All Categories</option>' + 
-      Array.from(cats).map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
-
-    $('#scrapSearch').value = '';
-    renderScrapAnalysis();
-
-  } catch (e) {
-    console.error(e);
-    alert('Failed to parse scrap file: ' + e.message);
-  }
+    // Save the updated data
+    saveWorkflowData(sc.workflow);
+    // Also update snapshot? saveWorkflowData already calls renderWorkflow, but we may need to save to GitHub.
+    // We'll prompt the user to save manually or auto-save.
+    alert(`✅ Added ${addedCount} nodes. Please click "Save to GitHub" to persist the changes.`);
+    renderWorkflow();
 }
-let _editingScrapIndex = -1;
+// ============================
+// 6. Snapshot Management
+// ============================
 
-function renderScrapAnalysis() {
-  const q = ($('#scrapSearch').value || '').toLowerCase();
-  const catFilter = $('#scrapCategoryFilter').value;
-  const hasFolder = !!STATE.scrapAnalysis.imageFolderHandle;
-  const p = STATE.scrapAnalysis.period;
+function loadSnapshot() {
+    try {
+        const saved = localStorage.getItem('bpo_snapshot');
+        if (saved) {
+            lastSnapshot = JSON.parse(saved);
+            return true;
+        }
+    } catch (e) {
+        console.warn('Failed to load snapshot:', e);
+    }
+    return false;
+}
 
-  // 1. Base Filtering (Search + Dropdown + Date Range)
-  let filtered = STATE.scrapAnalysis.records.filter(r => {
-    if (catFilter !== 'all' && r.category !== catFilter) return false;
-    if (p.from && (!r.date || r.date < p.from)) return false;
-    if (p.to && (!r.date || r.date > p.to)) return false;
-    
-    if (q) {
-      const hay = `${r.partNo} ${r.reason1} ${r.reason2} ${r.operator} ${r.ticketId} ${r.desc}`.toLowerCase();
-      if (!hay.includes(q)) return false;
+function saveSnapshot(data) {
+    try {
+        localStorage.setItem('bpo_snapshot', JSON.stringify(data));
+        lastSnapshot = JSON.parse(JSON.stringify(data));
+        return true;
+    } catch (e) {
+        console.warn('Failed to save snapshot:', e);
+        return false;
+    }
+}
+
+function initializeSnapshot(data) {
+    if (!loadSnapshot()) {
+        lastSnapshot = JSON.parse(JSON.stringify(data));
+        saveSnapshot(lastSnapshot);
+        console.log('📸 Initial snapshot created');
+        return true;
     }
     return true;
-  });
+}
 
-  // 2. Column Sorting
-  const sortCol = Object.keys(STATE.scrapAnalysis.sorts)[0] || '';
-  const sortDir = sortCol && STATE.scrapAnalysis.sorts[sortCol] === 'desc' ? -1 : 1;
-  if (sortCol) {
-    filtered.sort((a, b) => {
-      let valA = a[sortCol];
-      let valB = b[sortCol];
-      
-      // Special handling for Description (needs Material List lookup)
-      if (sortCol === 'desc') {
-        valA = getScrapDescription(a);
-        valB = getScrapDescription(b);
-      }
-      if (sortCol === 'reason') {
-        valA = a.reason2 || a.reason1 || '';
-        valB = b.reason2 || b.reason1 || '';
-      }
-
-      if (sortCol === 'qty') return ((Number(valA) || 0) - (Number(valB) || 0)) * sortDir;
-      return String(valA || '').localeCompare(String(valB || ''), undefined, { numeric: true }) * sortDir;
-    });
-  }
-
-  // 3. Column Filters (from popup)
-  for (const [colId, allowedSet] of Object.entries(STATE.scrapAnalysis.filters)) {
-    if (!allowedSet) continue;
-    filtered = filtered.filter(r => {
-      let val = r[colId];
-      if (colId === 'desc') val = getScrapDescription(r);
-      if (colId === 'reason') val = r.reason2 || r.reason1 || '';
-      return allowedSet.has(String(val || ''));
-    });
-  }
-
-  STATE.scrapAnalysis.filteredRecords = filtered;
-
-  // --- KPIs (Same as before) ---
-  const totalQty = filtered.reduce((s, r) => s + (r.qty || 0), 0);
-  const uniqueParts = new Set(filtered.map(r => r.partNo).filter(Boolean)).size;
-  const topReasonCount = {};
-  filtered.forEach(r => {
-    const reason = r.reason2 || r.reason1;
-    if (reason) topReasonCount[reason] = (topReasonCount[reason] || 0) + 1;
-  });
-  let topReason = '—', maxReason = 0;
-  for (const [k, v] of Object.entries(topReasonCount)) {
-    if (v > maxReason) { maxReason = v; topReason = k; }
-  }
-  const missingDates = filtered.filter(r => !r.date).length;
-  const qualityPct = filtered.length ? Math.round(((filtered.length - missingDates) / filtered.length) * 100) : 100;
-
-  $('#scrapKpiStats').innerHTML = `
-    <div class="stat"><div class="label">Total Scrap Qty</div><div class="value">${fmt(totalQty)}</div><div class="sub">across ${fmt(filtered.length)} records</div></div>
-    <div class="stat"><div class="label">Unique Parts</div><div class="value">${fmt(uniqueParts)}</div><div class="sub">materials scrapped</div></div>
-    <div class="stat"><div class="label">Top Reason</div><div class="value" style="font-size:16px">${escapeHtml(shorten(topReason, 20))}</div><div class="sub">${fmt(maxReason)} occurrences</div></div>
-    <div class="stat"><div class="label">Data Quality</div><div class="value" style="color:${qualityPct < 80 ? 'var(--danger)' : 'var(--ok)'}">${qualityPct}%</div><div class="sub">${missingDates} rows missing valid dates</div></div>
-  `;
-
-  // --- Table Render ---
-  const tbody = $('#scrapTable tbody');
-  
-  // Update Headers UI (Sort marks) - VANILLA JS REPLACEMENT
-  const ths = $$('#scrapTable th');
-  ths.forEach(th => {
-    const colId = th.dataset.col;
-    if (!colId) return;
-    
-    // Remove existing marks
-    th.querySelectorAll('.sort-mark').forEach(el => el.remove());
-    th.classList.remove('sorted', 'filtered');
-    
-    if (STATE.scrapAnalysis.sorts[colId]) {
-      th.classList.add('sorted');
-      const mark = STATE.scrapAnalysis.sorts[colId] === 'asc' ? '▲' : '▼';
-      const span = document.createElement('span');
-      span.className = 'sort-mark';
-      span.textContent = mark;
-      th.appendChild(span);
+function generateDiff(oldData, newData) {
+    if (typeof jsondiffpatch !== 'undefined' && jsondiffpatch.diff) {
+        try {
+            const delta = jsondiffpatch.diff(oldData, newData);
+            return delta || null;
+        } catch (e) {
+            console.warn('jsondiffpatch diff failed, using simple diff:', e.message);
+            return generateSimpleDiff(oldData, newData);
+        }
     }
-    if (STATE.scrapAnalysis.filters[colId]) th.classList.add('filtered');
-  });
+    return generateSimpleDiff(oldData, newData);
+}
 
-  tbody.innerHTML = filtered.slice(0, 1000).map((r, idx) => {
-    const actualIndex = STATE.scrapAnalysis.records.indexOf(r);
-    let fileCell = escapeHtml(r.file || '—');
-    
-    if (r.file && hasFolder) {
-      fileCell = `<a href="#" class="image-link" data-index="${actualIndex}" title="Click to view/edit: ${escapeHtml(r.file)}">${escapeHtml(shorten(r.file, 25))}</a>`;
+function generateSimpleDiff(oldData, newData) {
+    const diff = generateNodeDiff(lastSnapshot, data);
+    if (!diff || Object.keys(diff).length === 0) {
+        alert('ℹ️ No changes detected. Nothing to save.');
+        // ... cleanup
+        return;
+    }
+    let hasChanges = false;
+    const allKeys = new Set([...Object.keys(oldData), ...Object.keys(newData)]);
+    for (const key of allKeys) {
+        const oldVal = JSON.stringify(oldData[key]);
+        const newVal = JSON.stringify(newData[key]);
+        if (oldVal !== newVal) {
+            diff[key] = newData[key];
+            hasChanges = true;
+        }
+    }
+    return hasChanges ? diff : null;
+}
+
+// ============================
+// Save data to GitHub (with Gist for large data)
+// ============================
+
+// ============================
+// Save data to GitHub (with Gist for large data)
+// ============================
+
+async function saveDataToGitHub(data) {
+    if (isSaving) return;
+    isSaving = true;
+
+    const saveBtn = document.getElementById('saveDataBtn');
+    if (saveBtn) {
+        saveBtn.textContent = '⏳ Saving...';
+        saveBtn.disabled = true;
     }
 
-    const descText = getScrapDescription(r);
-    const reasonText = r.reason2 || r.reason1 || '—';
+    try {
+        let token = getGitHubToken();
+        if (!token) {
+            token = prompt(
+                '🔑 A GitHub Token is required to save data\n\n' +
+                'Please enter your GitHub Token. It will be saved in your browser.'
+            );
+            if (token && token.trim()) {
+                setGitHubToken(token);
+                alert('✅ Token saved to browser local storage');
+            } else {
+                throw new Error('No Token provided, save cancelled');
+            }
+        }
 
-    return `
-      <tr>
-        <td class="mono">${fileCell}</td>
-        <td style="color:${r.date ? 'inherit' : 'var(--danger)'}">${r.date ? fmtDate(new Date(r.date)) : escapeHtml(r.rawDate || '—')}</td>
-        <td>${escapeHtml(r.category)}</td>
-        <td class="mono"><b>${escapeHtml(r.partNo || '—')}</b></td>
-        <td>${escapeHtml(descText)}</td>
-        <td class="num">${fmt(r.qty)}</td>
-        <td>${escapeHtml(reasonText)}</td>
-      </tr>
+        token = token.trim();
+
+        // Sort workflow nodes for consistency
+        if (data.scenarios) {
+            data.scenarios.forEach(sc => {
+                if (sc.workflow && sc.workflow.nodes) sortWorkflowNodes(sc.workflow);
+            });
+        }
+        if (lastSnapshot && lastSnapshot.scenarios) {
+            lastSnapshot.scenarios.forEach(sc => {
+                if (sc.workflow && sc.workflow.nodes) sortWorkflowNodes(sc.workflow);
+            });
+        }
+
+        if (!lastSnapshot) {
+            console.log('📸 No snapshot found, creating baseline...');
+            lastSnapshot = JSON.parse(JSON.stringify(data));
+            saveSnapshot(lastSnapshot);
+            alert('ℹ️ Baseline snapshot created. Please make another change to save.');
+            isSaving = false;
+            if (saveBtn) {
+                saveBtn.textContent = '💾 Save to GitHub';
+                saveBtn.disabled = false;
+            }
+            return;
+        }
+        console.log('🔍 Snapshot scenarios:', lastSnapshot.scenarios.map(s => s.id));
+        console.log('🔍 Current scenarios:', data.scenarios.map(s => s.id));
+        
+        // Check first node in snapshot and current data
+        if (lastSnapshot.scenarios.length > 0 && data.scenarios.length > 0) {
+            const snapNode = lastSnapshot.scenarios[0].workflow?.nodes?.[0];
+            const currNode = data.scenarios[0].workflow?.nodes?.[0];
+            console.log('📌 Snapshot first node:', snapNode);
+            console.log('📌 Current first node:', currNode);
+        }
+        // Generate custom diff using node IDs (stable)
+        const diff = generateNodeDiff(lastSnapshot, data);
+        if (!diff || Object.keys(diff).length === 0) {
+            alert('ℹ️ No changes detected. Nothing to save.');
+            isSaving = false;
+            if (saveBtn) {
+                saveBtn.textContent = '💾 Save to GitHub';
+                saveBtn.disabled = false;
+            }
+            return;
+        }
+
+        const jsonStr = JSON.stringify(diff);
+        console.log(`📊 Diff size: ${jsonStr.length} bytes (${(jsonStr.length/1024).toFixed(1)} KB)`);
+
+        let gistId = null;
+        let payloadData = jsonStr;
+        let payloadType = 'node-diff';
+
+        // Optional: use Gist for very large diffs (>30KB)
+        if (jsonStr.length > 30000) {
+            console.log('📤 Data is large, uploading to Gist...');
+            const gistPayload = {
+                description: `BPO node-diff - ${new Date().toISOString()}`,
+                public: false,
+                files: {
+                    'diff.json': {
+                        content: jsonStr
+                    }
+                }
+            };
+
+            try {
+                const gistResponse = await fetch('https://api.github.com/gists', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `token ${token}`,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
+                    body: JSON.stringify(gistPayload)
+                });
+
+                if (!gistResponse.ok) {
+                    const errorData = await gistResponse.json();
+                    console.error('Gist API error:', errorData);
+                    console.log('⚠️ Gist creation failed, falling back to direct payload');
+                } else {
+                    const gistData = await gistResponse.json();
+                    gistId = gistData.id;
+                    payloadType = 'gist';
+                    payloadData = '';
+                    console.log(`✅ Gist created: ${gistId}`);
+                }
+            } catch (gistError) {
+                console.error('Gist creation failed:', gistError);
+                console.log('⚠️ Falling back to direct payload');
+                payloadType = 'diff';
+                payloadData = jsonStr;
+                gistId = null;
+            }
+        }
+
+        const payload = {
+            event_type: 'update-data',
+            client_payload: {
+                type: payloadType,              // 'node-diff' or 'gist' (but gist still contains node-diff data)
+                gist_id: gistId || '',
+                data: payloadData,              // if gist, this is empty; if not, it's the diff JSON
+                snapshot_id: Date.now()
+            }
+        };
+
+        console.log(`📤 Sending payload with type: ${payloadType}, gist_id: ${gistId || 'none'}`);
+        console.log(`📤 Payload data length: ${payloadData.length} bytes`);
+
+        const url = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/dispatches`;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': `token ${token}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/vnd.github.v3+json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            console.error('Dispatch API error:', errorData);
+            if (response.status === 401) {
+                clearGitHubToken();
+                throw new Error('Token is invalid or expired. Please re-enter your Token.');
+            }
+            throw new Error(errorData.message || `HTTP ${response.status}`);
+        }
+
+        saveSnapshot(data);
+        console.log('✅ Snapshot updated');
+
+        const sizeMsg = (jsonStr.length > 30000 && gistId)
+            ? `📤 Uploaded to Gist (temporary)\n   Gist ID: ${gistId}`
+            : `📊 Size: ${(jsonStr.length/1024).toFixed(1)} KB`;
+
+        alert(`✅ Changes saved successfully!\n\n${sizeMsg}\n\nGitHub Actions is applying the changes.`);
+
+        setTimeout(() => {
+            if (confirm('Refresh page to see the latest data?')) {
+                location.reload();
+            }
+        }, 10000);
+
+    } catch (error) {
+        console.error('Save failed:', error);
+        alert(`❌ Save failed: ${error.message}`);
+    } finally {
+        isSaving = false;
+        if (saveBtn) {
+            saveBtn.textContent = '💾 Save to GitHub';
+            saveBtn.disabled = false;
+        }
+    }
+}
+async function saveDataToFile() {
+    if (isSaving) return;
+    isSaving = true;
+
+    const saveBtn = document.getElementById('saveDataBtn');
+    if (saveBtn) {
+        saveBtn.textContent = '⏳ Saving...';
+        saveBtn.disabled = true;
+    }
+
+    try {
+        // Keep workflow nodes sorted for consistent output (same as old save path).
+        if (appData.scenarios) {
+            appData.scenarios.forEach(sc => {
+                if (sc.workflow && sc.workflow.nodes) sortWorkflowNodes(sc.workflow);
+            });
+        }
+
+        // Provenance stamp. Ask once, reuse thereafter; empty is allowed.
+        let savedBy = '';
+        try {
+            savedBy = localStorage.getItem('bpo_savedBy') || '';
+        } catch (e) { /* ignore */ }
+
+        if (!savedBy) {
+            const answer = prompt('Name for provenance (optional):', '');
+            if (answer === null) {
+                // User cancelled the prompt — proceed without savedBy.
+                savedBy = '';
+            } else if (answer.trim()) {
+                savedBy = answer.trim();
+                try { localStorage.setItem('bpo_savedBy', savedBy); } catch (e) { /* ignore */ }
+            }
+        }
+
+        // Clone + stamp.
+        const saveCopy = JSON.parse(JSON.stringify(appData));
+        saveCopy._meta = {
+            savedAt: new Date().toISOString()
+        };
+        if (savedBy) saveCopy._meta.savedBy = savedBy;
+
+        const jsonStr = JSON.stringify(saveCopy, null, 2);
+
+        // Try File System Access API first; fall back to Blob download.
+        let wroteToDisk = false;
+        if (window.showSaveFilePicker) {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: 'data.json',
+                    types: [
+                        { description: 'JSON', accept: { 'application/json': ['.json'] } }
+                    ]
+                });
+                const writable = await handle.createWritable();
+                await writable.write(jsonStr);
+                await writable.close();
+                wroteToDisk = true;
+            } catch (e) {
+                if (e && e.name === 'AbortError') {
+                    // User cancelled the OS save dialog — silently no-op.
+                    return;
+                }
+                console.warn('showSaveFilePicker failed, falling back to Blob:', e);
+            }
+        }
+
+        if (!wroteToDisk) {
+            // Fallback path (non-Chromium or picker error).
+            const blob = new Blob([jsonStr], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'data.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            wroteToDisk = true;
+        }
+
+        // Persist to localStorage for next visit (quota-guarded).
+        try {
+            localStorage.setItem('bpo_data', jsonStr);
+        } catch (e) {
+            console.warn('localStorage.setItem(bpo_data) failed after save:', e);
+            if (e && (e.name === 'QuotaExceededError' || e.code === 22)) {
+                alert(
+                    'Browser storage is full — data was saved to disk but will not ' +
+                    'auto-load next time. Please pick the file again on next visit.'
+                );
+            }
+        }
+
+        // Keep dead snapshot machinery coherent.
+        try { saveSnapshot(saveCopy); } catch (e) { /* ignore */ }
+
+        console.log('✅ Data saved to file.');
+
+    } catch (error) {
+        console.error('Save failed:', error);
+        alert(`❌ Save failed: ${error.message}`);
+    } finally {
+        isSaving = false;
+        if (saveBtn) {
+            saveBtn.textContent = '💾 Save data.json';
+            saveBtn.disabled = false;
+        }
+    }
+}
+function normalizeWorkflowData(workflow) {
+    if (!workflow) return;
+
+    if (workflow.nodeIdCounter !== undefined) {
+        let counter = workflow.nodeIdCounter;
+        if (Array.isArray(counter)) counter = counter[0] || 0;
+        if (typeof counter !== 'number') counter = parseInt(counter) || 0;
+        workflow.nodeIdCounter = counter;
+    }
+
+    if (Array.isArray(workflow.nodes)) {
+        workflow.nodes = workflow.nodes.filter(n => n && typeof n === 'object');
+
+        for (let node of workflow.nodes) {
+            if (node.id !== undefined) {
+                if (Array.isArray(node.id)) node.id = node.id[0] || 'node-' + Date.now();
+                if (typeof node.id !== 'string') node.id = String(node.id);
+            }
+            if (node.processId !== undefined && Array.isArray(node.processId)) {
+                node.processId = node.processId[0] || '';
+            }
+            if (node.x !== undefined && Array.isArray(node.x)) node.x = node.x[0] || 100;
+            if (node.y !== undefined && Array.isArray(node.y)) node.y = node.y[0] || 100;
+            if (node.hidden !== undefined && Array.isArray(node.hidden)) node.hidden = node.hidden[0] || false;
+            if (node.label !== undefined) {
+                if (Array.isArray(node.label)) node.label = node.label[0] || 'Unnamed';
+                if (typeof node.label !== 'string' || node.label.trim() === '') {
+                    node.label = 'Unnamed';
+                }
+            } else {
+                node.label = 'Unnamed';
+            }
+            if (node.type !== undefined && Array.isArray(node.type)) node.type = node.type[0] || '';
+        }
+
+        const seen = new Map();
+        const specialNodes = [];
+
+        for (let node of workflow.nodes) {
+            if (!node.processId) {
+                if (node.type && ['start', 'end', 'decision', 'parallel'].includes(node.type)) {
+                    specialNodes.push(node);
+                } else {
+                    if (node.label !== 'Unnamed') {
+                        specialNodes.push(node);
+                    }
+                }
+                continue;
+            }
+
+            const key = node.processId;
+            if (!seen.has(key)) {
+                seen.set(key, node);
+            } else {
+                const existing = seen.get(key);
+                if (existing.label === 'Unnamed' && node.label !== 'Unnamed') {
+                    seen.set(key, node);
+                }
+            }
+        }
+
+        const dedupedNodes = [...specialNodes, ...Array.from(seen.values())];
+
+        workflow.nodes = dedupedNodes.filter(n => {
+            if (n.label === 'Unnamed' && !n.type) return false;
+            return true;
+        });
+    }
+
+    if (Array.isArray(workflow.connections)) {
+        workflow.connections = workflow.connections.filter(c => c && typeof c === 'object');
+        const validNodeIds = new Set(workflow.nodes.map(n => n.id));
+        for (let conn of workflow.connections) {
+            if (conn.from !== undefined && Array.isArray(conn.from)) conn.from = conn.from[0] || '';
+            if (conn.to !== undefined && Array.isArray(conn.to)) conn.to = conn.to[0] || '';
+            if (typeof conn.from !== 'string') conn.from = String(conn.from);
+            if (typeof conn.to !== 'string') conn.to = String(conn.to);
+            if (!conn.id) {
+                conn.id = 'conn-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6);
+            }
+        }
+        workflow.connections = workflow.connections.filter(c =>
+            validNodeIds.has(c.from) && validNodeIds.has(c.to)
+        );
+    }
+}
+
+// ============================
+// 8. Load Data
+// ============================
+async function loadData() {
+    console.log('📊 loadData() called');
+    const loading = document.getElementById('app-loading');
+    const root = document.getElementById('app-root');
+
+    if (loading) loading.style.display = 'flex';
+    if (root) root.style.display = 'none';
+
+    // --------------------------------------------------------------
+    // Source 1: previously-picked data stored in localStorage
+    // --------------------------------------------------------------
+    let stored = null;
+    try {
+        stored = localStorage.getItem('bpo_data');
+    } catch (e) {
+        console.warn('localStorage read failed:', e);
+    }
+
+    if (stored) {
+        let parsed = null;
+        let ok = false;
+        try {
+            parsed = JSON.parse(stored);
+            ok = isDataShapeValid(parsed);
+        } catch (e) {
+            console.warn('Stored bpo_data is not valid JSON:', e);
+            ok = false;
+        }
+        if (ok) {
+            applyLoadedData(parsed, loading, root);
+            return;
+        }
+        console.warn('Stored bpo_data failed validation — requesting file pick.');
+        showDataFilePicker(
+            'Invalid loaded data. Please choose the correct data file. ' +
+            'In case of questions, please reach out to the Key User of the tool.'
+        );
+        return;
+    }
+
+    // --------------------------------------------------------------
+    // Source 2: first visit — request file
+    // --------------------------------------------------------------
+    showDataFilePicker(null);
+}
+
+/**
+ * Minimal shape check for data.json.
+ * Only enforces: scenarios is an array of objects, each with a processes array.
+ * Everything else is repaired by normalizeData().
+ */
+function isDataShapeValid(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+    if (!Array.isArray(data.scenarios)) return false;
+    for (const sc of data.scenarios) {
+        if (!sc || typeof sc !== 'object' || Array.isArray(sc)) return false;
+        if (!Array.isArray(sc.processes)) return false;
+    }
+    return true;
+}
+
+/**
+ * Finalize a successful load: normalize, snapshot, render.
+ * Mirrors the previous success branch of loadData() exactly.
+ */
+function applyLoadedData(rawData, loading, root) {
+    console.log('📊 Raw data parsed, scenarios:', rawData.scenarios?.length || 0);
+
+    appData = normalizeData(rawData);
+
+    // Keep snapshot machinery coherent (dead code stays coherent per Q6).
+    localStorage.removeItem('bpo_snapshot');
+    lastSnapshot = JSON.parse(JSON.stringify(appData));
+    saveSnapshot(lastSnapshot);
+    console.log('📸 Baseline snapshot set to loaded data (scenarios: ' + lastSnapshot.scenarios?.length + ')');
+
+    if (lastSnapshot && lastSnapshot.scenarios) {
+        lastSnapshot.scenarios.forEach(sc => {
+            if (sc.workflow && sc.workflow.nodes) sortWorkflowNodes(sc.workflow);
+        });
+    }
+
+    if (loading) loading.style.display = 'none';
+    if (root) root.style.display = 'block';
+    renderApp();
+    console.log('✅ Data loaded and rendered successfully');
+}
+// ============================
+// File Picker & Reader
+// ============================
+
+function showDataFilePicker(options) {
+    // Backward compatible: allow a plain string (boot error path) or an options object.
+    let opts = options;
+    if (typeof options === 'string' || options === null || options === undefined) {
+        opts = { errorMessage: options || null, mode: 'boot' };
+    }
+    const mode = opts.mode === 'reselect' ? 'reselect' : 'boot';
+    const errorMessage = opts.errorMessage || null;
+
+    // Boot mode hides the app; re-select mode keeps it visible behind the modal.
+    if (mode === 'boot') {
+        const loading = document.getElementById('app-loading');
+        const root = document.getElementById('app-root');
+        if (loading) loading.style.display = 'none';
+        if (root) root.style.display = 'none';
+    }
+
+    const prior = document.getElementById('dataFilePickerOverlay');
+    if (prior) prior.remove();
+
+    const subtitle = mode === 'reselect'
+        ? 'This will replace the currently loaded data in this browser. Choose a <strong>data.json</strong> file.'
+        : 'Choose the shared <strong>data.json</strong> file to load the process data.';
+
+    const overlay = document.createElement('div');
+    overlay.id = 'dataFilePickerOverlay';
+    overlay.className = 'custom-modal-overlay active';
+    overlay.innerHTML = `
+        <div class="custom-modal">
+            <h3>📂 ${mode === 'reselect' ? 'Re-select data.json' : 'Select data.json'}</h3>
+            <p style="margin:0.75rem 0;color:#475569;">${subtitle}</p>
+            ${errorMessage ? `<p style="margin:0.75rem 0;color:#dc2626;font-weight:600;">${escapeHtml(errorMessage)}</p>` : ''}
+            <div class="modal-buttons">
+                ${mode === 'reselect' ? '<button id="dataFileCancelBtn" class="cancel-btn">Cancel</button>' : ''}
+                <button id="dataFileSelectBtn" class="save-btn">Select file</button>
+            </div>
+            <input type="file" id="dataFileInput" accept=".json,application/json" style="display:none;">
+        </div>
     `;
-  }).join('') + (filtered.length > 1000 ? `<tr><td colspan="7" style="text-align:center;color:var(--muted)">Showing 1000 of ${filtered.length} records</td></tr>` : '');
+    document.body.appendChild(overlay);
 
-  // Wire up Image Link
-  tbody.querySelectorAll('.image-link').forEach(link => {
-    link.addEventListener('click', e => {
-      e.preventDefault();
-      openScrapDetail(parseInt(link.dataset.index, 10));
+    const selectBtn = document.getElementById('dataFileSelectBtn');
+    const fileInput = document.getElementById('dataFileInput');
+
+    selectBtn.onclick = () => fileInput.click();
+
+    if (mode === 'reselect') {
+        const cancelBtn = document.getElementById('dataFileCancelBtn');
+        if (cancelBtn) {
+            cancelBtn.onclick = () => {
+                overlay.remove();
+                // Nothing was touched — previous appData and localStorage remain intact.
+            };
+        }
+    }
+
+    fileInput.onchange = () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        readDataFile(
+            file,
+            () => {
+                overlay.remove();
+                if (mode === 'reselect') {
+                    refreshScenarioDropdown();
+                    rebuildFilterUI();
+                    updateUIVisibility();
+                    renderCurrentView();
+                }
+            },
+            (msg) => {
+                // Re-open picker with error, preserving mode and previous data.
+                showDataFilePicker({ errorMessage: msg, mode: mode });
+            }
+        );
+    };
+}
+
+function readDataFile(file, onSuccess, onError) {
+    const FAIL_MSG =
+        'Invalid loaded data. Please choose the correct data file. ' +
+        'In case of questions, please reach out to the Key User of the tool.';
+
+    const reader = new FileReader();
+
+    reader.onerror = () => {
+        console.error('FileReader error:', reader.error);
+        onError(FAIL_MSG);
+    };
+
+    reader.onload = (ev) => {
+        const text = ev.target.result;
+
+        let rawData = null;
+        try {
+            rawData = JSON.parse(text);
+        } catch (e) {
+            console.error('File is not valid JSON:', e);
+            onError(FAIL_MSG);
+            return;
+        }
+
+        if (!isDataShapeValid(rawData)) {
+            console.error('File shape check failed:', rawData && Object.keys(rawData));
+            onError(FAIL_MSG);
+            return;
+        }
+
+        // Persist first so next visit auto-loads, but a quota failure
+        // must not block the current session.
+        try {
+            localStorage.setItem('bpo_data', text);
+        } catch (e) {
+            console.warn('localStorage.setItem(bpo_data) failed:', e);
+            if (e && (e.name === 'QuotaExceededError' || e.code === 22)) {
+                alert(
+                    'Browser storage is full — data was saved to disk but will not ' +
+                    'auto-load next time. Please pick the file again on next visit.'
+                );
+            } else {
+                alert(
+                    'Browser storage unavailable — data was loaded for this session only. ' +
+                    'You may need to pick the file again on next visit.'
+                );
+            }
+        }
+
+        const loading = document.getElementById('app-loading');
+        const root = document.getElementById('app-root');
+        applyLoadedData(rawData, loading, root);
+
+        if (typeof onSuccess === 'function') onSuccess();
+    };
+
+    reader.readAsText(file);
+}
+// ============================
+// 9. Default Data
+// ============================
+
+function getDefaultData() {
+    return {
+        departments: ['Sales', 'Production Planning', 'Material Planning', 'Material Handling', 'Purchase', 'Production Execution', 'Parts Quality', 'Vehicle Quality', 'Finance', 'Trade & Compliance'],
+        sysNameList: ['SAP', 'LES', 'MES', 'KAPTURE', 'WMS', 'To Be Determined'],
+        sysStatusList: [
+            { value: 'Operational', color: 'green' },
+            { value: 'Completed', color: 'green' },
+            { value: 'Offline', color: 'red' },
+            { value: 'To Be Implemented', color: 'red' },
+            { value: 'Work in Progress', color: 'yellow' }
+        ],
+        sysRespList: [],
+        businessStatuses: [
+            { value: 'Not Defined', color: 'red' },
+            { value: 'In Progress', color: 'yellow' },
+            { value: 'Completed', color: 'green' }
+        ],
+        scenarios: [
+            {
+                id: 'default',
+                name: 'Manufacturing',
+                processes: [
+                    {
+                        id: genId(),
+                        seq: '10',
+                        name: 'Sample Process',
+                        description: 'This is a sample process. Please import your data.',
+                        raci: { r: ['Sales'], a: [], c: [], i: [] },
+                        businessStatus: 'Not Defined',
+                        system: { name: 'To Be Determined', status: 'Offline', responsible: '' },
+                        businessDoc: '',
+                        userManual: '',
+                        notes: ''
+                    }
+                ]
+            }
+        ],
+        currentScenarioId: 'default'
+    };
+}
+
+// ============================
+// 10. Get Current Scenario
+// ============================
+
+function getCurrentScenario() {
+    if (!appData) return null;
+    return appData.scenarios.find(s => s.id === appData.currentScenarioId);
+}
+
+function getScenarioById(id) {
+    if (!appData) return null;
+    return appData.scenarios.find(s => s.id === id);
+}
+function toggleNodeType(nodeId, type) {
+    const workflow = getWorkflowData();
+    const node = workflow.nodes.find(n => n.id === nodeId);
+    if (!node) {
+        alert('No node selected');
+        return;
+    }
+
+    // If already this type, remove it and revert to 'main' or 'sub'
+    if (node.type === type) {
+        // Determine the default type based on process
+        const sc = getCurrentScenario();
+        const process = sc.processes.find(p => p.id === node.processId);
+        if (process && process.seq && process.seq.includes('.')) {
+            node.type = 'sub';
+        } else {
+            node.type = 'main';
+        }
+    } else {
+        node.type = type;
+    }
+
+    saveWorkflowData(workflow);
+    selectedNodeId = null;
+    renderWorkflow();
+}
+// ============================
+// 11. Filter and Search
+// ============================
+
+function matchesFilters(proc) {
+    if (activeFilters.length > 0) {
+        for (let f of activeFilters) {
+            if (f.values.length === 0) continue;
+            let val = columnPaths[f.column](proc);
+            let match = f.values.some(v => val.toLowerCase().includes(v.toLowerCase()));
+            if (!match) return false;
+        }
+        return true;
+    } else {
+        if (!searchKeyword.trim()) return true;
+        let kw = searchKeyword.toLowerCase();
+        return columnPaths.seq(proc).toLowerCase().includes(kw) ||
+            columnPaths.name(proc).toLowerCase().includes(kw) ||
+            columnPaths.description(proc).toLowerCase().includes(kw) ||
+            columnPaths.r(proc).toLowerCase().includes(kw) ||
+            columnPaths.businessStatus(proc).toLowerCase().includes(kw) ||
+            columnPaths.sysName(proc).toLowerCase().includes(kw) ||
+            columnPaths.sysStatus(proc).toLowerCase().includes(kw);
+    }
+}
+
+function getProcessesForDisplay(scenario) {
+    let all = scenario.processes;
+    if (activeFilters.length > 0) {
+        return sortProcesses(all.filter(p => matchesFilters(p)));
+    } else {
+        let matching = all.filter(p => matchesFilters(p));
+        if (!searchKeyword.trim()) return sortProcesses(all);
+        let ancestorIds = new Set();
+        for (let p of matching) {
+            ancestorIds.add(p.id);
+            let parts = p.seq.split('.');
+            for (let i = 1; i < parts.length; i++) {
+                let parentSeq = parts.slice(0, i).join('.');
+                let parent = all.find(pp => pp.seq === parentSeq);
+                if (parent) ancestorIds.add(parent.id);
+            }
+        }
+        return sortProcesses(all.filter(p => ancestorIds.has(p.id)));
+    }
+}
+
+function buildTree(processes) {
+    let nodeMap = new Map();
+    for (let p of processes) nodeMap.set(p.seq, { process: p, children: [] });
+    for (let p of processes) {
+        if (p.seq.includes('.')) {
+            let parentSeq = p.seq.substring(0, p.seq.lastIndexOf('.'));
+            if (nodeMap.has(parentSeq)) nodeMap.get(parentSeq).children.push(p);
+        }
+    }
+    let roots = Array.from(nodeMap.values()).filter(n => !n.process.seq.includes('.'));
+    roots.sort((a, b) => compareSeq(a.process.seq, b.process.seq));
+    for (let root of roots) {
+        root.children.sort((a, b) => compareSeq(a.seq, b.seq));
+    }
+    return { nodeMap, roots };
+}
+
+function getParentProcess(proc, scenario) {
+    if (!proc.seq.includes('.')) return null;
+    let parentSeq = proc.seq.substring(0, proc.seq.lastIndexOf('.'));
+    return scenario.processes.find(p => p.seq === parentSeq);
+}
+
+function toggleCollapse(id) {
+    if (activeFilters.length > 0 || searchKeyword || currentMode === 'edit') return;
+    collapseState.set(id, !(collapseState.get(id) || false));
+    renderCurrentView();
+}
+
+function collapseAllParents() {
+    if (activeFilters.length > 0 || searchKeyword || currentMode === 'edit') return;
+    const sc = getCurrentScenario();
+    if (sc) {
+        for (let p of sc.processes) {
+            if (!p.seq.includes('.')) collapseState.set(p.id, true);
+        }
+    }
+    renderCurrentView();
+}
+
+function expandAllParents() {
+    if (activeFilters.length > 0 || searchKeyword || currentMode === 'edit') return;
+    const sc = getCurrentScenario();
+    if (sc) {
+        for (let p of sc.processes) {
+            if (!p.seq.includes('.')) collapseState.set(p.id, false);
+        }
+    }
+    renderCurrentView();
+}
+
+// ============================
+// 12. Render: Table View
+// ============================
+
+function renderTable() {
+    let tbody = document.getElementById('tableBody');
+    let noResult = document.getElementById('noResultMsg');
+    let scenario = getCurrentScenario();
+    if (!scenario) {
+        if (tbody) tbody.innerHTML = '<tr><td colspan="8">No scenario</td></tr>';
+        if (noResult) noResult.style.display = 'none';
+        return;
+    }
+    let processes = getProcessesForDisplay(scenario);
+    if (processes.length === 0) {
+        if (tbody) tbody.innerHTML = '';
+        if (noResult) noResult.style.display = 'block';
+        return;
+    }
+    if (noResult) noResult.style.display = 'none';
+
+    let isEdit = (currentMode === 'edit');
+    let actionsHeader = document.getElementById('actionsHeader');
+    if (actionsHeader) actionsHeader.style.display = isEdit ? 'table-cell' : 'none';
+
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    for (let proc of processes) {
+        let row = tbody.insertRow();
+
+        let tdCollapse = row.insertCell();
+        let isParent = !proc.seq.includes('.');
+        let hasChildren = isParent && scenario.processes.some(p => p.seq.startsWith(proc.seq + '.'));
+        if (isParent && hasChildren && activeFilters.length === 0 && !searchKeyword && currentMode !== 'edit') {
+            let collapsed = collapseState.get(proc.id) || false;
+            let btn = document.createElement('button');
+            btn.textContent = collapsed ? '▶' : '▼';
+            btn.className = 'collapse-row-btn';
+            btn.onclick = (e) => { e.stopPropagation(); toggleCollapse(proc.id); };
+            tdCollapse.appendChild(btn);
+        }
+
+        let tdSeq = row.insertCell();
+        if (isEdit) {
+            let inp = document.createElement('input');
+            inp.type = 'text';
+            inp.value = proc.seq;
+            inp.className = 'seq-input';
+            inp.addEventListener('change', (e) => {
+                let ns = e.target.value.trim();
+                if (ns && isSeqUnique(scenario, ns, proc.id)) {
+                    proc.seq = ns;
+                    renderCurrentView();
+                } else if (ns) alert('Sequence exists');
+            });
+            tdSeq.appendChild(inp);
+        } else {
+            tdSeq.innerText = proc.seq;
+        }
+
+        let tdName = row.insertCell();
+        let span = document.createElement('span');
+        span.className = 'clickable-name';
+        span.innerText = proc.name;
+        span.onclick = () => openProcessDetail(proc.id);
+        tdName.appendChild(span);
+
+        let tdR = row.insertCell();
+        tdR.innerHTML = proc.raci.r.map(d => `<span class="raci-tag">${escapeHtml(d)}</span>`).join('');
+
+        let tdStatus = row.insertCell();
+        if (isEdit) {
+            let sel = document.createElement('select');
+            sel.className = 'status-select';
+            appData.businessStatuses.forEach(s => {
+                let op = document.createElement('option');
+                op.value = s.value;
+                op.textContent = s.value;
+                if (s.value === proc.businessStatus) op.selected = true;
+                sel.appendChild(op);
+            });
+            sel.onchange = () => { proc.businessStatus = sel.value; renderCurrentView(); };
+            tdStatus.appendChild(sel);
+        } else {
+            let color = appData.businessStatuses.find(s => s.value === proc.businessStatus)?.color || 'default';
+            tdStatus.innerHTML = `<span class="status-badge ${color}">🏢 ${escapeHtml(proc.businessStatus)}</span>`;
+        }
+
+        let tdSysName = row.insertCell();
+        if (isEdit) {
+            let sel = document.createElement('select');
+            sel.className = 'sysname-select';
+            appData.sysNameList.forEach(opt => {
+                let op = document.createElement('option');
+                op.value = opt;
+                op.textContent = opt;
+                if (opt === proc.system.name) op.selected = true;
+                sel.appendChild(op);
+            });
+            sel.onchange = () => { proc.system.name = sel.value; renderCurrentView(); };
+            tdSysName.appendChild(sel);
+        } else {
+            tdSysName.innerText = proc.system.name;
+        }
+
+        let tdSysStat = row.insertCell();
+        if (isEdit) {
+            let sel = document.createElement('select');
+            sel.className = 'sysstatus-select';
+            appData.sysStatusList.forEach(opt => {
+                let op = document.createElement('option');
+                op.value = opt.value;
+                op.textContent = opt.value;
+                if (opt.value === proc.system.status) op.selected = true;
+                sel.appendChild(op);
+            });
+            sel.onchange = () => { proc.system.status = sel.value; renderCurrentView(); };
+            tdSysStat.appendChild(sel);
+        } else {
+            let color = appData.sysStatusList.find(s => s.value === proc.system.status)?.color || 'default';
+            tdSysStat.innerHTML = `<span class="sys-status-badge ${color}">${escapeHtml(proc.system.status)}</span>`;
+        }
+
+        let tdAction = row.insertCell();
+        if (isEdit) {
+            let delBtn = document.createElement('button');
+            delBtn.textContent = '✖';
+            delBtn.className = 'delete-row-btn';
+            delBtn.onclick = () => confirmDelete(proc, scenario);
+            let subBtn = document.createElement('button');
+            subBtn.textContent = '+ Sub';
+            subBtn.className = 'add-sub-btn';
+            subBtn.onclick = () => autoIncrementSubprocess(proc);
+            tdAction.appendChild(delBtn);
+            tdAction.appendChild(subBtn);
+        }
+    }
+
+    if (activeFilters.length === 0 && !searchKeyword && currentMode !== 'edit') {
+        for (let proc of processes) {
+            if (proc.seq.includes('.')) {
+                let parent = getParentProcess(proc, scenario);
+                if (parent && collapseState.get(parent.id) === true) {
+                    let rows = tbody.querySelectorAll('tr');
+                    for (let row of rows) {
+                        if (row.cells[1] && row.cells[1].innerText === proc.seq) {
+                            row.style.display = 'none';
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================
+// 13. Render: Tree View
+// ============================
+
+function renderSequence() {
+    let container = document.getElementById('sequenceFullView');
+    let scenario = getCurrentScenario();
+    if (!scenario) {
+        if (container) container.innerHTML = '<div>No scenario</div>';
+        return;
+    }
+    let processes = getProcessesForDisplay(scenario);
+    if (processes.length === 0) {
+        if (container) container.innerHTML = '<div>🔍 No matches</div>';
+        return;
+    }
+    let { nodeMap, roots } = buildTree(processes);
+
+    function renderTree(node, level) {
+        let wrapper = document.createElement('div');
+        wrapper.className = 'process-tree-root';
+        let card = document.createElement('div');
+        card.className = level === 0 ? 'main-card' : 'sub-card';
+        let proc = node.process;
+        let businessColor = appData.businessStatuses.find(s => s.value === proc.businessStatus)?.color || 'default';
+        let sysColor = appData.sysStatusList.find(s => s.value === proc.system.status)?.color || 'default';
+        let hasChildren = node.children.length > 0;
+        let collapseBtn = '';
+        if (level === 0 && hasChildren && activeFilters.length === 0 && !searchKeyword && currentMode !== 'edit') {
+            let isCollapsed = collapseState.get(proc.id) || false;
+            collapseBtn = `<button class="collapse-icon" onclick="event.stopPropagation();toggleCollapse('${proc.id}')">${isCollapsed ? '▶' : '▼'}</button>`;
+        }
+        let addSubIcon = (currentMode === 'edit') ? `<div class="add-sub-icon" data-parent-id="${proc.id}" data-parent-seq="${proc.seq}">+</div>` : '';
+        let docIcon = (proc.businessDoc && proc.businessDoc.trim()) ? '<span class="doc-icon">📄</span>' : '';
+        let manualIcon = (proc.userManual && proc.userManual.trim()) ? '<span class="manual-icon">📘</span>' : '';
+
+        card.innerHTML = `${addSubIcon}
+            <div class="card-top-row"><span class="seq-badge">${level === 0 ? 'Step ' : ''}${escapeHtml(proc.seq)}</span><span class="status-badge ${businessColor}">🏢 ${escapeHtml(proc.businessStatus)}</span></div>
+            <div class="card-content"><div class="seq-name">${collapseBtn}<span>${escapeHtml(proc.name)} ${docIcon}</span></div>
+            <div class="seq-meta">👤 ${proc.raci.r.map(d => `<span class="raci-tag">${escapeHtml(d)}</span>`).join('')}</div>
+            <div class="seq-meta">🖥️ ${escapeHtml(proc.system.name)} ${manualIcon} <span class="sys-status-badge ${sysColor}">${escapeHtml(proc.system.status)}</span></div></div>`;
+
+        card.onclick = (e) => {
+            if (!e.target.classList.contains('add-sub-icon') && !e.target.classList.contains('collapse-icon')) {
+                openProcessDetail(proc.id);
+            }
+        };
+
+        let collapseIcon = card.querySelector('.collapse-icon');
+        if (collapseIcon) {
+            collapseIcon.onclick = (e) => { e.stopPropagation(); toggleCollapse(proc.id); };
+        }
+
+        wrapper.appendChild(card);
+
+        let isCollapsedParent = (level === 0 && collapseState.get(proc.id) === true);
+        if (node.children.length > 0 && !(isCollapsedParent && activeFilters.length === 0 && !searchKeyword && currentMode !== 'edit')) {
+            let childrenDiv = document.createElement('div');
+            childrenDiv.className = 'process-tree-children';
+            for (let child of node.children) {
+                let childNode = nodeMap.get(child.seq);
+                if (childNode) childrenDiv.appendChild(renderTree(childNode, level + 1));
+            }
+            wrapper.appendChild(childrenDiv);
+        }
+        return wrapper;
+    }
+
+    if (container) {
+        container.innerHTML = '';
+        for (let root of roots) {
+            container.appendChild(renderTree(root, 0));
+        }
+    }
+
+    if (currentMode === 'edit') {
+        document.querySelectorAll('.add-sub-icon').forEach(icon => {
+            icon.onclick = (e) => {
+                e.stopPropagation();
+                let parentId = icon.getAttribute('data-parent-id');
+                let parentProc = scenario.processes.find(p => p.id === parentId);
+                if (!parentProc) return;
+                document.getElementById('newSubSeq').value = '';
+                document.getElementById('newSubName').value = '';
+                document.getElementById('addSubModal').classList.add('active');
+                pendingAddSubCallback = (seq, name) => {
+                    if (seq && seq.trim()) {
+                        addSubprocessWithInsertion(parentProc, seq.trim(), name.trim() || 'New Sub');
+                    } else {
+                        autoIncrementSubprocess(parentProc);
+                    }
+                    document.getElementById('addSubModal').classList.remove('active');
+                    pendingAddSubCallback = null;
+                };
+            };
+        });
+    }
+}
+
+// ============================
+// 14. Subprocess Operations
+// ============================
+
+function addSubprocessWithInsertion(parent, seq, name) {
+    let sc = getCurrentScenario();
+    if (!sc) return false;
+    if (!seq.startsWith(parent.seq + '.')) {
+        alert(`Must start with ${parent.seq}.`);
+        return false;
+    }
+    let existing = sc.processes.find(p => p.seq === seq);
+    if (existing) {
+        let siblings = sc.processes.filter(p => p.seq.startsWith(parent.seq + '.') && p.seq !== parent.seq);
+        let childNum = parseInt(seq.split('.')[1]);
+        let toShift = siblings.filter(p => {
+            let n = parseInt(p.seq.split('.')[1]);
+            return n >= childNum;
+        }).sort((a, b) => parseFloat(b.seq.split('.')[1]) - parseFloat(a.seq.split('.')[1]));
+        for (let s of toShift) {
+            let old = parseInt(s.seq.split('.')[1]);
+            s.seq = parent.seq + '.' + (old + 1);
+        }
+    }
+    let newProc = {
+        id: genId(),
+        seq: seq,
+        name: name || 'New Sub',
+        description: '',
+        raci: { r: [...parent.raci.r], a: [], c: [], i: [] },
+        businessStatus: 'Not Started',
+        system: { name: parent.system.name, status: parent.system.status, responsible: parent.system.responsible },
+        notes: '',
+        businessDoc: '',
+        userManual: ''
+    };
+    sc.processes.push(newProc);
+    sc.processes = sortProcesses(sc.processes);
+    renderCurrentView();
+    return true;
+}
+
+function autoIncrementSubprocess(parent) {
+    let sc = getCurrentScenario();
+    let children = sc.processes.filter(p => p.seq.startsWith(parent.seq + '.'));
+    let max = 0;
+    children.forEach(c => {
+        let parts = c.seq.split('.');
+        if (parts.length === 2 && parts[0] === parent.seq) {
+            max = Math.max(max, parseInt(parts[1]));
+        }
     });
-  });
-
-  renderScrapCharts(filtered);
+    let newSeq = parent.seq + '.' + (max + 1);
+    let newProc = {
+        id: genId(),
+        seq: newSeq,
+        name: parent.name + ' (sub)',
+        description: '',
+        raci: { r: [...parent.raci.r], a: [], c: [], i: [] },
+        businessStatus: 'Not Started',
+        system: { name: parent.system.name, status: parent.system.status, responsible: parent.system.responsible },
+        notes: '',
+        businessDoc: '',
+        userManual: ''
+    };
+    sc.processes.push(newProc);
+    sc.processes = sortProcesses(sc.processes);
+    renderCurrentView();
 }
 
-function getScrapDescription(r) {
-  if (r.partNo && STATE.partIndex[r.partNo]) {
-    const info = STATE.partIndex[r.partNo];
-    return info.nameEN || info.nameCN || r.desc || 'Not found in Material List';
-  }
-  return r.desc || 'Not found in Material List';
-}
-function renderScrapCharts(records) {
-  const chartColors = ['#2563eb', '#3b82f6', '#60a5fa', '#93c5fd', '#bfdbfe', '#dbeafe'];
-  
-  // Destroy existing charts to prevent canvas memory leaks
-  if (STATE.scrapAnalysis.charts.parts) STATE.scrapAnalysis.charts.parts.destroy();
-  if (STATE.scrapAnalysis.charts.category) STATE.scrapAnalysis.charts.category.destroy();
-  if (STATE.scrapAnalysis.charts.trend) STATE.scrapAnalysis.charts.trend.destroy();
+function confirmDelete(proc, scenario) {
+    let sub = scenario.processes.filter(p => p.seq.startsWith(proc.seq + '.') && p.id !== proc.id);
+    document.getElementById('deleteModalMessage').innerText = `Delete "${proc.name}" (${proc.seq})?` + (sub.length ? `\nAlso ${sub.length} subprocess(es).` : '');
+    document.getElementById('deleteConfirmModal').classList.add('active');
 
-  // 1. Top 10 Parts
-  const partAgg = {};
-  records.forEach(r => { if (r.partNo) partAgg[r.partNo] = (partAgg[r.partNo] || 0) + r.qty; });
-  const topParts = Object.entries(partAgg).sort((a,b) => b[1] - a[1]).slice(0, 10);
-
-  STATE.scrapAnalysis.charts.parts = new Chart($('#scrapChartParts'), {
-    type: 'bar',
-    data: {
-      labels: topParts.map(p => p[0]),
-      datasets: [{ label: 'Qty Scrapped', data: topParts.map(p => p[1]), backgroundColor: '#2563eb' }]
-    },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
-  });
-
-  // 2. Category Breakdown
-  const catAgg = {};
-  records.forEach(r => { if (r.category) catAgg[r.category] = (catAgg[r.category] || 0) + r.qty; });
-  const cats = Object.entries(catAgg);
-
-  STATE.scrapAnalysis.charts.category = new Chart($('#scrapChartCategory'), {
-    type: 'doughnut',
-    data: {
-      labels: cats.map(c => c[0]),
-      datasets: [{ data: cats.map(c => c[1]), backgroundColor: chartColors }]
-    },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
-  });
-
-  // 3. Trend Over Time
-  const trendAgg = {};
-  records.forEach(r => {
-    if (r.date) trendAgg[r.date] = (trendAgg[r.date] || 0) + r.qty;
-  });
-  const sortedDates = Object.keys(trendAgg).sort();
-
-  STATE.scrapAnalysis.charts.trend = new Chart($('#scrapChartTrend'), {
-    type: 'line',
-    data: {
-      labels: sortedDates.map(d => d.split('-').reverse().join('/')),
-      datasets: [{
-        label: 'Scrap Volume',
-        data: sortedDates.map(d => trendAgg[d]),
-        borderColor: '#dc2626',
-        backgroundColor: 'rgba(220, 38, 38, 0.1)',
-        fill: true,
-        tension: 0.3
-      }]
-    },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
-  });
+    pendingDeleteCallback = () => {
+        scenario.processes = scenario.processes.filter(p => p.id !== proc.id && !sub.map(s => s.id).includes(p.id));
+        scenario.processes = sortProcesses(scenario.processes);
+        if (!proc.seq.includes('.')) collapseState.delete(proc.id);
+        renderCurrentView();
+        document.getElementById('deleteConfirmModal').classList.remove('active');
+        pendingDeleteCallback = null;
+    };
 }
 
-function exportScrapAnalysis() {
-  const rows = STATE.scrapAnalysis.filteredRecords;
-  if (!rows.length) { alert('No data to export.'); return; }
-  
-  const aoa = [['File/Image', 'Category', 'Ticket ID', 'Part No', 'Description', 'Qty', 'Reason Code', 'Date', 'Operator']];
-  rows.forEach(r => {
-    aoa.push([r.file, r.category, r.ticketId, r.partNo, r.desc, r.qty, r.reason, r.date, r.operator]);
-  });
-  
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Scrap Analysis');
-  downloadWorkbook(wb, `Scrap_Analysis_${dateStamp()}.xlsx`);
-}
-function closeImageModal() {
-  const modal = $('#imagePreviewModal');
-  const img = $('#imagePreviewSrc');
-  if (modal) modal.classList.add('hidden');
-  if (img) img.src = ''; // Clears the image to free memory
+// ============================
+// 15. RACI Rendering
+// ============================
+
+function renderRaciCheckboxes(proc) {
+    let container = document.getElementById('raciCheckboxGrid');
+    if (!container) return;
+    let raciTypes = [
+        { key: 'r', label: 'Responsible (R)' },
+        { key: 'a', label: 'Accountable (A)' },
+        { key: 'c', label: 'Consulted (C)' },
+        { key: 'i', label: 'Informed (I)' }
+    ];
+    container.innerHTML = '';
+    let isEdit = (currentMode === 'edit');
+
+    for (let rt of raciTypes) {
+        let section = document.createElement('div');
+        section.className = 'raci-section';
+        section.innerHTML = `<h4>${rt.label}</h4>`;
+        let displayDiv = document.createElement('div');
+        displayDiv.className = 'raci-display-section';
+        displayDiv.id = `raci-display-${rt.key}`;
+        let checkboxDiv = document.createElement('div');
+        checkboxDiv.className = 'checkbox-group';
+        checkboxDiv.id = `raci-checkbox-${rt.key}`;
+        section.appendChild(displayDiv);
+        section.appendChild(checkboxDiv);
+        container.appendChild(section);
+
+        for (let dept of appData.departments) {
+            let chk = document.createElement('input');
+            chk.type = 'checkbox';
+            chk.value = dept;
+            chk.checked = proc.raci[rt.key].includes(dept);
+            let label = document.createElement('label');
+            label.textContent = dept;
+            let item = document.createElement('div');
+            item.className = 'checkbox-item';
+            item.appendChild(chk);
+            item.appendChild(label);
+            checkboxDiv.appendChild(item);
+            if (isEdit) {
+                chk.onchange = () => {
+                    if (chk.checked) {
+                        if (!proc.raci[rt.key].includes(dept)) proc.raci[rt.key].push(dept);
+                    } else {
+                        proc.raci[rt.key] = proc.raci[rt.key].filter(d => d !== dept);
+                    }
+                    updateRaciDisplay(proc);
+                };
+            }
+        }
+        if (isEdit) {
+            displayDiv.style.display = 'none';
+            checkboxDiv.style.display = 'block';
+        } else {
+            displayDiv.style.display = 'block';
+            checkboxDiv.style.display = 'none';
+        }
+    }
+    updateRaciDisplay(proc);
 }
 
-// Global listener: catches clicks on the close button OR the dark background
-document.addEventListener('click', e => {
-  const modal = $('#imagePreviewModal');
-  if (!modal || modal.classList.contains('hidden')) return;
-  
-  // If user clicks the ✕ button or the dark overlay outside the image
-  if (e.target.id === 'imagePreviewClose' || e.target.id === 'imagePreviewModal') {
-    closeImageModal();
-  }
-});
+function updateRaciDisplay(proc) {
+    for (let key of ['r', 'a', 'c', 'i']) {
+        let div = document.getElementById(`raci-display-${key}`);
+        if (div) {
+            div.innerHTML = proc.raci[key].length ?
+                proc.raci[key].map(d => `<span class="raci-tag">${escapeHtml(d)}</span>`).join('') :
+                '<div style="color:#94a3b8;">No selections</div>';
+        }
+    }
+}
 
-// Global listener: closes on Escape key
-document.addEventListener('keydown', e => {
-  const modal = $('#imagePreviewModal');
-  if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
-    closeImageModal();
-  }
-});
-function bindScrapAnalysis() {
-  // Fallback for Dropzone
-  $('#scrapLogInput')?.addEventListener('change', async e => {
-    const f = e.target.files?.[0];
-    if (f) await handleScrapLogFiles([f]);
+function updateDocumentLinkIcon(inputId, linkIconId) {
+    let input = document.getElementById(inputId);
+    let icon = document.getElementById(linkIconId);
+    if (!input || !icon) return;
+    let url = input.value.trim();
+    if (url) {
+        icon.style.display = 'inline-block';
+        icon.onclick = (e) => { e.stopPropagation(); window.open(url, '_blank'); };
+    } else {
+        icon.style.display = 'none';
+        icon.onclick = null;
+    }
+}
+
+// ============================
+// 16. Process Detail Modal
+// ============================
+
+function openProcessDetail(procId) {
+    let scenario = getCurrentScenario();
+    let proc = scenario.processes.find(p => p.id === procId);
+    if (!proc) return;
+    currentEditingProcess = { scenarioId: scenario.id, processId: proc.id };
+
+    document.getElementById('modalSeq').value = proc.seq;
+    document.getElementById('modalName').value = proc.name;
+    document.getElementById('modalDescription').value = proc.description || '';
+    renderRaciCheckboxes(proc);
+
+    let statusSel = document.getElementById('modalStatus');
+    statusSel.innerHTML = '';
+    appData.businessStatuses.forEach(s => {
+        let op = document.createElement('option');
+        op.value = s.value;
+        op.textContent = s.value;
+        if (s.value === proc.businessStatus) op.selected = true;
+        statusSel.appendChild(op);
+    });
+
+    let sysNameSel = document.getElementById('modalSysName');
+    sysNameSel.innerHTML = '';
+    appData.sysNameList.forEach(opt => {
+        let op = document.createElement('option');
+        op.value = opt;
+        op.textContent = opt;
+        if (opt === proc.system.name) op.selected = true;
+        sysNameSel.appendChild(op);
+    });
+
+    let sysStatSel = document.getElementById('modalSysStatus');
+    sysStatSel.innerHTML = '';
+    appData.sysStatusList.forEach(opt => {
+        let op = document.createElement('option');
+        op.value = opt.value;
+        op.textContent = opt.value;
+        if (opt.value === proc.system.status) op.selected = true;
+        sysStatSel.appendChild(op);
+    });
+
+    let sysRespSel = document.getElementById('modalSysResp');
+    sysRespSel.innerHTML = '';
+    appData.sysRespList.forEach(opt => {
+        let op = document.createElement('option');
+        op.value = opt;
+        op.textContent = opt;
+        if (opt === proc.system.responsible) op.selected = true;
+        sysRespSel.appendChild(op);
+    });
+
+    document.getElementById('modalBusinessDoc').value = proc.businessDoc || '';
+    document.getElementById('modalUserManual').value = proc.userManual || '';
+    document.getElementById('modalNotes').value = proc.notes || '';
+
+    updateDocumentLinkIcon('modalBusinessDoc', 'businessDocLink');
+    updateDocumentLinkIcon('modalUserManual', 'userManualLink');
+
+    let isEdit = (currentMode === 'edit');
+    ['modalSeq', 'modalName', 'modalDescription', 'modalStatus', 'modalSysName', 'modalSysStatus', 'modalSysResp', 'modalBusinessDoc', 'modalUserManual', 'modalNotes'].forEach(id => {
+        let el = document.getElementById(id);
+        if (el) el.disabled = !isEdit;
+    });
+
+    document.getElementById('processDetailModal').classList.add('active');
+}
+
+function closeModal() {
+    document.getElementById('processDetailModal').classList.remove('active');
+    currentEditingProcess = null;
+}
+
+function saveModal() {
+    if (currentMode !== 'edit' || !currentEditingProcess) return;
+    let scenario = getScenarioById(currentEditingProcess.scenarioId);
+    let proc = scenario.processes.find(p => p.id === currentEditingProcess.processId);
+    if (!proc) return;
+
+    let newSeq = document.getElementById('modalSeq').value.trim();
+    if (newSeq !== proc.seq && !isSeqUnique(scenario, newSeq, proc.id)) {
+        alert('Sequence exists');
+        return;
+    }
+    proc.seq = newSeq || '0';
+    proc.name = document.getElementById('modalName').value;
+    proc.description = document.getElementById('modalDescription').value;
+    proc.businessStatus = document.getElementById('modalStatus').value;
+    proc.system = {
+        name: document.getElementById('modalSysName').value,
+        status: document.getElementById('modalSysStatus').value,
+        responsible: document.getElementById('modalSysResp').value
+    };
+    proc.businessDoc = document.getElementById('modalBusinessDoc').value;
+    proc.userManual = document.getElementById('modalUserManual').value;
+    proc.notes = document.getElementById('modalNotes').value;
+
+    scenario.processes = sortProcesses(scenario.processes);
+    renderCurrentView();
+    closeModal();
+}
+
+// ============================
+// 17. Master Data UI
+// ============================
+
+function refreshMasterUI() {
+    let isEdit = (currentMode === 'edit');
+    let html = `
+        <div class="master-section"><h3>🏢 Departments / Roles</h3><div>${appData.departments.map((d, i) => `<div class="list-tag">${escapeHtml(d)} ${isEdit ? `<button data-type="dept" data-idx="${i}" class="master-del">✖</button>` : ''}</div>`).join('')}</div>${isEdit ? `<div class="add-item"><input type="text" id="newDept" placeholder="New department"><button id="addDeptBtn" class="icon-btn-small">+ Add</button></div>` : ''}</div>
+        <div class="master-section"><h3>🖥️ System Name</h3><div>${appData.sysNameList.map((v, i) => `<div class="list-tag">${escapeHtml(v)} ${isEdit ? `<button data-type="sysname" data-idx="${i}" class="master-del">✖</button>` : ''}</div>`).join('')}</div>${isEdit ? `<div class="add-item"><input type="text" id="newSysName" placeholder="New system"><button id="addSysNameBtn" class="icon-btn-small">+ Add</button></div>` : ''}</div>
+        <div class="master-section"><h3>📊 System Status</h3><div>${appData.sysStatusList.map((item, idx) => `<div class="list-tag">${escapeHtml(item.value)} ${isEdit ? `<select class="sysstatus-color" data-idx="${idx}"><option value="default">default</option><option value="red">red</option><option value="yellow">yellow</option><option value="green" ${item.color === 'green' ? 'selected' : ''}>green</option></select> <button data-type="sysstatus" data-idx="${idx}" class="master-del">✖</button>` : ''}</div>`).join('')}</div>${isEdit ? `<div class="add-item"><input type="text" id="newSysStatus" placeholder="New status"><button id="addSysStatusBtn" class="icon-btn-small">+ Add</button></div>` : ''}</div>
+        <div class="master-section"><h3>👤 System Responsible</h3><div>${appData.sysRespList.map((v, i) => `<div class="list-tag">${escapeHtml(v)} ${isEdit ? `<button data-type="sysresp" data-idx="${i}" class="master-del">✖</button>` : ''}</div>`).join('')}</div>${isEdit ? `<div class="add-item"><input type="text" id="newSysResp" placeholder="New responsible"><button id="addSysRespBtn" class="icon-btn-small">+ Add</button></div>` : ''}</div>
+        <div class="master-section"><h3>📌 Business Status</h3><div>${appData.businessStatuses.map((item, idx) => `<div class="list-tag">${escapeHtml(item.value)} ${isEdit ? `<select class="busstatus-color" data-idx="${idx}"><option value="default">default</option><option value="red">red</option><option value="yellow">yellow</option><option value="green" ${item.color === 'green' ? 'selected' : ''}>green</option></select> <button data-type="busstatus" data-idx="${idx}" class="master-del">✖</button>` : ''}</div>`).join('')}</div>${isEdit ? `<div class="add-item"><input type="text" id="newBusinessStatus" placeholder="New status"><button id="addBusinessStatusBtn" class="icon-btn-small">+ Add</button></div>` : ''}</div>`;
+
+    if (isEdit) {
+        html += `<div class="modal-buttons" style="justify-content: space-between; margin-top:1rem;"><div><button id="exportMasterBtn" class="icon-btn">📤 Export CSV</button><button id="importMasterBtn" class="icon-btn">📥 Import CSV</button></div></div>`;
+    }
+
+    document.getElementById('masterContent').innerHTML = html;
+    if (!isEdit) return;
+
+    document.querySelectorAll('.master-del').forEach(btn => {
+        btn.onclick = () => {
+            let type = btn.getAttribute('data-type');
+            let idx = parseInt(btn.getAttribute('data-idx'));
+            if (type === 'dept') appData.departments.splice(idx, 1);
+            else if (type === 'sysname') appData.sysNameList.splice(idx, 1);
+            else if (type === 'sysstatus') appData.sysStatusList.splice(idx, 1);
+            else if (type === 'sysresp') appData.sysRespList.splice(idx, 1);
+            else if (type === 'busstatus') appData.businessStatuses.splice(idx, 1);
+            refreshMasterUI();
+            renderCurrentView();
+        };
+    });
+
+    document.querySelectorAll('.sysstatus-color').forEach(sel => {
+        sel.onchange = () => {
+            let idx = parseInt(sel.getAttribute('data-idx'));
+            if (appData.sysStatusList[idx]) {
+                appData.sysStatusList[idx].color = sel.value;
+                refreshMasterUI();
+                renderCurrentView();
+            }
+        };
+    });
+    document.querySelectorAll('.busstatus-color').forEach(sel => {
+        sel.onchange = () => {
+            let idx = parseInt(sel.getAttribute('data-idx'));
+            if (appData.businessStatuses[idx]) {
+                appData.businessStatuses[idx].color = sel.value;
+                refreshMasterUI();
+                renderCurrentView();
+            }
+        };
+    });
+
+    document.getElementById('addDeptBtn').onclick = () => {
+        let v = document.getElementById('newDept').value.trim();
+        if (v) { appData.departments.push(v); refreshMasterUI(); renderCurrentView(); }
+    };
+    document.getElementById('addSysNameBtn').onclick = () => {
+        let v = document.getElementById('newSysName').value.trim();
+        if (v) { appData.sysNameList.push(v); refreshMasterUI(); renderCurrentView(); }
+    };
+    document.getElementById('addSysStatusBtn').onclick = () => {
+        let v = document.getElementById('newSysStatus').value.trim();
+        if (v) { appData.sysStatusList.push({ value: v, color: 'default' }); refreshMasterUI(); renderCurrentView(); }
+    };
+    document.getElementById('addSysRespBtn').onclick = () => {
+        let v = document.getElementById('newSysResp').value.trim();
+        if (v) { appData.sysRespList.push(v); refreshMasterUI(); renderCurrentView(); }
+    };
+    document.getElementById('addBusinessStatusBtn').onclick = () => {
+        let v = document.getElementById('newBusinessStatus').value.trim();
+        if (v) { appData.businessStatuses.push({ value: v, color: 'default' }); refreshMasterUI(); renderCurrentView(); }
+    };
+
+    document.getElementById('exportMasterBtn').onclick = exportMasterCSV;
+    document.getElementById('importMasterBtn').onclick = () => document.getElementById('masterImportFile').click();
+}
+
+// ============================
+// 18. CSV Import/Export
+// ============================
+
+const CSV_SEP = '|';
+
+function csvEscape(s) {
+    if (s === null || s === undefined) return '';
+    s = String(s);
+    if (s.includes(CSV_SEP) || s.includes('"') || s.includes('\n') || s.includes('=')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+}
+
+async function saveFilePicker(content, name) {
+    if (window.showSaveFilePicker) {
+        try {
+            const h = await window.showSaveFilePicker({
+                suggestedName: name,
+                types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }]
+            });
+            const w = await h.createWritable();
+            await w.write(content);
+            await w.close();
+            return;
+        } catch (e) {
+            if (e.name === 'AbortError') return;
+        }
+    }
+    let a = document.createElement('a');
+    let url = URL.createObjectURL(new Blob([content], { type: 'text/csv' }));
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function exportMasterCSV() {
+    let lines = [];
+    appData.departments.forEach(d => lines.push(['dept', d].map(csvEscape).join(CSV_SEP)));
+    appData.sysNameList.forEach(v => lines.push(['sysname', v].map(csvEscape).join(CSV_SEP)));
+    appData.sysStatusList.forEach(s => lines.push(['sysstatus', s.value, s.color].map(csvEscape).join(CSV_SEP)));
+    appData.sysRespList.forEach(v => lines.push(['sysresp', v].map(csvEscape).join(CSV_SEP)));
+    appData.businessStatuses.forEach(b => lines.push(['busstatus', b.value, b.color].map(csvEscape).join(CSV_SEP)));
+    saveFilePicker(lines.join('\n'), `master_${new Date().toISOString().slice(0, 10)}.csv`);
+}
+
+function handleMasterImport(e) {
+    let file = e.target.files[0];
+    if (!file) return;
+    let reader = new FileReader();
+    reader.onload = ev => {
+        let lines = ev.target.result.split(/\r?\n/);
+        let newDepts = [], newSysNames = [], newSysStatuses = [], newSysResps = [], newBusStatuses = [];
+        for (let line of lines) {
+            let parts = line.split(CSV_SEP);
+            if (parts[0] === 'dept' && parts[1]) newDepts.push(parts[1]);
+            else if (parts[0] === 'sysname' && parts[1]) newSysNames.push(parts[1]);
+            else if (parts[0] === 'sysstatus' && parts[1] && parts[2]) newSysStatuses.push({ value: parts[1], color: parts[2] });
+            else if (parts[0] === 'sysresp' && parts[1]) newSysResps.push(parts[1]);
+            else if (parts[0] === 'busstatus' && parts[1] && parts[2]) newBusStatuses.push({ value: parts[1], color: parts[2] });
+        }
+        if (newDepts.length) appData.departments = newDepts;
+        if (newSysNames.length) appData.sysNameList = newSysNames;
+        if (newSysStatuses.length) appData.sysStatusList = newSysStatuses;
+        if (newSysResps.length) appData.sysRespList = newSysResps;
+        if (newBusStatuses.length) appData.businessStatuses = newBusStatuses;
+        refreshMasterUI();
+        renderCurrentView();
+    };
+    reader.readAsText(file);
     e.target.value = '';
-  });
+}
 
-  const dz = $('#scrapLogDrop');
-  if (dz) {
-    ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
-      e.preventDefault(); dz.classList.add('drag');
-    }));
-    ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
-      e.preventDefault(); dz.classList.remove('drag');
-    }));
-    dz.addEventListener('drop', async e => {
-      const f = e.dataTransfer.files?.[0];
-      if (f) await handleScrapLogFiles([f]);
+async function exportProcesses() {
+    let sc = getCurrentScenario();
+    if (!sc) { alert('No scenario selected'); return; }
+    let headers = ['Seq', 'Name', 'Description', 'R_Responsible', 'A_Accountable', 'C_Consulted', 'I_Informed', 'BusinessStatus', 'SystemName', 'SystemStatus', 'SystemResponsible', 'BusinessDoc', 'UserManual', 'Notes'];
+    let lines = [headers.map(csvEscape).join(CSV_SEP)];
+    for (let p of sortProcesses(sc.processes)) {
+        const makeHyperlink = (url) => url && url.trim() ? `=HYPERLINK("${url.replace(/"/g, '""')}","${url}")` : '';
+        let row = [
+            p.seq, p.name, p.description || '',
+            p.raci.r.join(';'), p.raci.a.join(';'), p.raci.c.join(';'), p.raci.i.join(';'),
+            p.businessStatus, p.system.name || '', p.system.status || '', p.system.responsible || '',
+            makeHyperlink(p.businessDoc), makeHyperlink(p.userManual), p.notes || ''
+        ];
+        lines.push(row.map(csvEscape).join(CSV_SEP));
+    }
+    saveFilePicker(lines.join('\n'), `${sc.name.replace(/\s+/g, '_')}_processes_${new Date().toISOString().slice(0, 10)}.csv`);
+}
+
+function importProcesses() {
+    if (currentMode !== 'edit') return;
+    document.getElementById('processImportFile').click();
+}
+
+function handleProcessImport(e) {
+    let file = e.target.files[0];
+    if (!file) return;
+    let reader = new FileReader();
+    reader.onload = ev => {
+        let lines = ev.target.result.split(/\r?\n/).filter(l => l.trim());
+        if (lines.length < 2) return;
+        let headers = lines[0].split(CSV_SEP).map(h => h.replace(/^"|"$/g, '').trim());
+        let processes = [];
+        for (let i = 1; i < lines.length; i++) {
+            let parts = lines[i].split(CSV_SEP);
+            let obj = {};
+            headers.forEach((h, idx) => {
+                obj[h] = parts[idx] ? parts[idx].replace(/^"|"$/g, '').trim() : '';
+            });
+            if (!obj.Seq) continue;
+            processes.push({
+                id: genId(),
+                seq: obj.Seq,
+                name: obj.Name || 'Unnamed',
+                description: obj.Description || '',
+                raci: {
+                    r: obj.R_Responsible ? obj.R_Responsible.split(';') : [],
+                    a: obj.A_Accountable ? obj.A_Accountable.split(';') : [],
+                    c: obj.C_Consulted ? obj.C_Consulted.split(';') : [],
+                    i: obj.I_Informed ? obj.I_Informed.split(';') : []
+                },
+                businessStatus: obj.BusinessStatus || appData.businessStatuses[0]?.value || 'Not Defined',
+                system: { name: obj.SystemName || '', status: obj.SystemStatus || '', responsible: obj.SystemResponsible || '' },
+                businessDoc: obj.BusinessDoc || '',
+                userManual: obj.UserManual || '',
+                notes: obj.Notes || ''
+            });
+        }
+        showImportPreview('Processes', `Found ${processes.length} valid processes.`, headers, processes.map(p => [
+            p.seq, p.name, p.description,
+            p.raci.r.join(';'), p.raci.a.join(';'), p.raci.c.join(';'), p.raci.i.join(';'),
+            p.businessStatus, p.system.name, p.system.status, p.system.responsible,
+            p.businessDoc, p.userManual, p.notes
+        ]), () => {
+            let sc = getCurrentScenario();
+            if (sc) {
+                sc.processes = processes;
+                sc.processes = sortProcesses(sc.processes);
+                // Sync workflow nodes (remove orphans, add missing)
+                const removed = syncWorkflowNodesWithProcesses(sc);
+                console.log(`✅ Synced workflow: ${removed} orphan nodes removed`);
+                renderCurrentView();
+            }
+            closeImportPreview();
+        });
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+}
+function showImportPreview(title, summary, headers, rows, cb) {
+    let modal = document.getElementById('importPreviewModal');
+    document.getElementById('previewSummary').innerText = summary;
+    let container = document.getElementById('previewTableContainer');
+    container.innerHTML = '';
+    if (rows.length) {
+        let table = document.createElement('table');
+        table.className = 'preview-table';
+        let thead = document.createElement('thead');
+        let headerRow = document.createElement('tr');
+        headers.forEach(h => {
+            let th = document.createElement('th');
+            th.textContent = h;
+            headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+        let tbody = document.createElement('tbody');
+        rows.forEach(row => {
+            let tr = document.createElement('tr');
+            row.forEach(cell => {
+                let td = document.createElement('td');
+                td.textContent = cell || '';
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        container.appendChild(table);
+    } else {
+        container.innerHTML = '<p>No data</p>';
+    }
+    pendingImportCallback = cb;
+    modal.classList.add('active');
+}
+
+function closeImportPreview() {
+    document.getElementById('importPreviewModal').classList.remove('active');
+    pendingImportCallback = null;
+}
+
+// ============================
+// 19. Filter Functions
+// ============================
+
+function openFilterColumnsModal() {
+    let container = document.getElementById('filterColumnsList');
+    container.innerHTML = '';
+    for (let [key, label] of Object.entries(columnNames)) {
+        container.innerHTML += `<div class="checkbox-item"><input type="checkbox" value="${key}" id="col_${key}"> <label for="col_${key}">${label}</label></div>`;
+    }
+    document.getElementById('filterColumnsModal').classList.add('active');
+}
+
+function addFiltersFromSelection() {
+    let selected = Array.from(document.querySelectorAll('#filterColumnsList input:checked')).map(cb => cb.value);
+    if (selected.length === 0) return;
+    for (let col of selected) {
+        if (!activeFilters.some(f => f.column === col)) {
+            activeFilters.push({ column: col, values: [] });
+        }
+    }
+    rebuildFilterUI();
+    applyFiltersAndRender();
+    document.getElementById('filterColumnsModal').classList.remove('active');
+}
+
+function rebuildFilterUI() {
+    let container = document.getElementById('filterConditions');
+    container.innerHTML = '';
+    activeFilters.forEach((f, idx) => {
+        let div = document.createElement('div');
+        div.className = 'filter-row';
+        let span = document.createElement('span');
+        span.textContent = columnNames[f.column] || f.column;
+        let input = document.createElement('input');
+        input.placeholder = 'Values (comma separated)';
+        input.value = f.values.join(',');
+        input.onchange = () => {
+            f.values = input.value.split(',').map(v => v.trim()).filter(v => v);
+            applyFiltersAndRender();
+        };
+        let delBtn = document.createElement('button');
+        delBtn.textContent = '✖';
+        delBtn.onclick = () => {
+            activeFilters.splice(idx, 1);
+            rebuildFilterUI();
+            applyFiltersAndRender();
+        };
+        div.appendChild(span);
+        div.appendChild(input);
+        div.appendChild(delBtn);
+        container.appendChild(div);
     });
-  const updateScrapApplyBtn = () => {
-    const a = STATE.scrapAnalysis.period;
-    const p = STATE.scrapAnalysis.pendingPeriod;
-    const isDirty = a.from !== p.from || a.to !== p.to;
-    $('#scrapPeriodApply').prop('disabled', !isDirty).toggleClass('pending', isDirty);
-  };
+}
 
-  $('#scrapPeriodFrom').on('change', function() {
-    STATE.scrapAnalysis.pendingPeriod.from = this.value;
-    updateScrapApplyBtn();
-  });
-  $('#scrapPeriodTo').on('change', function() {
-    STATE.scrapAnalysis.pendingPeriod.to = this.value;
-    updateScrapApplyBtn();
-  });
+function applyFiltersAndRender() {
+    renderCurrentView();
+}
 
-  $('#scrapPeriodApply').on('click', () => {
-    STATE.scrapAnalysis.period = { ...STATE.scrapAnalysis.pendingPeriod };
-    renderScrapAnalysis();
-    updateScrapApplyBtn();
-  });
+function clearFilters() {
+    activeFilters = [];
+    rebuildFilterUI();
+    document.getElementById('searchInput').value = '';
+    searchKeyword = '';
+    renderCurrentView();
+}
 
-  $('#scrapPeriodControls').on('click', 'button[data-range]', function() {
-    const range = $(this).data('range');
-    let from = '', to = '';
-    const t = new Date(); t.setHours(0,0,0,0);
+// ============================
+// 20. Scenario Management
+// ============================
+
+function refreshScenarioDropdown() {
+    let sel = document.getElementById('scenarioSelect');
+    if (!sel) return;
+    sel.innerHTML = '';
+    appData.scenarios.forEach(sc => {
+        let opt = document.createElement('option');
+        opt.value = sc.id;
+        opt.textContent = sc.name;
+        if (sc.id === appData.currentScenarioId) opt.selected = true;
+        sel.appendChild(opt);
+    });
+}
+
+// ============================
+// 21. Main Render Function
+// ============================
+
+function renderApp() {
+    console.log('🎨 renderApp() called');
+    const root = document.getElementById('app-root');
+    if (!root) {
+        console.error('❌ app-root not found');
+        return;
+    }
+
+    if (!root.innerHTML) {
+        root.innerHTML = `
+            <div class="glass-dashboard edit-mode" id="appRoot">
+                <div class="top-header">
+                    <div class="title-section"><h1>📊 Business Process Orchestrator</h1><p>EBRO Factory Repository for all business processes details</p></div>
+                    <div>
+                        <button id="saveDataBtn" class="save-html-btn" style="display:inline-flex;">💾 Save data.json</button>
+                        <button id="reselectDataFileBtn" class="settings-btn" style="display:none;">📂 Re-select data.json</button>
+                        <button id="settingsBtn" class="settings-btn" style="display:inline-flex;">⚙️ Master Data</button>
+                        <button id="modeToggleBtn" class="mode-toggle-btn">👁️ Display Mode</button>
+                    </div>
+                </div>
+                <div class="scenario-panel">
+                    <span class="scenario-label">📁 Business Scenario:</span>
+                    <select id="scenarioSelect"></select>
+                    <div class="scenario-actions">
+                        <button id="newScenarioBtn" class="icon-btn">+ New</button>
+                        <button id="renameScenarioBtn" class="icon-btn">✎ Rename</button>
+                        <button id="deleteScenarioBtn" class="icon-btn danger-btn">🗑 Delete</button>
+                    </div>
+                </div>
+                <div class="action-bar">
+                    <div class="search-wrapper"><span>🔍</span><input type="text" id="searchInput" placeholder="Search..."></div>
+                    <div style="display:flex;gap:0.5rem;">
+                        <button id="collapseAllBtn" class="collapse-all-btn">📁 Collapse All</button>
+                        <button id="expandAllBtn" class="expand-all-btn">📂 Expand All</button>
+                        <button class="btn-add" id="addRowBtn" style="display:inline-flex;">➕ Add Process</button>
+                        <button class="icon-btn" id="exportProcessesBtn">📤 Export Processes</button>
+                        <button class="icon-btn" id="importProcessesBtn" style="display:inline-flex;">📥 Import Processes</button>
+                    </div>
+                </div>
+                <div class="view-tabs">
+                    <button id="tableViewTab" class="tab-btn active">📋 Process Table</button>
+                    <button id="sequenceViewTab" class="tab-btn">🌳 Process Tree</button>
+                    <button id="workflowViewTab" class="tab-btn">🔀 Workflow</button>
+                </div>
+                <div class="filter-panel">
+                    <div class="filter-conditions" id="filterConditions"></div>
+                    <div class="filter-actions">
+                        <button id="addFilterBtn" class="icon-btn">+ Add Filter</button>
+                        <button id="clearFiltersBtn" class="icon-btn">Clear Filters</button>
+                    </div>
+                </div>
+                <div id="tableViewPanel" style="display:none;">
+                    <div class="table-container">
+                        <table class="flow-table">
+                            <thead><tr>
+                                <th style="width:40px"></th><th>Seq</th><th>Process Name</th><th>Responsible (R)</th>
+                                <th>Business Status</th><th>System Name</th><th>System Status</th>
+                                <th id="actionsHeader" style="display:table-cell;">Actions</th>
+                            </tr></thead>
+                            <tbody id="tableBody"></tbody>
+                        </table>
+                    </div>
+                    <div id="noResultMsg" class="no-result" style="display:none;">📭 No matching processes</div>
+                </div>
+                <div id="sequenceViewPanel" style="display:block;">
+                    <div class="sequence-fullview" id="sequenceFullView">Loading sequence...</div>
+                </div>
+                <div id="workflowViewPanel" style="display:none;">
+                    <div class="workflow-toolbar" id="workflowToolbar">
+                        <div class="btn-group">
+                            <button class="workflow-btn" id="wfConnectBtn">🔗 Start to Connect</button>
+                            <button class="workflow-btn" id="wfClearArrowsBtn">🗑 Clear Arrows</button>
+                        </div>
+                        <div class="btn-group">
+                            <button class="workflow-btn" id="wfAutoLayoutBtn">📐 Auto Layout</button>
+                            <button class="workflow-btn danger" id="wfClearAllBtn">🗑 Clear All</button>
+                        </div>
+                         <div class="btn-group">
+                            <button class="workflow-btn" id="wfMarkStartBtn">🏁 Mark as Start</button>
+                            <button class="workflow-btn" id="wfMarkEndBtn">🏁 Mark as End</button>
+                        </div>
+                        <div class="btn-group">
+                            <button class="workflow-btn" id="wfSyncNodesBtn">🔄 Sync Nodes</button>
+                            <button class="icon-btn" id="cleanupOrphanNodesBtn">🧹 Cleanup Nodes</button>
+                            <button class="workflow-btn" id="wfDeleteNodeBtn">🗑 Delete Node</button>
+                            <button class="workflow-btn" id="wfToggleHideBtn">👁️ Hide Node</button>
+                        </div>                        
+                        <div class="btn-group workflow-zoom-controls">
+                            <button id="wfZoomIn" title="Zoom In">➕</button>
+                            <button id="wfZoomOut" title="Zoom Out">➖</button>
+                            <button id="wfResetView" title="Reset View">⟲</button>
+                        </div>
+                    </div>
+                    <div class="workflow-container" id="workflowContainer">
+                        <div class="workflow-canvas" id="workflowCanvas">
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="deleteConfirmModal" class="custom-modal-overlay">
+                <div class="custom-modal"><h3>⚠️ Confirm Deletion</h3><p id="deleteModalMessage"></p>
+                <div class="modal-buttons"><button id="deleteAcceptBtn" class="save-btn">Accept</button><button id="deleteCancelBtn" class="cancel-btn">Cancel</button></div></div>
+            </div>
+            <div id="addSubModal" class="custom-modal-overlay">
+                <div class="custom-modal"><h3>➕ Add Subprocess</h3>
+                <div class="field-group"><label>Sequence (empty = auto)</label><input type="text" id="newSubSeq"></div>
+                <div class="field-group"><label>Process Name</label><input type="text" id="newSubName"></div>
+                <div class="modal-buttons"><button id="addSubAcceptBtn" class="save-btn">Add</button><button id="addSubCancelBtn" class="cancel-btn">Cancel</button></div></div>
+            </div>
+            <div id="masterModal" class="master-modal">
+                <div class="master-container"><h2>📋 Master Data</h2><div id="masterContent"></div>
+                <div class="modal-buttons"><button id="closeMasterBtn" class="cancel-btn">Close</button></div></div>
+            </div>
+            <div id="processDetailModal" class="modal-overlay">
+                <div class="modal-container"><h2>📄 Process Details</h2>
+                <div class="form-row" style="display:flex;gap:1rem;">
+                    <div class="field-group"><label>Sequence</label><input type="text" id="modalSeq"></div>
+                    <div class="field-group"><label>Process Name</label><input type="text" id="modalName"></div>
+                </div>
+                <div class="field-group"><label>📝 Description</label><textarea id="modalDescription" rows="3"></textarea></div>
+                <div class="raci-grid" id="raciCheckboxGrid"></div>
+                <div class="form-row" style="display:flex;gap:1rem;">
+                    <div class="field-group"><label>Business Status</label><select id="modalStatus"></select></div>
+                    <div class="field-group"><label>📄 Business Doc</label><div class="field-group-with-icon"><input type="text" id="modalBusinessDoc"><span id="businessDocLink" class="link-icon" style="display:inline-block;">🔗</span></div></div>
+                </div>
+                <div class="form-row" style="display:flex;gap:1rem;">
+                    <div class="field-group"><label>System Name</label><select id="modalSysName"></select></div>
+                    <div class="field-group"><label>System Status</label><select id="modalSysStatus"></select></div>
+                    <div class="field-group"><label>System Responsible</label><select id="modalSysResp"></select></div>
+                    <div class="field-group"><label>📘 User Manual</label><div class="field-group-with-icon"><input type="text" id="modalUserManual"><span id="userManualLink" class="link-icon" style="display:none;">🔗</span></div></div>
+                </div>
+                <div class="field-group"><label>📝 Notes</label><textarea id="modalNotes" rows="2"></textarea></div>
+                <div class="modal-buttons"><button id="cancelModalBtn" class="cancel-btn">Cancel</button><button id="saveModalBtn" class="save-btn">Save</button></div></div>
+            </div>
+            <div id="filterColumnsModal" class="custom-modal-overlay">
+                <div class="custom-modal"><h3>Select filter columns</h3>
+                <div id="filterColumnsList" style="max-height:300px;overflow-y:auto;margin:1rem 0;"></div>
+                <div class="modal-buttons"><button id="filterColumnsConfirm" class="save-btn">Add Filters</button><button id="filterColumnsCancel" class="cancel-btn">Cancel</button></div></div>
+            </div>
+            <div id="importPreviewModal" class="custom-modal-overlay">
+                <div class="custom-modal"><h3>📋 Import Preview</h3>
+                <div id="previewSummary"></div>
+                <div id="previewTableContainer"></div>
+                <div class="modal-buttons"><button id="importConfirmBtn" class="save-btn">Confirm</button><button id="importCancelBtn" class="cancel-btn">Cancel</button></div></div>
+            </div>
+            <input type="file" id="masterImportFile" accept=".csv" style="display:none">
+            <input type="file" id="processImportFile" accept=".csv" style="display:none">
+        `;
+    }
+
+    updateUIVisibility();
+    refreshScenarioDropdown();
+    rebuildFilterUI();
+    bindEvents();
+    renderCurrentView();
+    console.log('✅ renderApp() completed');
+}
+
+// ============================
+// 22. Event Binding
+// ============================
+
+function bindEvents() {
+    if (eventsBound) return;
+    eventsBound = true;
+    document.getElementById('workflowViewTab').onclick = () => setView('workflow');
+    document.getElementById('scenarioSelect').onchange = (e) => {
+        appData.currentScenarioId = e.target.value;
+        collapseState.clear();
+        renderCurrentView();
+        // ===== IMPORTANT: Update the snapshot =====
+        lastSnapshot = JSON.parse(JSON.stringify(appData));
+        saveSnapshot(lastSnapshot);
+        // =========================================
+    };
+    document.getElementById('cleanupOrphanNodesBtn').addEventListener('click', function() {
+        if (currentMode !== 'edit') return;
+        const sc = getCurrentScenario();
+        if (!sc) return;
+        const removed = syncWorkflowNodesWithProcesses(sc);
+        if (removed > 0) {
+            renderCurrentView();
+            alert(`✅ Removed orphan nodes. ${removed} nodes kept.`);
+        } else {
+            alert('ℹ️ No orphan nodes found.');
+        }
+    });
+    document.getElementById('newScenarioBtn').onclick = () => {
+        if (currentMode !== 'edit') return;
+        let name = prompt('Scenario name:', 'New');
+        if (name) {
+            let id = genId();
+            appData.scenarios.push({ 
+                id, 
+                name, 
+                processes: [], 
+                workflow: { nodes: [], connections: [] } 
+            });
+            appData.currentScenarioId = id;
+            // ===== IMPORTANT: Update the snapshot =====
+            //lastSnapshot = JSON.parse(JSON.stringify(appData));
+            //saveSnapshot(lastSnapshot);
+            // =========================================
+            refreshScenarioDropdown();
+            renderCurrentView();
+            alert(`✅ Scenario "${name}" created. Click "Save to GitHub" to persist it.`);
+        }
+    };
+
+    document.getElementById('renameScenarioBtn').onclick = () => {
+        if (currentMode !== 'edit') return;
+        let sc = getCurrentScenario();
+        if (sc) {
+            let nn = prompt('Rename:', sc.name);
+            if (nn) sc.name = nn;
+            refreshScenarioDropdown();
+            renderCurrentView();
+            // ===== IMPORTANT: Update the snapshot =====
+            //lastSnapshot = JSON.parse(JSON.stringify(appData));
+            //saveSnapshot(lastSnapshot);
+            // =========================================
+            console.log(`✅ Scenario renamed to "${nn.trim()}". Click "Save to GitHub" to persist.`);
+        }
+    };
+
+    document.getElementById('deleteScenarioBtn').onclick = () => {
+        if (currentMode !== 'edit') return;
+        if (appData.scenarios.length <= 1) {
+            alert('❌ Cannot delete the last scenario.');
+            return;
+        }
     
-    if (range === 'today') {
-      from = to = isoDate(t);
-    } else if (range === 'thisWeek') {
-      const day = t.getDay() || 7;
-      const mon = new Date(t); mon.setDate(t.getDate() - (day - 1));
-      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
-      from = isoDate(mon); to = isoDate(sun);
-    } else if (range === 'thisMonth') {
-      const first = new Date(t.getFullYear(), t.getMonth(), 1);
-      const last = new Date(t.getFullYear(), t.getMonth() + 1, 0);
-      from = isoDate(first); to = isoDate(last);
-    } else if (range === 'thisYear') {
-      from = `${t.getFullYear()}-01-01`; to = `${t.getFullYear()}-12-31`;
-    } else if (range === 'all') {
-      // Find min/max dates in data
-      const dates = STATE.scrapAnalysis.records.map(r => r.date).filter(Boolean).sort();
-      from = dates[0] || '';
-      to = dates[dates.length - 1] || '';
-    }
-
-    $('#scrapPeriodFrom').val(from);
-    $('#scrapPeriodTo').val(to);
-    STATE.scrapAnalysis.pendingPeriod = { from, to };
+        const sc = getCurrentScenario();
+        if (!sc) return;
     
-    $('#scrapPeriodControls button[data-range]').removeClass('primary');
-    $(this).addClass('primary');
-    updateScrapApplyBtn();
-  });
+        const confirmMsg = `⚠️ Delete scenario "${sc.name}"?\n\nThis will permanently delete ALL processes within this scenario.`;
+        if (!confirm(confirmMsg)) return;
+    
+        appData.scenarios = appData.scenarios.filter(s => s.id !== appData.currentScenarioId);
+        appData.currentScenarioId = appData.scenarios[0].id;
+    
+        collapseState.clear();
+        refreshScenarioDropdown();
+        renderCurrentView();
+    
+        // ===== IMPORTANT: Update the snapshot =====
+        //lastSnapshot = JSON.parse(JSON.stringify(appData));
+        //saveSnapshot(lastSnapshot);
+        // =========================================
+    
+        const saveBtn = document.getElementById('saveDataBtn');
+        if (saveBtn) {
+            saveBtn.style.animation = 'pulse 0.5s ease 3';
+            setTimeout(() => { saveBtn.style.animation = ''; }, 2000);
+        }
+        alert('✅ Scenario deleted locally!\n\nClick "Save to GitHub" to persist changes.');
+    };
 
-  // --- Column Filter/Sort Popup Logic ---
-  $('#scrapTable').on('click', '.filter-btn', function(e) {
-    e.stopPropagation();
-    const colId = $(this).data('col');
-    const anchor = $(this)[0];
-    openScrapFilterPopup(colId, anchor);
-  });
+    document.getElementById('addRowBtn').onclick = () => {
+        if (currentMode !== 'edit') return;
+        let sc = getCurrentScenario();
+        if (!sc) return;
+        let max = 0;
+        sc.processes.forEach(p => {
+            if (!p.seq.includes('.')) max = Math.max(max, parseFloat(p.seq));
+        });
+        let newSeq = (max + 10).toString();
+        sc.processes.push({
+            id: genId(),
+            seq: newSeq,
+            name: 'New Step',
+            description: '',
+            raci: { r: [], a: [], c: [], i: [] },
+            businessStatus: appData.businessStatuses[0]?.value || 'Not Defined',
+            system: { name: appData.sysNameList[0] || '', status: appData.sysStatusList[0]?.value || 'Operational', responsible: '' },
+            notes: '',
+            businessDoc: '',
+            userManual: ''
+        });
+        sc.processes = sortProcesses(sc.processes);
+        renderCurrentView();
+    };
 
-  $('#scrapClearFilters').on('click', () => {
-    STATE.scrapAnalysis.filters = {};
-    STATE.scrapAnalysis.sorts = {};
-    $('#scrapSearch').val('');
-    $('#scrapCategoryFilter').val('all');
-    renderScrapAnalysis();
-  });
+    document.getElementById('modeToggleBtn').onclick = function() {
+        if (currentMode === 'display') {
+            const pwd = prompt('Enter edit password:');
+            if (pwd !== 'admin') {
+                alert('Incorrect password');
+                return;
+            }
+            currentMode = 'edit';
+            collapseState.clear();
+            const token = getGitHubToken();
+            if (!token) {
+                const newToken = prompt(
+                    '🔑 Enter your GitHub Token to enable saving\n\n' +
+                    'The Token will be saved in your browser.',
+                    ''
+                );
+                if (newToken && newToken.trim()) {
+                    setGitHubToken(newToken);
+                    alert('✅ Token saved to browser local storage');
+                } else {
+                    alert('⚠️ No Token provided. You can still edit data, but saving to GitHub will not work.');
+                }
+            }
+            renderCurrentView();
+            updateUIVisibility();
+        } else {
+            currentMode = 'display';
+            const sc = getCurrentScenario();
+            if (sc) {
+                for (let p of sc.processes) {
+                    if (!p.seq.includes('.')) collapseState.set(p.id, true);
+                }
+            }
+            renderCurrentView();
+            updateUIVisibility();
+        }
+    };
 
-  // Ensure global close works for scrap popup too
-  $(document).on('click', e => {
-    if (!$(e.target).closest('.filter-btn').length && !$(e.target).closest('#filterPopup').length) {
-      $('#filterPopup').addClass('hidden').html('');
+    document.getElementById('saveDataBtn').onclick = () => {
+        saveDataToFile();
+    };
+
+    const reselectBtn = document.getElementById('reselectDataFileBtn');
+    if (reselectBtn) {
+        reselectBtn.onclick = () => {
+            showDataFilePicker({ errorMessage: null, mode: 'reselect' });
+        };
     }
-  });
+
+    document.getElementById('settingsBtn').onclick = () => {
+        refreshMasterUI();
+        document.getElementById('masterModal').classList.add('active');
+    };
+    document.getElementById('closeMasterBtn').onclick = () => document.getElementById('masterModal').classList.remove('active');
+
+    document.getElementById('tableViewTab').onclick = () => setView('table');
+    document.getElementById('sequenceViewTab').onclick = () => setView('sequence');
+
+    document.getElementById('searchInput').oninput = (e) => {
+        searchKeyword = e.target.value;
+        renderCurrentView();
+    };
+
+    document.getElementById('collapseAllBtn').onclick = collapseAllParents;
+    document.getElementById('expandAllBtn').onclick = expandAllParents;
+
+    document.getElementById('addFilterBtn').onclick = openFilterColumnsModal;
+    document.getElementById('clearFiltersBtn').onclick = clearFilters;
+    document.getElementById('filterColumnsConfirm').onclick = addFiltersFromSelection;
+    document.getElementById('filterColumnsCancel').onclick = () => document.getElementById('filterColumnsModal').classList.remove('active');
+
+    document.getElementById('exportProcessesBtn').onclick = exportProcesses;
+    document.getElementById('importProcessesBtn').onclick = importProcesses;
+
+    document.getElementById('cancelModalBtn').onclick = closeModal;
+    document.getElementById('saveModalBtn').onclick = saveModal;
+
+    document.getElementById('deleteAcceptBtn').onclick = () => {
+        if (pendingDeleteCallback) pendingDeleteCallback();
+        document.getElementById('deleteConfirmModal').classList.remove('active');
+    };
+    document.getElementById('deleteCancelBtn').onclick = () => document.getElementById('deleteConfirmModal').classList.remove('active');
+
+    document.getElementById('addSubAcceptBtn').onclick = () => {
+        if (pendingAddSubCallback) {
+            pendingAddSubCallback(document.getElementById('newSubSeq').value, document.getElementById('newSubName').value);
+        } else {
+            document.getElementById('addSubModal').classList.remove('active');
+        }
+    };
+    document.getElementById('addSubCancelBtn').onclick = () => {
+        document.getElementById('addSubModal').classList.remove('active');
+        pendingAddSubCallback = null;
+    };
+
+    document.getElementById('importConfirmBtn').onclick = () => {
+        if (pendingImportCallback) pendingImportCallback();
+        closeImportPreview();
+    };
+    document.getElementById('importCancelBtn').onclick = closeImportPreview;
+
+    document.getElementById('masterImportFile').onchange = handleMasterImport;
+    document.getElementById('processImportFile').onchange = handleProcessImport;
+
+    document.getElementById('modalBusinessDoc').addEventListener('input', () => updateDocumentLinkIcon('modalBusinessDoc', 'businessDocLink'));
+    document.getElementById('modalUserManual').addEventListener('input', () => updateDocumentLinkIcon('modalUserManual', 'userManualLink'));
 }
 
-// Custom Popup for Scrap Table
-function openScrapFilterPopup(colId, anchor) {
-  const popup = $('#filterPopup');
-  popup.data('col', colId);
-  
-  const existingFilter = STATE.scrapAnalysis.filters[colId];
-  popup.data('workingSet', existingFilter ? new Set(existingFilter) : null);
-  popup.data('search', '');
-  
-  // Get unique values for this column
-  const uniqueVals = new Set();
-  STATE.scrapAnalysis.records.forEach(r => {
-    let v = r[colId];
-    if (colId === 'desc') v = getScrapDescription(r);
-    if (colId === 'reason') v = r.reason2 || r.reason1 || '';
-    uniqueVals.add(String(v || ''));
-  });
-  
-  const allValues = Array.from(uniqueVals).sort().map(v => ({ key: v, label: v || '—' }));
+// ============================
+// 23. View Control
+// ============================
 
-  paintScrapPopup(colId, allValues, anchor);
+function setView(view) {
+    currentView = view;
+    // Hide/show the filter panel based on current view
+    const filterPanel = document.querySelector('.filter-panel');
+    if (filterPanel) {
+        filterPanel.style.display = (view === 'workflow') ? 'none' : 'block';
+    } 
+    document.getElementById('tableViewPanel').style.display = view === 'table' ? 'block' : 'none';
+    document.getElementById('sequenceViewPanel').style.display = view === 'sequence' ? 'block' : 'none';
+    document.getElementById('workflowViewPanel').style.display = view === 'workflow' ? 'block' : 'none';
+    document.getElementById('tableViewTab').classList.toggle('active', view === 'table');
+    document.getElementById('sequenceViewTab').classList.toggle('active', view === 'sequence');
+    document.getElementById('workflowViewTab').classList.toggle('active', view === 'workflow');
+    renderCurrentView();
 }
 
-function paintScrapPopup(colId, allValues, anchor) {
-  const popup = $('#filterPopup');
-  const currentSort = STATE.scrapAnalysis.sorts[colId];
-  const search = (popup.data('search') || '').toLowerCase();
-  const working = popup.data('workingSet');
-  
-  const visible = allValues.filter(v => !search || v.label.toLowerCase().includes(search));
-
-  const valuesHtml = visible.length ? visible.map(v => {
-    const checked = working === null ? true : working.has(v.key);
-    return `<label class="fp-value">
-      <input type="checkbox" data-key="${escapeHtml(v.key)}" ${checked ? 'checked' : ''}/>
-      <span title="${escapeHtml(v.label)}">${escapeHtml(v.label)}</span>
-    </label>`;
-  }).join('') : `<div class="hint" style="margin:6px">No values</div>`;
-
-  popup.html(`
-    <div class="fp-sort">
-      <button data-sort="asc" class="${currentSort==='asc'?'primary':''}">↑ Sort A → Z</button>
-      <button data-sort="desc" class="${currentSort==='desc'?'primary':''}">↓ Sort Z → A</button>
-      ${currentSort ? `<button data-sort="none" class="ghost">✕ Clear sort</button>` : ''}
-    </div>
-    <div class="fp-search">
-      <input type="text" id="fpSearchInput" placeholder="Search values…" value="${escapeHtml(popup.data('search')||'')}"/>
-    </div>
-    <div class="fp-values" id="fpValues">${valuesHtml}</div>
-    <div class="fp-actions">
-      <button data-act="all">All</button>
-      <button data-act="none">None</button>
-      <button data-act="apply" class="primary">Apply</button>
-    </div>
-  `);
-
-  // Position
-  const r = anchor.getBoundingClientRect();
-  let left = r.right - 270;
-  if (left < 8) left = 8;
-  let top = r.bottom + 6;
-  if (top + 420 > window.innerHeight - 8) top = Math.max(8, r.top - 426);
-  popup.css({ left, top }).removeClass('hidden');
-
-  // Wire events
-  popup.find('.fp-sort button').on('click', function() {
-    const s = $(this).data('sort');
-    if (s === 'none') delete STATE.scrapAnalysis.sorts[colId];
-    else STATE.scrapAnalysis.sorts[colId] = s;
-    popup.addClass('hidden');
-    renderScrapAnalysis();
-  });
-
-  const si = popup.find('#fpSearchInput');
-  si.on('input', function() {
-    popup.data('search', this.value);
-    const currentChecked = new Set();
-    popup.find('.fp-value input:checked').each(function() { currentChecked.add($(this).data('key')); });
-    const currentAll = popup.find('.fp-value input').length;
-    popup.data('workingSet', currentChecked.size === currentAll ? null : currentChecked);
-    paintScrapPopup(colId, allValues, anchor);
-    popup.find('#fpSearchInput').focus();
-  });
-
-  popup.find('.fp-value input').on('change', function(e) {
-    e.stopPropagation();
-    let ws = popup.data('workingSet');
-    if (ws === null) ws = new Set(allValues.map(v => v.key));
-    if (this.checked) ws.add($(this).data('key'));
-    else ws.delete($(this).data('key'));
-    popup.data('workingSet', ws);
-  });
-
-  popup.find('.fp-value').on('click', e => e.stopPropagation());
-
-  popup.find('.fp-actions button').on('click', function() {
-    const act = $(this).data('act');
-    if (act === 'all') {
-      popup.data('workingSet', null);
-      popup.find('.fp-value input').prop('checked', true);
-    } else if (act === 'none') {
-      popup.data('workingSet', new Set());
-      popup.find('.fp-value input').prop('checked', false);
-    } else if (act === 'apply') {
-      const ws = popup.data('workingSet');
-      if (ws === null) delete STATE.scrapAnalysis.filters[colId];
-      else STATE.scrapAnalysis.filters[colId] = new Set(ws);
-      popup.addClass('hidden');
-      renderScrapAnalysis();
+function renderCurrentView() {
+    if (window.workflowSvgLayer) {
+        window.workflowSvgLayer.innerHTML = '';
+        window.workflowSvgLayer = null;
     }
-  });
-}
-  
-   bindScrapDetailModal();
-  // Filters & Exports
-  $('#scrapSearch')?.addEventListener('input', renderScrapAnalysis);
-  $('#scrapCategoryFilter')?.addEventListener('change', renderScrapAnalysis);
-  $('#scrapExport')?.addEventListener('click', exportScrapAnalysis);
 
+    if (currentView === 'table') {
+        renderTable();
+        document.getElementById('tableViewPanel').style.display = 'block';
+        document.getElementById('sequenceViewPanel').style.display = 'none';
+        document.getElementById('workflowViewPanel').style.display = 'none';
+    } else if (currentView === 'sequence') {
+        renderSequence();
+        document.getElementById('tableViewPanel').style.display = 'none';
+        document.getElementById('sequenceViewPanel').style.display = 'block';
+        document.getElementById('workflowViewPanel').style.display = 'none';
+    } else if (currentView === 'workflow') {
+        document.getElementById('tableViewPanel').style.display = 'none';
+        document.getElementById('sequenceViewPanel').style.display = 'none';
+        document.getElementById('workflowViewPanel').style.display = 'block';
+
+        renderWorkflow();
+
+        resetConnectionState();
+
+        setTimeout(function() {
+            bindWorkflowEvents();
+        }, 200);
+    }
+    updateUIVisibility();
 }
-/* ---------- Scrap File Pickers & Reloads ---------- */
-async function pickScrapFile() {
-  if (typeof window.showOpenFilePicker !== 'function') { $('#scrapLogInput').click(); return; }
-  try {
-    const [handle] = await window.showOpenFilePicker({
-      types: [{ description: 'Scrap Log', accept: { 
-        'text/csv': ['.csv', '.tsv', '.txt'],
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-        'application/vnd.ms-excel': ['.xls']
-      }}]
+
+function updateUIVisibility() {
+    const isEdit = currentMode === 'edit';
+    const root = document.getElementById('appRoot');
+    if (!root) return;
+
+    root.classList.toggle('display-mode', !isEdit);
+    root.classList.toggle('edit-mode', isEdit);
+
+    const addBtn = document.getElementById('addRowBtn');
+    const importBtn = document.getElementById('importProcessesBtn');
+    const saveBtn = document.getElementById('saveDataBtn');
+    const reselectBtn = document.getElementById('reselectDataFileBtn');
+    const modeBtn = document.getElementById('modeToggleBtn');
+
+    if (addBtn) addBtn.style.display = isEdit ? 'inline-flex' : 'none';
+    if (importBtn) importBtn.style.display = isEdit ? 'inline-flex' : 'none';
+    if (saveBtn) saveBtn.style.display = isEdit ? 'inline-flex' : 'none';
+    if (reselectBtn) reselectBtn.style.display = 'inline-flex';
+    if (modeBtn) modeBtn.innerHTML = isEdit ? '👁️ Display Mode' : '✏️ Edit Mode';
+
+    const token = getGitHubToken();
+    let statusDiv = document.getElementById('tokenStatus');
+
+    if (isEdit) {
+        if (!statusDiv) {
+            statusDiv = document.createElement('div');
+            statusDiv.id = 'tokenStatus';
+            statusDiv.style.marginLeft = '1rem';
+            statusDiv.style.fontSize = '0.85rem';
+            const titleSection = document.querySelector('.title-section');
+            if (titleSection) titleSection.appendChild(statusDiv);
+        }
+        statusDiv.style.display = 'block';
+        if (token) {
+            statusDiv.innerHTML = '🟢 Token configured';
+            statusDiv.style.color = '#16a34a';
+        } else {
+            statusDiv.innerHTML = '🔴 No Token - Cannot save to GitHub';
+            statusDiv.style.color = '#dc2626';
+        }
+    } else if (statusDiv) {
+        statusDiv.style.display = 'none';
+    }
+}
+
+// ============================
+// 26. Workflow View
+// ============================
+
+let workflowNodes = {};
+let workflowLines = [];
+let workflowConnections = [];
+let connectionStartNode = null;
+let nodeIdCounter = 0;
+let workflowScale = 1;
+
+function getWorkflowData() {
+    const sc = getCurrentScenario();
+    if (!sc) return { nodes: [], connections: [] };
+
+    if (!sc.workflow) {
+        sc.workflow = { nodes: [], connections: [] };
+        console.log('Created new workflow for scenario:', sc.name);
+    }
+    normalizeWorkflowData(sc.workflow);
+    if (sc.workflow.nodes) {
+        sc.workflow.nodes.forEach(function(node) {
+            if (node.hidden === undefined) {
+                node.hidden = false;
+            }
+        });
+    }
+
+    if (sc.workflow.nodeIdCounter !== undefined) {
+        let counter = sc.workflow.nodeIdCounter;
+        if (Array.isArray(counter)) {
+            counter = counter[0] || 0;
+        }
+        nodeIdCounter = typeof counter === 'number' ? counter : parseInt(counter) || 0;
+    }
+
+    return sc.workflow;
+}
+
+function saveWorkflowData(workflow) {
+    const sc = getCurrentScenario();
+    if (!sc) return;
+
+    workflow.nodeIdCounter = nodeIdCounter;
+    sc.workflow = workflow;
+
+    // ✅ Update snapshot after workflow change
+    //if (lastSnapshot) {
+    //    lastSnapshot = JSON.parse(JSON.stringify(appData));
+    //    saveSnapshot(lastSnapshot);
+    //}
+
+    renderWorkflow();
+}
+
+// ✅ Arrow update with requestAnimationFrame (no duplicate declaration)
+function updateWorkflowArrows() {
+    if (arrowUpdatePending) return;
+    arrowUpdatePending = true;
+
+    requestAnimationFrame(function() {
+        arrowUpdatePending = false;
+        const svgLayer = window.workflowSvgLayer;
+        if (!svgLayer) return;
+
+        svgLayer.querySelectorAll('.workflow-arrow-group').forEach(el => el.remove());
+
+        const workflow = getWorkflowData();
+        const canvasWrapper = document.querySelector('.workflow-canvas-wrapper');
+        if (!canvasWrapper) return;
+
+        const visibleNodeIds = new Set();
+        workflow.nodes.forEach(function(n) {
+            if (!n.hidden) visibleNodeIds.add(n.id);
+        });
+
+        workflow.connections.forEach(function(conn) {
+            if (!visibleNodeIds.has(conn.from) || !visibleNodeIds.has(conn.to)) return;
+            const fromEl = document.getElementById('wf-node-' + conn.from);
+            const toEl = document.getElementById('wf-node-' + conn.to);
+            if (fromEl && toEl) {
+                drawArrowSVG(
+                    svgLayer,
+                    fromEl,
+                    toEl,
+                    canvasWrapper,
+                    '#475569',
+                    conn.type === 'decision' ? { len: 8, gap: 4 } : undefined,
+                    conn.id
+                );
+            }
+        });
     });
-    await saveFileHandle('scrapFile', handle);
-    await reloadScrapFileFromHandle(handle);
-    renderAllFileChips(); renderStoredFilesTab();
-  } catch (e) {
-    if (e.name !== 'AbortError') { console.error(e); alert('Failed to pick file: ' + e.message); }
-  }
 }
 
-async function reloadScrapFileFromHandle(handle) {
-  if (!handle) return;
-  let perm = await handle.queryPermission({ mode: 'read' });
-  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
-  if (perm !== 'granted') return;
-  
-  const f = await handle.getFile();
-  const info = $('#scrapLogInfo'); if (info) info.textContent = `Loading ${f.name}…`;
-  await handleScrapLogFiles([f]);
-}
+function renderWorkflow() {
+    console.log('🔄 renderWorkflow called');
+    const canvas = document.getElementById('workflowCanvas');
+    if (!canvas) {
+        console.warn('Canvas not found!');
+        return;
+    }
 
-async function pickScrapImageFolder() {
-  if (typeof window.showDirectoryPicker !== 'function') {
-    alert('Folder picking requires Chrome, Edge, or a Chromium-based browser.');
-    return;
-  }
-  try {
-    const handle = await window.showDirectoryPicker({ mode: 'read' });
-    await saveFileHandle('scrapImageFolder', handle);
-    await reloadScrapImageFolderFromHandle(handle);
-    renderAllFileChips(); renderStoredFilesTab();
-  } catch (e) {
-    if (e.name !== 'AbortError') { console.error(e); alert('Failed to select folder: ' + e.message); }
-  }
-}
-function openScrapDetail(index) {
-  if (index < 0 || index >= STATE.scrapAnalysis.records.length) return;
-  const r = STATE.scrapAnalysis.records[index];
+    const workflow = getWorkflowData();
+    const isEdit = currentMode === 'edit';
 
-  // Populate Read-Only Inputs
-  $('#sd_category').value = r.category || '—';
-  $('#sd_ticketId').value = r.ticketId || '—';
-  $('#sd_partNo').value = r.partNo || '—';
-  $('#sd_desc').value = r.desc || '—';
-  $('#sd_reason1').value = r.reason1 || '—';
-  $('#sd_qty').value = r.qty || '0';
-  $('#sd_area').value = r.area || '—';
-  $('#sd_reason2').value = r.reason2 || '—';
-  $('#sd_rawDate').value = r.rawDate || '—';
-  $('#sd_obs').value = r.obs || '—';
-  $('#sd_operator').value = r.operator || '—';
+    // Clear previous content
+    canvas.querySelectorAll('.workflow-node').forEach(el => el.remove());
+    canvas.querySelectorAll('.workflow-arrow-svg').forEach(el => el.remove());
+    canvas.querySelectorAll('.workflow-arrow-line').forEach(el => el.remove());
 
-  $('#sdTitle').textContent = `Details: ${r.file || 'Scrap Record'}`;
-  $('#sdSubtitle').textContent = `Ticket: ${r.ticketId || 'N/A'}`;
-  
-  $('#sdImage').style.display = 'none';
-  $('#sdImageLoading').style.display = 'block';
-  $('#sdImageLoading').style.color = 'var(--muted)';
-  $('#sdImageLoading').textContent = 'Loading Image...';
-  $('#scrapDetailModal').classList.remove('hidden');
-
-  // Load Image
-  const handle = STATE.scrapAnalysis.imageFolderHandle;
-  if (handle && r.file) {
-    handle.getFileHandle(r.file).then(fileHandle => fileHandle.getFile()).then(file => {
-      const url = URL.createObjectURL(file);
-      if (window._scrapImgUrl) URL.revokeObjectURL(window._scrapImgUrl);
-      window._scrapImgUrl = url;
-      
-      const img = $('#sdImage');
-      img.src = url;
-      img.onload = () => {
-        $('#sdImageLoading').style.display = 'none';
-        img.style.display = 'block';
-      };
-    }).catch(err => {
-      $('#sdImageLoading').textContent = 'Image not found in selected folder.';
-      $('#sdImageLoading').style.color = 'var(--danger)';
+    connectionStartNode = null;
+    document.querySelectorAll('.workflow-node.active').forEach(function(el) {
+        if (el) el.classList.remove('active');
     });
-  } else {
-    $('#sdImageLoading').textContent = 'No Image Folder Selected.';
-  }
+
+    const sc = getCurrentScenario();
+    const processes = sc ? sc.processes : [];
+
+    // Auto-create nodes if none exist
+    if (workflow.nodes.length === 0 && processes.length > 0) {
+        console.log('Creating workflow nodes from processes...');
+        const nodeMap = {};
+        const cols = Math.min(6, processes.length);
+        const sortedProcs = sortProcesses(processes);
+
+        sortedProcs.forEach((p, index) => {
+            const id = 'node-' + (nodeIdCounter++);
+            const isSub = p.seq && p.seq.includes('.');
+            const node = {
+                id: id,
+                processId: p.id,
+                type: isSub ? 'sub' : 'main',
+                x: 100 + (index % cols) * 160,
+                y: 100 + Math.floor(index / cols) * 110,
+                label: p.name || 'Unnamed'
+            };
+            nodeMap[p.id] = node;
+            workflow.nodes.push(node);
+        });
+
+        const topLevel = sortedProcs.filter(p => !p.seq || !p.seq.includes('.'));
+        for (let i = 0; i < topLevel.length - 1; i++) {
+            const from = topLevel[i];
+            const to = topLevel[i + 1];
+            if (from && to && nodeMap[from.id] && nodeMap[to.id]) {
+                const connId = 'conn-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6);
+                workflow.connections.push({
+                    id: connId,
+                    from: nodeMap[from.id].id,
+                    to: nodeMap[to.id].id,
+                    type: 'arrow'
+                });
+            }
+        }
+
+        saveWorkflowData(workflow);
+        console.log('Created', workflow.nodes.length, 'nodes and', workflow.connections.length, 'connections');
+    }
+
+    // Build the canvas wrapper (large scrollable area)
+    const canvasWrapper = document.createElement('div');
+    canvasWrapper.className = 'workflow-canvas-wrapper';
+    canvasWrapper.style.position = 'relative';
+    canvasWrapper.style.width = '5000px';
+    canvasWrapper.style.height = '5000px';
+    canvasWrapper.style.overflow = 'visible';
+    canvasWrapper.style.pointerEvents = 'auto';
+    const zoomControls = canvas.querySelector('.workflow-zoom-controls');
+    if (zoomControls) {
+        canvasWrapper.appendChild(zoomControls);
+    }
+
+    canvas.innerHTML = '';
+    canvas.appendChild(canvasWrapper);
+    canvas.style.position = 'relative';
+    canvas.style.overflow = 'auto';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.minHeight = '700px';
+
+    // Node container (scaled)
+    const nodeContainer = document.createElement('div');
+    nodeContainer.className = 'workflow-node-container';
+    nodeContainer.style.position = 'absolute';
+    nodeContainer.style.top = '0';
+    nodeContainer.style.left = '0';
+    nodeContainer.style.width = '100%';
+    nodeContainer.style.height = '100%';
+    nodeContainer.style.transformOrigin = 'top left';
+    nodeContainer.style.transform = 'scale(' + workflowScale + ')';
+    nodeContainer.style.pointerEvents = 'auto';
+    canvasWrapper.appendChild(nodeContainer);
+
+    // SVG layer for arrows
+    const svgLayer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svgLayer.setAttribute('class', 'workflow-arrow-svg');
+    svgLayer.style.position = 'absolute';
+    svgLayer.style.top = '0';
+    svgLayer.style.left = '0';
+    svgLayer.style.width = '100%';
+    svgLayer.style.height = '100%';
+    svgLayer.style.pointerEvents = 'none';
+    svgLayer.style.overflow = 'visible';
+    canvasWrapper.appendChild(svgLayer);
+
+    // Render nodes
+    workflow.nodes.forEach(node => {
+        if (!isEdit && node.hidden) {
+            return;
+        }
+        const nodeEl = document.createElement('div');
+        nodeEl.className = 'workflow-node';
+        if (node.hidden) nodeEl.classList.add('hidden');
+        nodeEl.id = 'wf-node-' + node.id;
+        nodeEl.dataset.nodeId = node.id;
+        nodeEl.dataset.x = node.x || 100;
+        nodeEl.dataset.y = node.y || 100;
+
+        // Selection highlighting
+        if (selectedNodeId === node.id) {
+            nodeEl.classList.add('selected');
+            nodeEl.style.borderColor = '#2a5298';
+            nodeEl.style.boxShadow = '0 0 0 3px rgba(42, 82, 152, 0.4)';
+        } else {
+            nodeEl.classList.remove('selected');
+            nodeEl.style.borderColor = '';
+            nodeEl.style.boxShadow = '';
+        }
+
+        let process = null;
+        if (node.processId) {
+            process = processes.find(p => p.id === node.processId);
+        }
+
+        let typeClass = '';
+        let statusColor = 'default';
+        let seqLabel = '';
+        let nameLabel = node.label || 'Unnamed';
+
+        // Set type class but preserve label for start/end
+        if (node.type === 'start') {
+            typeClass = 'type-start';
+            // label will come from process or node.label
+        } else if (node.type === 'end') {
+            typeClass = 'type-end';
+        } else if (node.type === 'decision') {
+            typeClass = 'type-decision';
+            nameLabel = '⚡ Decision';
+        } else if (node.type === 'parallel') {
+            typeClass = 'type-parallel';
+            nameLabel = '📋 Parallel';
+        }
+
+        // For process-linked nodes (not decision/parallel), use process info
+        if (process && !['decision', 'parallel'].includes(node.type)) {
+            seqLabel = process.seq || '';
+            nameLabel = process.name || 'Unnamed';
+            const status = appData.businessStatuses.find(s => s.value === process.businessStatus);
+            statusColor = status ? status.color : 'default';
+        } else if (!process && !['decision', 'parallel'].includes(node.type)) {
+            // For start/end without process, keep the node's label
+            nameLabel = node.label || 'Unnamed';
+        }
+
+        if (typeClass) {
+            nodeEl.classList.add(typeClass);
+        }
+
+        const statusHtml = process ? `<span class="node-status ${statusColor}">${escapeHtml(process.businessStatus || 'Not Defined')}</span>` : '';
+        const seqDisplay = seqLabel ? `<span class="node-seq">${escapeHtml(seqLabel)}</span>` : (node.type ? `<span class="node-seq">${escapeHtml(node.type)}</span>` : '');
+
+        let decisionHtml = '';
+        if (node.type === 'decision') {
+            const decisionText = node.decisionText || 'Decision?';
+            decisionHtml = `<div class="node-decision-text">❓ ${escapeHtml(decisionText)}</div>`;
+        }
+
+        // System info: only hide for decision/parallel
+        let sysName = '';
+        let raciResponsible = '';
+        if (process) {
+            sysName = process.system?.name || '';
+            if (process.raci && process.raci.r && process.raci.r.length > 0) {
+                raciResponsible = process.raci.r.join(', ');
+            }
+        }
+        if (node.type && ['decision', 'parallel'].includes(node.type)) {
+            sysName = '';
+            raciResponsible = '';
+        }
+        const metaHtml = (sysName || raciResponsible) ? `
+            <div class="node-meta">
+                ${sysName ? `<span class="node-sysname">🖥️ ${escapeHtml(sysName)}</span>` : ''}
+                ${raciResponsible ? `<span class="node-raci">👤 ${escapeHtml(raciResponsible)}</span>` : ''}
+            </div>
+        ` : '';
+
+        // Build node HTML – NO delete button, NO toggle button
+        nodeEl.innerHTML = `
+            <div class="node-header">
+                ${seqDisplay}
+                ${statusHtml}
+            </div>
+            <div class="node-name">${escapeHtml(nameLabel)}</div>
+            ${decisionHtml}
+            ${metaHtml}
+        `;
+
+        const xPos = node.x || 100;
+        const yPos = node.y || 100;
+        nodeEl.style.left = xPos + 'px';
+        nodeEl.style.top = yPos + 'px';
+
+        if (isEdit) {
+            nodeEl.style.cursor = 'grab';
+        } else {
+            nodeEl.style.cursor = 'default';
+        }
+
+        // Click handling
+        if (isEdit) {
+            nodeEl.addEventListener('click', function(e) {
+                e.stopPropagation();
+                if (e.target.classList.contains('node-edit-btn')) return;
+                handleNodeConnectionClick(node.id);
+            });
+        }
+
+        if (!isEdit) {
+            nodeEl.addEventListener('dblclick', function(e) {
+                e.stopPropagation();
+                let processId = node.processId;
+                if (processId) {
+                    openProcessDetail(processId);
+                }
+            });
+        }
+
+        // Keep decision edit button
+        if (node.type === 'decision' && isEdit) {
+            const editBtn = document.createElement('button');
+            editBtn.className = 'node-edit-btn';
+            editBtn.textContent = '✏️';
+            editBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                editDecisionNode(node.id);
+            });
+            nodeEl.appendChild(editBtn);
+        }
+
+        nodeContainer.appendChild(nodeEl);
+    });
+
+    window.workflowNodeElements = {};
+    nodeContainer.querySelectorAll('.workflow-node').forEach(function(el) {
+        const id = el.dataset.nodeId;
+        if (id) window.workflowNodeElements[id] = el;
+    });
+
+    // Draw arrows
+    workflow.connections.forEach(function(conn) {
+        if (isConnectionHidden(conn)) {
+            return;
+        }
+        const fromEl = document.getElementById('wf-node-' + conn.from);
+        const toEl = document.getElementById('wf-node-' + conn.to);
+        if (fromEl && toEl) {
+            drawArrowSVG(
+                svgLayer,
+                fromEl,
+                toEl,
+                canvasWrapper,
+                '#475569',
+                conn.type === 'decision' ? { len: 8, gap: 4 } : undefined,
+                conn.id
+            );
+        }
+    });
+
+    window.workflowSvgLayer = svgLayer;
+
+    if (isEdit) {
+        setupWorkflowDrag(nodeContainer);
+    }
+
+    // Click on canvas background to deselect
+    canvas.addEventListener('click', function(e) {
+        if (e.target === canvas || e.target === canvasWrapper) {
+            selectedNodeId = null;
+            renderWorkflow();
+        }
+    });
+    if (isConnectingMode) {
+        canvas.classList.add('workflow-connecting');
+    } else {
+        canvas.classList.remove('workflow-connecting');
+    }
+    console.log('✅ renderWorkflow completed, nodes:', nodeContainer.querySelectorAll('.workflow-node').length);
+}
+function setupWorkflowDrag(container) {
+    if (typeof interact === 'undefined') {
+        console.warn('Interact.js not loaded');
+        return;
+    }
+
+    const nodeContainer = container || document.querySelector('.workflow-node-container');
+    if (!nodeContainer) return;
+
+    try {
+        interact('.workflow-node').unset();
+    } catch(e) {}
+
+    interact('.workflow-node').draggable({
+        inertia: false,
+        modifiers: [],
+        autoScroll: true,
+        onstart: function(event) {
+            const target = event.target;
+            target.classList.add('dragging');
+            target.style.zIndex = 100;
+        },
+        onmove: function(event) {
+            const target = event.target;
+            const scale = workflowScale;
+            const dx = event.dx / scale;
+            const dy = event.dy / scale;
+
+            const x = (parseFloat(target.dataset.x) || 100) + dx;
+            const y = (parseFloat(target.dataset.y) || 100) + dy;
+
+            target.style.left = x + 'px';
+            target.style.top = y + 'px';
+
+            target.dataset.x = x;
+            target.dataset.y = y;
+
+            const nodeId = target.dataset.nodeId;
+            const workflow = getWorkflowData();
+            const node = workflow.nodes.find(n => n.id === nodeId);
+            if (node) {
+                node.x = x;
+                node.y = y;
+            }
+
+            updateWorkflowArrows();
+        },
+        onend: function(event) {
+            const target = event.target;
+            target.classList.remove('dragging');
+            target.style.zIndex = 10;
+
+            const nodeId = target.dataset.nodeId;
+            const workflow = getWorkflowData();
+            const node = workflow.nodes.find(n => n.id === nodeId);
+            if (node) {
+                node.x = parseFloat(target.dataset.x) || 100;
+                node.y = parseFloat(target.dataset.y) || 100;
+                saveWorkflowData(workflow);
+            }
+
+            updateWorkflowArrows();
+        }
+    });
 }
 
-function closeScrapDetail() {
-  $('#scrapDetailModal').classList.add('hidden');
-  if (window._scrapImgUrl) {
-    URL.revokeObjectURL(window._scrapImgUrl);
-    window._scrapImgUrl = null;
-  }
+// ✅ Connection handling with validation
+function validateConnection(workflow, fromId, toId) {
+    if (fromId === toId) {
+        alert('❌ Cannot connect a node to itself');
+        return false;
+    }
+
+    const exists = workflow.connections.some(function(c) {
+        return (c.from === fromId && c.to === toId) ||
+               (c.from === toId && c.to === fromId);
+    });
+    if (exists) {
+        alert('⚠️ Connection already exists between these nodes');
+        return false;
+    }
+
+    function canReach(start, target, visited) {
+        if (start === target) return true;
+        if (visited.has(start)) return false;
+        visited.add(start);
+
+        const outgoing = workflow.connections.filter(c => c.from === start);
+        for (const c of outgoing) {
+            if (canReach(c.to, target, visited)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (canReach(toId, fromId, new Set())) {
+        alert('⚠️ This would create a cycle in the workflow');
+        return false;
+    }
+
+    return true;
 }
 
-// Global Event Delegation for the buttons
-document.addEventListener('click', e => {
-  const modal = $('#scrapDetailModal');
-  if (!modal || modal.classList.contains('hidden')) return;
+function handleNodeConnectionClick(nodeId) {
+    if (currentMode !== 'edit') return;
 
-  // Close if clicking the X, Cancel/Close button, or the dark background
-  if (e.target.id === 'sdClose' || e.target.id === 'sdCancel' || e.target.id === 'scrapDetailModal') {
-    closeScrapDetail();
-  }
+    // If we are NOT in connection mode, handle selection
+    if (!isConnectingMode) {
+        // Toggle selection: if already selected, deselect; else select
+        if (selectedNodeId === nodeId) {
+            selectedNodeId = null;
+        } else {
+            selectedNodeId = nodeId;
+        }
+        // Re-render to update the highlight
+        renderWorkflow();
+        return;
+    }
+
+    // --- Connection mode (isConnectingMode === true) ---
+    if (!connectionStartNode) {
+        // Start connection
+        connectionStartNode = nodeId;
+        const el = document.getElementById('wf-node-' + nodeId);
+        if (el) {
+            el.classList.add('connecting-start');
+            el.style.borderColor = '#2a5298';
+            el.style.boxShadow = '0 0 0 3px rgba(42, 82, 152, 0.4)';
+        }
+        return;
+    }
+
+    if (connectionStartNode === nodeId) {
+        // Cancel connection
+        const el = document.getElementById('wf-node-' + nodeId);
+        if (el) {
+            el.classList.remove('connecting-start');
+            el.style.borderColor = '';
+            el.style.boxShadow = '';
+        }
+        connectionStartNode = null;
+        return;
+    }
+
+    const workflow = getWorkflowData();
+
+    if (!validateConnection(workflow, connectionStartNode, nodeId)) {
+        const el = document.getElementById('wf-node-' + connectionStartNode);
+        if (el) {
+            el.classList.remove('connecting-start');
+            el.style.borderColor = '';
+            el.style.boxShadow = '';
+        }
+        connectionStartNode = null;
+        return;
+    }
+
+    const label = prompt('Enter arrow description (optional):', '');
+    const connId = 'conn-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6);
+    workflow.connections.push({
+        id: connId,
+        from: connectionStartNode,
+        to: nodeId,
+        type: 'arrow',
+        label: label && label.trim() ? label.trim() : undefined
+    });
+
+    saveWorkflowData(workflow);
+
+    // Clear connection start highlight
+    const el1 = document.getElementById('wf-node-' + connectionStartNode);
+    if (el1) {
+        el1.classList.remove('connecting-start');
+        el1.style.borderColor = '';
+        el1.style.boxShadow = '';
+    }
+    connectionStartNode = null;
+    renderWorkflow();
+}
+// ✅ Use connection ID instead of index
+function drawArrowSVG(svg, fromEl, toEl, wrapper, color, dash, connectionId) {
+    if (!fromEl || !toEl || !wrapper) return;
+
+    const fromRect = fromEl.getBoundingClientRect();
+    const toRect = toEl.getBoundingClientRect();
+    const wrapperRect = wrapper.getBoundingClientRect();
+
+    const fromX = fromRect.left + fromRect.width / 2 - wrapperRect.left;
+    const fromY = fromRect.top + fromRect.height / 2 - wrapperRect.top;
+    const toX = toRect.left + toRect.width / 2 - wrapperRect.left;
+    const toY = toRect.top + toRect.height / 2 - wrapperRect.top;
+
+    const dx = toX - fromX;
+    const dy = toY - fromY;
+
+    let startX = fromX;
+    let startY = fromY;
+    let endX = toX;
+    let endY = toY;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+        if (dx > 0) {
+            startX = fromRect.right - wrapperRect.left;
+            endX = toRect.left - wrapperRect.left;
+        } else {
+            startX = fromRect.left - wrapperRect.left;
+            endX = toRect.right - wrapperRect.left;
+        }
+        startY = fromRect.top + fromRect.height / 2 - wrapperRect.top;
+        endY = toRect.top + toRect.height / 2 - wrapperRect.top;
+    } else {
+        if (dy > 0) {
+            startY = fromRect.bottom - wrapperRect.top;
+            endY = toRect.top - wrapperRect.top;
+        } else {
+            startY = fromRect.top - wrapperRect.top;
+            endY = toRect.bottom - wrapperRect.top;
+        }
+        startX = fromRect.left + fromRect.width / 2 - wrapperRect.left;
+        endX = toRect.left + toRect.width / 2 - wrapperRect.left;
+    }
+
+    const offsetX = Math.abs(endX - startX) * 0.3;
+    const offsetY = Math.abs(endY - startY) * 0.3;
+
+    let pathData = '';
+    if (Math.abs(dx) > Math.abs(dy)) {
+        const cp1x = startX + offsetX * (dx > 0 ? 1 : -1);
+        const cp2x = endX - offsetX * (dx > 0 ? 1 : -1);
+        pathData = `M ${startX} ${startY} C ${cp1x} ${startY}, ${cp2x} ${endY}, ${endX} ${endY}`;
+    } else {
+        const cp1y = startY + offsetY * (dy > 0 ? 1 : -1);
+        const cp2y = endY - offsetY * (dy > 0 ? 1 : -1);
+        pathData = `M ${startX} ${startY} C ${startX} ${cp1y}, ${endX} ${cp2y}, ${endX} ${endY}`;
+    }
+
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'workflow-arrow-group');
+    g.dataset.connectionId = connectionId;
+    g.style.cursor = 'pointer';
+    g.style.pointerEvents = 'all';
+    g.style.zIndex = '1000';
+
+    if (selectedArrowIndex !== null && selectedArrowIndex === connectionId) {
+        g.classList.add('selected');
+    }
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', pathData);
+    path.setAttribute('stroke', color || '#475569');
+    path.setAttribute('stroke-width', '2.5');
+    path.setAttribute('fill', 'none');
+    if (dash) {
+        path.setAttribute('stroke-dasharray', dash.len + ',' + dash.gap);
+    }
+    path.setAttribute('class', 'workflow-arrow-line');
+    g.appendChild(path);
+
+    const angle = Math.atan2(endY - startY, endX - startX);
+    const headLen = 10;
+    const headAngle = Math.PI / 6;
+
+    const arrowHead = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    const tipX = endX;
+    const tipY = endY;
+    const leftX = endX - headLen * Math.cos(angle - headAngle);
+    const leftY = endY - headLen * Math.sin(angle - headAngle);
+    const rightX = endX - headLen * Math.cos(angle + headAngle);
+    const rightY = endY - headLen * Math.sin(angle + headAngle);
+
+    arrowHead.setAttribute('points', `${tipX},${tipY} ${leftX},${leftY} ${rightX},${rightY}`);
+    arrowHead.setAttribute('fill', color || '#475569');
+    arrowHead.setAttribute('class', 'workflow-arrow-head');
+    g.appendChild(arrowHead);
+
+    // --- Add interactive hit area (if in edit mode) ---
+    if (currentMode === 'edit') {
+        const hitArea = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        hitArea.setAttribute('d', pathData);
+        hitArea.setAttribute('stroke', 'transparent');
+        hitArea.setAttribute('stroke-width', '15');
+        hitArea.setAttribute('fill', 'none');
+        hitArea.setAttribute('class', 'workflow-arrow-hit');
+        hitArea.style.pointerEvents = 'all';
+        g.appendChild(hitArea);
+
+        g.addEventListener('click', function(e) {
+            e.stopPropagation();
+            e.preventDefault();
+
+            const connId = this.dataset.connectionId;
+            if (!connId) return;
+
+            if (selectedArrowIndex === connId) {
+                selectedArrowIndex = null;
+                renderWorkflow();
+                return;
+            }
+
+            selectedArrowIndex = connId;
+            renderWorkflow();
+
+            setTimeout(function() {
+                if (selectedArrowIndex === connId) {
+                    if (confirm('Delete this arrow?')) {
+                        deleteWorkflowConnection(connId);
+                        selectedArrowIndex = null;
+                    } else {
+                        if (confirm('Edit arrow label instead?')) {
+                            editWorkflowConnectionLabel(connId);
+                            selectedArrowIndex = null;
+                        } else {
+                            selectedArrowIndex = null;
+                            renderWorkflow();
+                        }
+                    }
+                }
+            }, 300);
+        });
+
+        g.addEventListener('dblclick', function(e) {
+            e.stopPropagation();
+            const connId = this.dataset.connectionId;
+            if (connId) {
+                editWorkflowConnectionLabel(connId);
+                selectedArrowIndex = null;
+            }
+        });
+
+        g.addEventListener('mouseenter', function() {
+            if (!this.classList.contains('selected')) {
+                this.querySelector('.workflow-arrow-line').setAttribute('stroke', '#8b5cf6');
+                this.querySelector('.workflow-arrow-head').setAttribute('fill', '#8b5cf6');
+            }
+        });
+
+        g.addEventListener('mouseleave', function() {
+            if (!this.classList.contains('selected')) {
+                this.querySelector('.workflow-arrow-line').setAttribute('stroke', color || '#475569');
+                this.querySelector('.workflow-arrow-head').setAttribute('fill', color || '#475569');
+            }
+        });
+    }
+
+    // --- Add label with background (improved readability) ---
+    if (connectionId) {
+        const workflow = getWorkflowData();
+        const conn = workflow.connections.find(c => c.id === connectionId);
+        if (conn && conn.label) {
+            const midX = (startX + endX) / 2;
+            const midY = (startY + endY) / 2 - 20; // offset above the line
+
+            // Create a group for label + background
+            const labelGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            labelGroup.setAttribute('class', 'workflow-arrow-label-group');
+
+            // Rough text size estimation
+            const fontSize = 11;
+            const text = conn.label || '';
+            const textLength = text.length * fontSize * 0.6; // approximate width
+            const textHeight = fontSize * 1.2;
+
+            // Background rectangle
+            const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('x', midX - textLength/2 - 6);
+            rect.setAttribute('y', midY - textHeight/2 - 3);
+            rect.setAttribute('width', textLength + 12);
+            rect.setAttribute('height', textHeight + 6);
+            rect.setAttribute('fill', 'white');
+            rect.setAttribute('rx', '4');
+            rect.setAttribute('ry', '4');
+            rect.setAttribute('opacity', '0.92');
+            rect.setAttribute('stroke', '#e2e8f0');
+            rect.setAttribute('stroke-width', '0.5');
+            labelGroup.appendChild(rect);
+
+            // Label text
+            const textEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            textEl.setAttribute('x', midX);
+            textEl.setAttribute('y', midY + fontSize * 0.35); // adjust baseline
+            textEl.setAttribute('text-anchor', 'middle');
+            textEl.setAttribute('font-size', fontSize);
+            textEl.setAttribute('fill', '#475569');
+            textEl.setAttribute('font-weight', '500');
+            textEl.setAttribute('class', 'workflow-arrow-label');
+            textEl.textContent = conn.label;
+            labelGroup.appendChild(textEl);
+
+            g.appendChild(labelGroup);
+        }
+    }
+
+    svg.appendChild(g);
+}
+// ✅ Delete connection by ID
+function deleteWorkflowConnection(connectionId) {
+    if (currentMode !== 'edit') return;
+    if (!confirm('Delete this connection?')) return;
+
+    const workflow = getWorkflowData();
+    const idx = workflow.connections.findIndex(c => c.id === connectionId);
+    if (idx !== -1) {
+        workflow.connections.splice(idx, 1);
+        saveWorkflowData(workflow);
+        renderWorkflow();
+    }
+}
+
+// ✅ Edit connection label by ID
+function editWorkflowConnectionLabel(connectionId) {
+    if (currentMode !== 'edit') return;
+
+    const workflow = getWorkflowData();
+    const conn = workflow.connections.find(c => c.id === connectionId);
+    if (!conn) return;
+
+    const currentLabel = conn.label || '';
+    const newLabel = prompt('Enter arrow description:', currentLabel);
+    if (newLabel !== null) {
+        conn.label = newLabel.trim() || undefined;
+        saveWorkflowData(workflow);
+        renderWorkflow();
+    }
+}
+
+function deleteWorkflowNode(nodeId) {
+    if (currentMode !== 'edit') return;
+    if (!confirm('Delete this workflow node?')) return;
+
+    const workflow = getWorkflowData();
+    workflow.nodes = workflow.nodes.filter(n => n.id !== nodeId);
+    workflow.connections = workflow.connections.filter(c => c.from !== nodeId && c.to !== nodeId);
+    saveWorkflowData(workflow);
+    renderWorkflow();
+}
+
+function toggleWorkflowNodeVisibility(nodeId) {
+    if (currentMode !== 'edit') return;
+
+    const workflow = getWorkflowData();
+    const node = workflow.nodes.find(n => n.id === nodeId);
+    if (!node) return;
+
+    node.hidden = !node.hidden;
+
+    if (node.hidden) {
+        const connected = workflow.connections.filter(c => c.from === nodeId || c.to === nodeId);
+        if (connected.length > 0) {
+            if (confirm(`Hide "${node.label || node.type || 'Node'}"?\n\nThis will remove ${connected.length} connected arrow(s).`)) {
+                workflow.connections = workflow.connections.filter(c => c.from !== nodeId && c.to !== nodeId);
+            } else {
+                node.hidden = false;
+                saveWorkflowData(workflow);
+                renderWorkflow();
+                return;
+            }
+        }
+    }
+
+    saveWorkflowData(workflow);
+    renderWorkflow();
+}
+
+function isConnectionHidden(conn) {
+    const workflow = getWorkflowData();
+    const fromNode = workflow.nodes.find(n => n.id === conn.from);
+    const toNode = workflow.nodes.find(n => n.id === conn.to);
+    return (fromNode && fromNode.hidden) || (toNode && toNode.hidden);
+}
+
+function editDecisionNode(nodeId) {
+    if (currentMode !== 'edit') return;
+
+    const workflow = getWorkflowData();
+    const node = workflow.nodes.find(n => n.id === nodeId);
+    if (!node || node.type !== 'decision') return;
+
+    const currentText = node.decisionText || '';
+    const newText = prompt('Enter decision description:', currentText);
+    if (newText !== null) {
+        node.decisionText = newText.trim() || 'Decision?';
+        saveWorkflowData(workflow);
+        renderWorkflow();
+    }
+}
+
+function clearWorkflowArrows() {
+    if (!confirm('Clear all connections?')) return;
+    const workflow = getWorkflowData();
+    workflow.connections = [];
+    saveWorkflowData(workflow);
+    renderWorkflow();
+}
+
+function clearAllWorkflow() {
+    if (!confirm('Clear ALL workflow nodes and connections?')) return;
+    const workflow = getWorkflowData();
+    workflow.nodes = [];
+    workflow.connections = [];
+    saveWorkflowData(workflow);
+    renderWorkflow();
+}
+
+function autoLayoutWorkflow() {
+    const workflow = getWorkflowData();
+    if (workflow.nodes.length === 0) return;
+
+    // Hierarchical layout
+    const adj = {};
+    workflow.nodes.forEach(function(n) { adj[n.id] = []; });
+    workflow.connections.forEach(function(c) {
+        if (adj[c.from]) adj[c.from].push(c.to);
+    });
+
+    const hasIncoming = new Set();
+    workflow.connections.forEach(function(c) { hasIncoming.add(c.to); });
+    const roots = workflow.nodes.filter(function(n) { return !hasIncoming.has(n.id); });
+
+    if (roots.length === 0) {
+        // Fallback to grid
+        const cols = Math.ceil(Math.sqrt(workflow.nodes.length));
+        const spacingX = 160;
+        const spacingY = 110;
+        const startX = 50;
+        const startY = 50;
+        workflow.nodes.forEach(function(node, index) {
+            const col = index % cols;
+            const row = Math.floor(index / cols);
+            node.x = startX + col * spacingX;
+            node.y = startY + row * spacingY;
+        });
+        saveWorkflowData(workflow);
+        renderWorkflow();
+        return;
+    }
+
+    const levels = {};
+    const visited = new Set();
+    let queue = roots.map(function(r) { return { id: r.id, level: 0 }; });
+
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (visited.has(current.id)) continue;
+        visited.add(current.id);
+        levels[current.id] = current.level;
+
+        const children = adj[current.id] || [];
+        for (const child of children) {
+            if (!visited.has(child)) {
+                queue.push({ id: child, level: current.level + 1 });
+            }
+        }
+    }
+
+    workflow.nodes.forEach(function(n) {
+        if (!visited.has(n.id)) {
+            levels[n.id] = 0;
+        }
+    });
+
+    const levelGroups = {};
+    workflow.nodes.forEach(function(n) {
+        const l = levels[n.id] || 0;
+        if (!levelGroups[l]) levelGroups[l] = [];
+        levelGroups[l].push(n);
+    });
+
+    const levelKeys = Object.keys(levelGroups).map(Number).sort((a, b) => a - b);
+    const spacingX = 160;
+    const spacingY = 140;
+    const startX = 50;
+    const startY = 50;
+
+    levelKeys.forEach(function(level, lIdx) {
+        const nodes = levelGroups[level];
+        const totalHeight = (nodes.length - 1) * spacingY;
+        const startYOffset = -totalHeight / 2;
+
+        nodes.forEach(function(node, idx) {
+            node.x = startX + lIdx * spacingX;
+            node.y = startY + startYOffset + idx * spacingY + 50;
+        });
+    });
+
+    saveWorkflowData(workflow);
+    renderWorkflow();
+}
+
+// ============================
+// 27. Workflow Event Binding
+// ============================
+
+function bindWorkflowEvents() {
+    if (workflowEventsBound) {
+        resetConnectionState();
+        return;
+    }
+    workflowEventsBound = true;
+    const wfSyncNodesBtn = document.getElementById('wfSyncNodesBtn');
+    const wfConnectBtn = document.getElementById('wfConnectBtn');
+    const wfClearArrowsBtn = document.getElementById('wfClearArrowsBtn');
+    const wfClearAllBtn = document.getElementById('wfClearAllBtn');
+    const wfAutoLayoutBtn = document.getElementById('wfAutoLayoutBtn');
+    const wfZoomIn = document.getElementById('wfZoomIn');
+    const wfZoomOut = document.getElementById('wfZoomOut');
+    const wfResetView = document.getElementById('wfResetView');
+    
+    if (wfSyncNodesBtn) {
+        wfSyncNodesBtn.addEventListener('click', function() {
+            syncNodesForCurrentScenario();
+        });
+    }
+    if (wfConnectBtn) {
+        wfConnectBtn.addEventListener('click', function() {
+            // Toggle connection mode
+            isConnectingMode = !isConnectingMode;
+            if (isConnectingMode) {
+                connectionStartNode = null;
+                this.classList.add('active');
+                this.textContent = '🔗 Cancel Connection';
+                alert('💡 Connection mode enabled. Click a node to start, then click another node to connect. Click this button again to cancel.');
+            } else {
+                this.classList.remove('active');
+                this.textContent = '🔗 Start to Connect';
+                // Reset connection state
+                if (connectionStartNode) {
+                    const el = document.getElementById('wf-node-' + connectionStartNode);
+                    if (el) {
+                        el.classList.remove('connecting-start');
+                        el.style.borderColor = '';
+                        el.style.boxShadow = '';
+                    }
+                    connectionStartNode = null;
+                }
+                // Deselect any selected node? Not necessary.
+            }
+            renderWorkflow();
+        });
+    }
+    
+    if (wfClearArrowsBtn) {
+        wfClearArrowsBtn.addEventListener('click', clearWorkflowArrows);
+    }
+    if (wfClearAllBtn) {
+        wfClearAllBtn.addEventListener('click', clearAllWorkflow);
+    }
+    if (wfAutoLayoutBtn) {
+        wfAutoLayoutBtn.addEventListener('click', autoLayoutWorkflow);
+    }
+    if (wfZoomIn) {
+        wfZoomIn.addEventListener('click', function() {
+            workflowScale = Math.min(workflowScale + 0.1, 2);
+            renderWorkflow();
+        });
+    }
+    if (wfZoomOut) {
+        wfZoomOut.addEventListener('click', function() {
+            workflowScale = Math.max(workflowScale - 0.1, 0.5);
+            renderWorkflow();
+        });
+    }
+    if (wfResetView) {
+        wfResetView.addEventListener('click', function() {
+            workflowScale = 1;
+            renderWorkflow();
+        });
+    }
+    const wfMarkStartBtn = document.getElementById('wfMarkStartBtn');
+    const wfMarkEndBtn = document.getElementById('wfMarkEndBtn');
+    
+    if (wfMarkStartBtn) {
+        wfMarkStartBtn.addEventListener('click', function() {
+            if (!selectedNodeId) {
+                alert('Please select a node first (click on it).');
+                return;
+            }
+            toggleNodeType(selectedNodeId, 'start');
+        });
+    }
+    
+    if (wfMarkEndBtn) {
+        wfMarkEndBtn.addEventListener('click', function() {
+            if (!selectedNodeId) {
+                alert('Please select a node first (click on it).');
+                return;
+            }
+            toggleNodeType(selectedNodeId, 'end');
+        });
+    }
+    // ===== NEW: Delete Node =====
+    const wfDeleteNodeBtn = document.getElementById('wfDeleteNodeBtn');
+    if (wfDeleteNodeBtn) {
+        wfDeleteNodeBtn.addEventListener('click', function() {
+            if (!selectedNodeId) {
+                alert('Please select a node first (click on it).');
+                return;
+            }
+            if (confirm('Delete the selected workflow node?')) {
+                deleteWorkflowNode(selectedNodeId);
+                selectedNodeId = null; // clear selection
+            }
+        });
+    }
+    
+    // ===== NEW: Hide/Unhide Node =====
+    const wfToggleHideBtn = document.getElementById('wfToggleHideBtn');
+    if (wfToggleHideBtn) {
+        wfToggleHideBtn.addEventListener('click', function() {
+            if (!selectedNodeId) {
+                alert('Please select a node first (click on it).');
+                return;
+            }
+            toggleWorkflowNodeVisibility(selectedNodeId);
+            // Keep selection on the node (it stays selected)
+        });
+    }
+
+
+    
+    resetConnectionState();
+}
+
+function resetConnectionState() {
+    if (connectionStartNode) {
+        const el = document.getElementById('wf-node-' + connectionStartNode);
+        if (el) {
+            el.classList.remove('connecting-start');
+            el.style.borderColor = '';
+            el.style.boxShadow = '';
+        }
+        connectionStartNode = null;
+    }
+    document.querySelectorAll('.workflow-node.connecting-start').forEach(el => {
+        el.classList.remove('connecting-start');
+        el.style.borderColor = '';
+        el.style.boxShadow = '';
+    });
+}
+
+// ============================
+// 24. Page Startup
+// ============================
+
+console.log('🚀 Starting app...');
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('📄 DOMContentLoaded event');
+    // No token prompt on load – just load data in read‑only mode.
+    loadData();
 });
-async function reloadScrapImageFolderFromHandle(handle) {
-  if (!handle) return;
-  let perm = await handle.queryPermission({ mode: 'read' });
-  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
-  if (perm !== 'granted') return;
-  
-  STATE.scrapAnalysis.imageFolderHandle = handle;
-  renderScrapAnalysis(); // Re-render so links turn blue
-}
-window.MRP = STATE;
+
+
+// ============================
+// 25. Expose Global Functions
+// ============================
+
+window.toggleCollapse = toggleCollapse;
+window.openProcessDetail = openProcessDetail;
+window.saveDataToGitHub = saveDataToGitHub;
+window.setupToken = showTokenSetup;
+window.loadData = loadData;
+window.renderApp = renderApp;
+
+console.log('✅ app.js initialization complete');
